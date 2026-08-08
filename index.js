@@ -315,7 +315,7 @@ function parseDataFromHTML(html) {
             const weapon = extractMainHandFromRow($, row);
 
             if (cells.length > Math.max(killIndex, deathIndex)) {
-                const name = nameIndex !== -1 ? cells[nameIndex] : '';
+                const name = nameIndex !== -1 ? cells[nameIndex] : (cells[0] || '');
                 const guildName = guildIndex !== -1 ? cells[guildIndex] : '';
 
                 const kills = parseInt((cells[killIndex] || '0').replace(/[^\d-]/g, ''), 10) || 0;
@@ -326,7 +326,7 @@ function parseDataFromHTML(html) {
                 let fame = 0;
                 if (fameIndex !== -1 && cells[fameIndex]) fame = parseFameValue(cells[fameIndex]);
 
-                if (name && killIndex !== -1 && deathIndex !== -1) {
+                if (name && (killIndex !== -1 || deathIndex !== -1)) {
                     players.push({ name, guild: guildName, kills, deaths, fame, damage, healing, weapon });
                 }
 
@@ -347,69 +347,57 @@ function parseNextData(html) {
     try { return JSON.parse(script); } catch (error) { return null; }
 }
 
-function findTimeInNextData(obj) {
-    if (!obj || typeof obj !== 'object') return null;
-    const timeKeys = ['startTime', 'endTime', 'time', 'timestamp', 'date', 'createdAt'];
-    for (const key of Object.keys(obj)) {
-        if (timeKeys.includes(key) && obj[key]) return obj[key];
-        if (typeof obj[key] === 'object') {
-            const found = findTimeInNextData(obj[key]);
-            if (found) return found;
+function extractStructuredDataFromNextData(nextData) {
+    let players = [];
+    let guilds = [];
+    let battleTime = null;
+
+    if (!nextData || !nextData.props || !nextData.props.pageProps) {
+        return { players, guilds, battleTime };
+    }
+
+    const pageProps = nextData.props.pageProps;
+    const battle = pageProps.battle || pageProps.initialBattleData || pageProps.data;
+
+    if (battle) {
+        battleTime = battle.startTime || battle.endTime || battle.time || battle.createdAt || battle.timestamp || null;
+
+        if (battle.players && typeof battle.players === 'object') {
+            const pList = Array.isArray(battle.players) ? battle.players : Object.values(battle.players);
+            pList.forEach(p => {
+                const name = p.name || p.Name || p.playerName;
+                if (name) {
+                    players.push({
+                        name: name,
+                        guild: p.guildName || p.GuildName || p.guild || p.Guild || '',
+                        kills: Number(p.kills || p.Kills || 0),
+                        deaths: Number(p.deaths || p.Deaths || 0),
+                        fame: parseFameValue(p.killFame || p.killfame || p.fame || p.Fame || 0),
+                        damage: parseFameValue(p.damage || p.Damage || p.totalDamage || 0),
+                        healing: parseFameValue(p.healing || p.Healing || p.totalHealing || 0),
+                        weapon: extractMainHandFromObject(p)
+                    });
+                }
+            });
+        }
+
+        if (battle.guilds && typeof battle.guilds === 'object') {
+            const gList = Array.isArray(battle.guilds) ? battle.guilds : Object.values(battle.guilds);
+            gList.forEach(g => {
+                const gName = g.name || g.Name || g.guildName;
+                if (gName) {
+                    guilds.push({
+                        name: gName,
+                        kills: Number(g.kills || g.Kills || 0),
+                        deaths: Number(g.deaths || g.Deaths || 0),
+                        fame: parseFameValue(g.killFame || g.fame || 0)
+                    });
+                }
+            });
         }
     }
-    return null;
-}
 
-function findRecursive(obj, targetPlayersSet, targetGuildsSet, playerResults, guildResults, allPlayers) {
-    if (!obj) return;
-    if (Array.isArray(obj)) {
-        for (const item of obj) findRecursive(item, targetPlayersSet, targetGuildsSet, playerResults, guildResults, allPlayers);
-        return;
-    }
-    if (typeof obj !== 'object') return;
-
-    const name = obj.name ?? obj.Name ?? obj.playerName ?? obj.PlayerName;
-    const guildName = obj.guildName ?? obj.GuildName ?? obj.guild ?? obj.Guild;
-
-    const kills = Number(obj.kills ?? obj.Kills ?? obj.kill ?? obj.Kill ?? 0);
-    const deaths = Number(obj.deaths ?? obj.Deaths ?? obj.death ?? obj.Death ?? 0);
-    const fame = parseFameValue(obj.killFame ?? obj.killfame ?? obj.fame ?? obj.Fame ?? obj.KillFame ?? 0);
-    const damage = parseFameValue(obj.damage ?? obj.Damage ?? obj.totalDamage ?? 0);
-    const healing = parseFameValue(obj.healing ?? obj.Healing ?? obj.totalHealing ?? 0);
-    const weapon = extractMainHandFromObject(obj);
-
-    if (typeof name === 'string' && name.length > 0) {
-        const pObj = {
-            name,
-            guild: typeof guildName === 'string' ? guildName : '',
-            kills: Number.isFinite(kills) ? kills : 0,
-            deaths: Number.isFinite(deaths) ? deaths : 0,
-            fame: Number.isFinite(fame) ? fame : 0,
-            damage: Number.isFinite(damage) ? damage : 0,
-            healing: Number.isFinite(healing) ? healing : 0,
-            weapon
-        };
-        allPlayers.push(pObj);
-
-        if (targetPlayersSet.has(name.toLowerCase()) || (typeof guildName === 'string' && targetGuildsSet.has(guildName.toLowerCase()))) {
-            playerResults.push(pObj);
-        }
-    }
-
-    if (typeof guildName === 'string' && targetGuildsSet.has(guildName.toLowerCase())) {
-        guildResults.push({
-            name: guildName,
-            kills: Number.isFinite(kills) ? kills : 0,
-            deaths: Number.isFinite(deaths) ? deaths : 0,
-            fame: Number.isFinite(fame) ? fame : 0
-        });
-    }
-
-    for (const key of Object.keys(obj)) {
-        if (obj[key] && typeof obj[key] === 'object') {
-            findRecursive(obj[key], targetPlayersSet, targetGuildsSet, playerResults, guildResults, allPlayers);
-        }
-    }
+    return { players, guilds, battleTime };
 }
 
 async function fetchOfficialBattle(matchId) {
@@ -526,109 +514,62 @@ async function processBattleReport(inputUrlOrId, targetContext, isMessage = fals
 
         if (!matchId) throw new Error('Match ID ว่าง');
 
-        const playerStatsMap = {};
-        targetPlayers.forEach(p => {
-            playerStatsMap[p.toLowerCase()] = { displayName: p, kills: 0, deaths: 0, fame: 0, damage: 0, healing: 0, weapon: '' };
-        });
-
-        const guildStatsMap = {};
-        targetGuilds.forEach(g => {
-            guildStatsMap[g.toLowerCase()] = { displayName: g, kills: 0, deaths: 0, fame: 0 };
-        });
-
+        const playerMap = new Map();
+        const targetPlayersSet = new Set(targetPlayers.map(p => p.toLowerCase()));
         const targetGuildsSet = new Set(targetGuilds.map(g => g.toLowerCase()));
+
         let allPlayersList = [];
-        let foundAnyData = false;
         let rawBattleTime = null;
-
-        const addOrUpdatePlayerStat = (p) => {
-            const pKey = p.name.toLowerCase();
-            if (!playerStatsMap[pKey]) {
-                playerStatsMap[pKey] = { displayName: p.name, kills: 0, deaths: 0, fame: 0, damage: 0, healing: 0, weapon: '' };
-            }
-
-            playerStatsMap[pKey].kills += p.kills;
-            playerStatsMap[pKey].deaths += p.deaths;
-            playerStatsMap[pKey].fame += p.fame;
-            playerStatsMap[pKey].damage += p.damage;
-            playerStatsMap[pKey].healing += p.healing;
-
-            if (p.weapon && isWeaponItemId(p.weapon)) {
-                playerStatsMap[pKey].weapon = normalizeAlbionItemId(p.weapon);
-            }
-            foundAnyData = true;
-        };
 
         const html = await fetchAlbionBBPage(matchId);
 
         if (html) {
-            const parsedHTML = parseDataFromHTML(html);
-            if (parsedHTML.battleTime) rawBattleTime = parsedHTML.battleTime;
+            const nextData = parseNextData(html);
+            if (nextData) {
+                const structured = extractStructuredDataFromNextData(nextData);
+                if (structured.battleTime) rawBattleTime = structured.battleTime;
 
-            for (const p of parsedHTML.players) {
-                allPlayersList.push(p);
+                structured.players.forEach(p => {
+                    allPlayersList.push(p);
+                    const pKey = p.name.toLowerCase();
+                    const gKey = p.guild ? p.guild.toLowerCase() : '';
+
+                    if (targetPlayersSet.has(pKey) || (gKey && targetGuildsSet.has(gKey))) {
+                        if (!playerMap.has(pKey)) {
+                            playerMap.set(pKey, p);
+                        } else {
+                            const existing = playerMap.get(pKey);
+                            existing.kills += p.kills;
+                            existing.deaths += p.deaths;
+                            existing.fame += p.fame;
+                            existing.damage = Math.max(existing.damage, p.damage);
+                            existing.healing = Math.max(existing.healing, p.healing);
+                            if (p.weapon && !existing.weapon) existing.weapon = p.weapon;
+                        }
+                    }
+                });
+            }
+
+            const parsedHTML = parseDataFromHTML(html);
+            if (!rawBattleTime && parsedHTML.battleTime) rawBattleTime = parsedHTML.battleTime;
+
+            parsedHTML.players.forEach(p => {
                 const pKey = p.name.toLowerCase();
                 const gKey = p.guild ? p.guild.toLowerCase() : '';
 
-                if (playerStatsMap[pKey] || (gKey && targetGuildsSet.has(gKey))) {
-                    addOrUpdatePlayerStat(p);
-                }
-
-                if (gKey && guildStatsMap[gKey]) {
-                    guildStatsMap[gKey].kills += p.kills;
-                    guildStatsMap[gKey].deaths += p.deaths;
-                    guildStatsMap[gKey].fame += p.fame;
-                    foundAnyData = true;
-                }
-            }
-
-            const nextData = parseNextData(html);
-            if (nextData) {
-                if (!rawBattleTime) rawBattleTime = findTimeInNextData(nextData);
-                const recPlayers = [];
-                const recGuilds = [];
-                const targetPlayersSet = new Set(targetPlayers.map(p => p.toLowerCase()));
-
-                findRecursive(nextData, targetPlayersSet, targetGuildsSet, recPlayers, recGuilds, allPlayersList);
-
-                for (const p of recPlayers) {
-                    const pKey = p.name.toLowerCase();
-                    const gKey = p.guild ? p.guild.toLowerCase() : '';
-                    if (playerStatsMap[pKey] || (gKey && targetGuildsSet.has(gKey))) {
-                        addOrUpdatePlayerStat(p);
+                if (targetPlayersSet.has(pKey) || (gKey && targetGuildsSet.has(gKey))) {
+                    if (!playerMap.has(pKey)) {
+                        playerMap.set(pKey, p);
+                        allPlayersList.push(p);
                     }
                 }
-
-                for (const g of recGuilds) {
-                    const gKey = g.name.toLowerCase();
-                    if (guildStatsMap[gKey]) {
-                        guildStatsMap[gKey].kills += g.kills;
-                        guildStatsMap[gKey].deaths += g.deaths;
-                        guildStatsMap[gKey].fame += g.fame;
-                        foundAnyData = true;
-                    }
-                }
-            }
+            });
         }
 
-        if (!foundAnyData && /^\d+$/.test(matchId)) {
+        if (playerMap.size === 0 && /^\d+$/.test(matchId)) {
             const apiData = await fetchOfficialBattle(matchId);
             if (apiData) {
                 if (apiData.startTime || apiData.endTime) rawBattleTime = apiData.startTime || apiData.endTime;
-                if (apiData.guilds) {
-                    const gList = Array.isArray(apiData.guilds) ? apiData.guilds : Object.values(apiData.guilds);
-                    for (const g of gList) {
-                        const gName = String(g.name || g.Name || '');
-                        const gKey = gName.toLowerCase();
-                        if (guildStatsMap[gKey]) {
-                            guildStatsMap[gKey].kills += Number(g.kills || 0);
-                            guildStatsMap[gKey].deaths += Number(g.deaths || 0);
-                            guildStatsMap[gKey].fame += parseFameValue(g.killFame || g.fame || 0);
-                            foundAnyData = true;
-                        }
-                    }
-                }
-
                 if (apiData.players) {
                     const pList = Array.isArray(apiData.players) ? apiData.players : Object.values(apiData.players);
                     for (const p of pList) {
@@ -651,8 +592,8 @@ async function processBattleReport(inputUrlOrId, targetContext, isMessage = fals
                         const pKey = pName.toLowerCase();
                         const gKey = pGuild.toLowerCase();
 
-                        if (playerStatsMap[pKey] || (gKey && targetGuildsSet.has(gKey))) {
-                            addOrUpdatePlayerStat(pObj);
+                        if (targetPlayersSet.has(pKey) || (gKey && targetGuildsSet.has(gKey))) {
+                            if (!playerMap.has(pKey)) playerMap.set(pKey, pObj);
                         }
                     }
                 }
@@ -679,32 +620,36 @@ async function processBattleReport(inputUrlOrId, targetContext, isMessage = fals
         let totalDeaths = 0;
         let totalFame = 0;
 
-        const sortedPlayerStats = Object.values(playerStatsMap).sort((a, b) => {
+        const sortedPlayerStats = Array.from(playerMap.values()).sort((a, b) => {
             if (b.fame !== a.fame) return b.fame - a.fame;
             return b.kills - a.kills;
         });
 
-        sortedPlayerStats.forEach(data => {
-            const player = data.displayName;
-            const kills = data.kills;
-            const deaths = data.deaths;
-            const fame = data.fame;
+        if (sortedPlayerStats.length === 0) {
+            reportText += `\x1b[1;30m${centerString('ไม่พบสมาชิกหรือกิลด์ที่ติดตามในไฟต์นี้', 50)}\x1b[0m\n`;
+        } else {
+            sortedPlayerStats.forEach(data => {
+                const player = data.name;
+                const kills = data.kills;
+                const deaths = data.deaths;
+                const fame = data.fame;
 
-            totalKills += kills;
-            totalDeaths += deaths;
-            totalFame += fame;
+                totalKills += kills;
+                totalDeaths += deaths;
+                totalFame += fame;
 
-            const paddedName = player.substring(0, colWidths.name - 1).padEnd(colWidths.name, ' ');
-            const paddedKills = centerString(kills, colWidths.kills);
-            const paddedDeaths = centerString(deaths, colWidths.deaths);
-            const paddedFame = centerString(formatFame(fame), colWidths.fame);
+                const paddedName = player.substring(0, colWidths.name - 1).padEnd(colWidths.name, ' ');
+                const paddedKills = centerString(kills, colWidths.kills);
+                const paddedDeaths = centerString(deaths, colWidths.deaths);
+                const paddedFame = centerString(formatFame(fame), colWidths.fame);
 
-            const killText = kills > 0 ? `\x1b[32m${paddedKills}\x1b[0m` : `\x1b[30m${paddedKills}\x1b[0m`;
-            const deathText = deaths > 0 ? `\x1b[31m${paddedDeaths}\x1b[0m` : `\x1b[30m${paddedDeaths}\x1b[0m`;
-            const fameText = fame > 0 ? `\x1b[33m${paddedFame}\x1b[0m` : `\x1b[30m${paddedFame}\x1b[0m`;
+                const killText = kills > 0 ? `\x1b[32m${paddedKills}\x1b[0m` : `\x1b[30m${paddedKills}\x1b[0m`;
+                const deathText = deaths > 0 ? `\x1b[31m${paddedDeaths}\x1b[0m` : `\x1b[30m${paddedDeaths}\x1b[0m`;
+                const fameText = fame > 0 ? `\x1b[33m${paddedFame}\x1b[0m` : `\x1b[30m${paddedFame}\x1b[0m`;
 
-            reportText += `${paddedName}${killText}${deathText}${fameText}\n`;
-        });
+                reportText += `${paddedName}${killText}${deathText}${fameText}\n`;
+            });
+        }
 
         reportText += `\x1b[30m--------------------------------------------------\x1b[0m\n`;
         const totalPaddedName = 'TOTAL'.padEnd(colWidths.name, ' ');
@@ -736,10 +681,6 @@ async function processBattleReport(inputUrlOrId, targetContext, isMessage = fals
 
                 if (newWeapon && isWeaponItemId(newWeapon)) {
                     if (!existingWeapon || !isWeaponItemId(existingWeapon)) existing.weapon = newWeapon;
-                }
-
-                if (newWeapon && isWeaponItemId(newWeapon) && ((p.damage || 0) >= (existing.damage || 0) || (p.healing || 0) >= (existing.healing || 0))) {
-                    existing.weapon = newWeapon;
                 }
             }
         }
