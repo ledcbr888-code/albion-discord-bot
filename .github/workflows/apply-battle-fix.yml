@@ -1,0 +1,61 @@
+name: Apply Battle Roster Fix
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    if: github.event.pull_request.head.ref == 'agent/fix-battle-roster' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: agent/fix-battle-roster
+
+      - name: Patch index.js
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('index.js')
+          s = p.read_text(encoding='utf-8')
+
+          # AlbionBB HTML can be partial. Always fetch the official battle API
+          # and merge its complete player list instead of using it only when HTML
+          # found zero players.
+          s = s.replace('if (playerMap.size === 0 && /^\\d+$/.test(matchId)) {', 'if (/^\\d+$/.test(matchId)) {')
+
+          # Do not double-count the same player when HTML/Next.js/API overlap.
+          s = s.replace('existing.kills += p.kills;', 'existing.kills = Math.max(Number(existing.kills) || 0, Number(p.kills) || 0);')
+          s = s.replace('existing.deaths += p.deaths;', 'existing.deaths = Math.max(Number(existing.deaths) || 0, Number(p.deaths) || 0);')
+          s = s.replace('existing.fame += p.fame;', 'existing.fame = Math.max(Number(existing.fame) || 0, Number(p.fame) || 0);')
+
+          old = 'if (!playerMap.has(pKey)) playerMap.set(pKey, pObj);'
+          new = '''if (!playerMap.has(pKey)) {
+                              playerMap.set(pKey, pObj);
+                          } else {
+                              const existing = playerMap.get(pKey);
+                              existing.kills = Math.max(Number(existing.kills) || 0, Number(pObj.kills) || 0);
+                              existing.deaths = Math.max(Number(existing.deaths) || 0, Number(pObj.deaths) || 0);
+                              existing.fame = Math.max(Number(existing.fame) || 0, Number(pObj.fame) || 0);
+                              existing.damage = Math.max(Number(existing.damage) || 0, Number(pObj.damage) || 0);
+                              existing.healing = Math.max(Number(existing.healing) || 0, Number(pObj.healing) || 0);
+                              if (pObj.guild && !existing.guild) existing.guild = pObj.guild;
+                              if (pObj.weapon && isWeaponItemId(pObj.weapon)) existing.weapon = pObj.weapon;
+                          }'''
+          if old not in s:
+              raise SystemExit('API merge marker not found')
+          s = s.replace(old, new, 1)
+
+          p.write_text(s, encoding='utf-8')
+          PY
+          node --check index.js
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add index.js
+          git diff --cached --quiet || git commit -m 'fix: recover all battle players and deaths'
+          git push origin agent/fix-battle-roster
