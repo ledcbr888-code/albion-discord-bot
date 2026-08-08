@@ -1,0 +1,65 @@
+name: Patch Guild Roster
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Patch index.js
+        run: |
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('index.js')
+          s = p.read_text(encoding='utf-8')
+
+          marker = """async function fetchOfficialBattle(matchId) {\n    const urls = [\n        `https://gameinfo.albiononline.com/api/gameinfo/battles/${matchId}`,\n        `https://gameinfo-sgp.albiononline.com/api/gameinfo/battles/${matchId}`\n    ];\n\n    for (const url of urls) {\n        try {\n            const response = await axios.get(url, { timeout: 10000, headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' } });\n            if (response.data) return response.data;\n        } catch (error) {\n            console.log(`⚠️ API failed: ${error.message}`);\n        }\n    }\n    return null;\n}\n"""
+
+          addition = marker + r'''\nasync function fetchGuildMembers(guildName) {\n    if (!guildName) return [];\n\n    const bases = [\n        'https://gameinfo-sgp.albiononline.com/api/gameinfo',\n        'https://gameinfo.albiononline.com/api/gameinfo'\n    ];\n\n    for (const base of bases) {\n        try {\n            const searchRes = await axios.get(`${base}/search`, {\n                params: { q: guildName },\n                timeout: 15000,\n                headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' }\n            });\n\n            const guilds = Array.isArray(searchRes.data?.guilds) ? searchRes.data.guilds : [];\n            const guild = guilds.find(g =>\n                String(g.Name || g.name || '').trim().toLowerCase() === String(guildName).trim().toLowerCase()\n            );\n\n            if (!guild?.Id) continue;\n\n            const membersRes = await axios.get(`${base}/guilds/${encodeURIComponent(guild.Id)}/members`, {\n                timeout: 20000,\n                headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' }\n            });\n\n            const rawMembers = Array.isArray(membersRes.data)\n                ? membersRes.data\n                : Object.values(membersRes.data || {});\n\n            const members = rawMembers\n                .map(m => ({\n                    id: m.Id || m.id || '',\n                    name: String(m.Name || m.name || '').trim(),\n                    guild: String(m.GuildName || m.guildName || guildName).trim()\n                }))\n                .filter(m => m.name);\n\n            if (members.length > 0) {\n                console.log(`👥 ${guildName}: loaded ${members.length} guild members`);\n                return members;\n            }\n        } catch (error) {\n            console.log(`⚠️ Guild member API failed for ${guildName}: ${error.message}`);\n        }\n    }\n\n    return [];\n}\n\nasync function fetchTrackedGuildMembers() {\n    if (!Array.isArray(targetGuilds) || targetGuilds.length === 0) return [];\n\n    const results = await Promise.all(targetGuilds.map(g => fetchGuildMembers(g)));\n    const map = new Map();\n\n    for (const members of results) {\n        for (const member of members) {\n            const key = member.name.toLowerCase();\n            if (!map.has(key)) map.set(key, member);\n        }\n    }\n\n    return Array.from(map.values());\n}\n'''
+
+          if 'async function fetchGuildMembers(guildName)' not in s:
+              if marker not in s:
+                  raise SystemExit('fetchOfficialBattle marker not found')
+              s = s.replace(marker, addition, 1)
+
+          old_init = """        const playerStatsMap = {};\n        targetPlayers.forEach(p => {\n            playerStatsMap[p.toLowerCase()] = { displayName: p, kills: 0, deaths: 0, fame: 0, damage: 0, healing: 0, weapon: '' };\n        });\n"""
+          new_init = """        const playerStatsMap = {};\n        targetPlayers.forEach(p => {\n            playerStatsMap[p.toLowerCase()] = { displayName: p, guild: '', kills: 0, deaths: 0, fame: 0, damage: 0, healing: 0, weapon: '' };\n        });\n\n        // AlbionBB battle pages only contain players who appear in the battle.\n        // Seed the report with the complete roster of every tracked guild so\n        // guild members missing from the battle page are still shown as 0/0/0.\n        const trackedGuildMembers = await fetchTrackedGuildMembers();\n        for (const member of trackedGuildMembers) {\n            const key = member.name.toLowerCase();\n            if (!playerStatsMap[key]) {\n                playerStatsMap[key] = {\n                    displayName: member.name,\n                    guild: member.guild || '',\n                    kills: 0,\n                    deaths: 0,\n                    fame: 0,\n                    damage: 0,\n                    healing: 0,\n                    weapon: ''\n                };\n            } else if (!playerStatsMap[key].guild) {\n                playerStatsMap[key].guild = member.guild || '';\n            }\n        }\n"""
+          if old_init not in s:
+              raise SystemExit('playerStatsMap initialization marker not found')
+          s = s.replace(old_init, new_init, 1)
+
+          old_add = """            playerStatsMap[pKey].kills += p.kills;\n            playerStatsMap[pKey].deaths += p.deaths;\n            playerStatsMap[pKey].fame += p.fame;\n            playerStatsMap[pKey].damage += p.damage;\n            playerStatsMap[pKey].healing += p.healing;\n\n            if (p.weapon && isWeaponItemId(p.weapon)) {\n"""
+          new_add = """            // HTML and __NEXT_DATA__ can contain the same player twice.\n            // Do not add duplicate sources together; keep the strongest value.\n            playerStatsMap[pKey].kills = Math.max(Number(playerStatsMap[pKey].kills) || 0, Number(p.kills) || 0);\n            playerStatsMap[pKey].deaths = Math.max(Number(playerStatsMap[pKey].deaths) || 0, Number(p.deaths) || 0);\n            playerStatsMap[pKey].fame = Math.max(Number(playerStatsMap[pKey].fame) || 0, Number(p.fame) || 0);\n            playerStatsMap[pKey].damage = Math.max(Number(playerStatsMap[pKey].damage) || 0, Number(p.damage) || 0);\n            playerStatsMap[pKey].healing = Math.max(Number(playerStatsMap[pKey].healing) || 0, Number(p.healing) || 0);\n\n            if (p.guild && !playerStatsMap[pKey].guild) playerStatsMap[pKey].guild = p.guild;\n\n            if (p.weapon && isWeaponItemId(p.weapon)) {\n"""
+          if old_add not in s:
+              raise SystemExit('addOrUpdate marker not found')
+          s = s.replace(old_add, new_add, 1)
+
+          old_headers = """        $(table).find('thead tr th').each((i, th) => {\n            headers.push($(th).text().trim().toLowerCase());\n        });\n\n        const killIndex = headers.indexOf('kills');\n        const deathIndex = headers.indexOf('deaths');\n        const fameIndex = headers.indexOf('fame');\n"""
+          new_headers = """        const headerCells = $(table).find('thead tr').first().find('th, td');\n        headerCells.each((i, cell) => {\n            headers.push($(cell).text().replace(/\\s+/g, ' ').trim().toLowerCase());\n        });\n\n        if (headers.length === 0) {\n            $(table).find('tr').first().find('th, td').each((i, cell) => {\n                headers.push($(cell).text().replace(/\\s+/g, ' ').trim().toLowerCase());\n            });\n        }\n\n        const findHeader = (...names) => headers.findIndex(h => names.some(n => h === n || h.includes(n)));\n        const killIndex = findHeader('kills', 'kill');\n        const deathIndex = findHeader('deaths', 'death');\n        const fameIndex = findHeader('kill fame', 'killfame', 'fame');\n"""
+          if old_headers in s:
+              s = s.replace(old_headers, new_headers, 1)
+
+          p.write_text(s, encoding='utf-8')
+          PY
+
+      - name: Validate JavaScript syntax
+        run: node --check index.js
+
+      - name: Commit patched index.js and remove patch workflow
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.js
+          git rm -f .github/workflows/patch-guild-roster.yml
+          git diff --cached --quiet && exit 0
+          git commit -m "fix: load complete tracked guild roster"
+          git push
