@@ -17,7 +17,7 @@ const path = require('path');
 const express = require('express');
 
 // ======================================================
-// 1. WEB SERVER FOR KEEP-ALIVE (RENDER)
+// 1. WEB SERVER FOR KEEP-ALIVE (RENDER / REPLIT)
 // ======================================================
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -88,6 +88,22 @@ loadData();
 // ======================================================
 // 3. HELPER FUNCTIONS
 // ======================================================
+
+function drawRoundRect(ctx, x, y, width, height, radius, fillStyle) {
+    ctx.fillStyle = fillStyle;
+    ctx.beginPath();
+    if (typeof ctx.roundRect === 'function') {
+        ctx.roundRect(x, y, width, height, radius);
+    } else {
+        ctx.moveTo(x + radius, y);
+        ctx.arcTo(x + width, y, x + width, y + height, radius);
+        ctx.arcTo(x + width, y + height, x, y + height, radius);
+        ctx.arcTo(x, y + height, x, y, radius);
+        ctx.arcTo(x, y, x + width, y, radius);
+        ctx.closePath();
+    }
+    ctx.fill();
+}
 
 function parseFameValue(val) {
     if (val === null || val === undefined) return 0;
@@ -431,20 +447,14 @@ async function generateTopPerformanceImage(players) {
     const canvas = createCanvas(width, height);
     const ctx = canvas.getContext('2d');
 
-    ctx.fillStyle = '#bda289';
-    ctx.beginPath();
-    ctx.roundRect(0, 0, width, height, 12);
-    ctx.fill();
+    drawRoundRect(ctx, 0, 0, width, height, 12, '#bda289');
 
     for (let i = 0; i < players.length; i++) {
         const p = players[i];
         const y = padding + i * (cardHeight + cardGap);
         const cardWidth = width - padding * 2;
 
-        ctx.fillStyle = '#a28c78';
-        ctx.beginPath();
-        ctx.roundRect(padding, y, cardWidth, cardHeight, 10);
-        ctx.fill();
+        drawRoundRect(ctx, padding, y, cardWidth, cardHeight, 10, '#a28c78');
 
         const isHeal = p.type === 'heal';
         const barColor = isHeal ? '#21b293' : '#ff4d6d';
@@ -452,10 +462,7 @@ async function generateTopPerformanceImage(players) {
 
         if (percent > 0) {
             const currentBarWidth = Math.max((cardWidth * percent) / 100, 80);
-            ctx.fillStyle = barColor;
-            ctx.beginPath();
-            ctx.roundRect(padding, y, Math.min(currentBarWidth, cardWidth), cardHeight, 10);
-            ctx.fill();
+            drawRoundRect(ctx, padding, y, Math.min(currentBarWidth, cardWidth), cardHeight, 10, barColor);
         }
 
         const weaponId = normalizeAlbionItemId(p.weapon);
@@ -1174,14 +1181,14 @@ client.on('interactionCreate', async interaction => {
 client.on('messageCreate', async message => {
     if (message.author.bot) return;
 
-    const urlRegex = /https?:\/\/east\.albionbb\.com\/battles\/[^\s]+/i;
+    const urlRegex = /(?:https?:\/\/)?(?:[a-zA-Z0-0.]*)?albionbb\.com\/battles\/([a-zA-0-9-]+)/i;
     const match = message.content.match(urlRegex);
 
     if (!match) return;
 
     try {
         const statusMsg = await message.reply('⏳ กำลังดึงสถิติจาก AlbionBB...');
-        await processBattleReport(match[0], statusMsg, true);
+        await processBattleReport(match[1], statusMsg, true);
     } catch (error) {
         console.error(error);
     }
