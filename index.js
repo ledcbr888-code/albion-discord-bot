@@ -384,7 +384,6 @@ async function generateTopPerformanceImage(players) {
             ctx.beginPath(); ctx.roundRect(cardX, y, barWidth, cardHeight, 12); ctx.fill();
         }
 
-        // The weapon is stored on this exact player record, preventing row/weapon shifting.
         const weaponId = normalizeAlbionItemId(p.weapon);
         if (weaponId && isWeaponItemId(weaponId)) {
             try {
@@ -433,36 +432,38 @@ async function processBattleReport(input, targetContext, isMessage = false) {
             }
         }
 
-        // HTML is the primary source. NEXT_DATA/API only enrich missing fields;
-        // records are merged with MAX, not added, preventing duplicated kills/deaths/fame.
         let allPlayers = mergePlayerRecords(htmlData.players, nextPlayers);
         const apiData = /^\d+$/.test(matchId) ? await fetchOfficialBattle(matchId) : null;
         allPlayers = mergePlayerRecords(allPlayers, getApiPlayers(apiData));
         const battleTime = htmlData.battleTime || nextTime || apiData?.startTime || apiData?.endTime || null;
         if (!allPlayers.length) throw new Error('ไม่พบข้อมูลผู้เล่นจาก AlbionBB หรือ Official Albion API');
 
-        const playerStats = new Map(targetPlayers.map(name => [name.toLowerCase(), {
-            displayName: name, guild: '', kills: 0, deaths: 0, fame: 0, damage: 0, healing: 0, weapon: ''
-        }]));
-        const guildStats = new Map(targetGuilds.map(name => [name.toLowerCase(), { displayName: name, kills: 0, deaths: 0, fame: 0 }]));
-
+        // IMPORTANT: The battle report must show EVERY participant in the battle.
+        // The /add player and /add guild tracking lists are separate features and
+        // must not cause the report to become TOTAL 0 when the lists are empty.
+        const reportStats = new Map();
         for (const p of allPlayers) {
-            const pKey = p.name.toLowerCase(), gKey = p.guild.toLowerCase();
-            if (playerStats.has(pKey)) {
-                const stat = playerStats.get(pKey);
-                stat.guild ||= p.guild;
-                stat.kills = Math.max(stat.kills, p.kills);
-                stat.deaths = Math.max(stat.deaths, p.deaths);
-                stat.fame = Math.max(stat.fame, p.fame);
-                stat.damage = Math.max(stat.damage, p.damage);
-                stat.healing = Math.max(stat.healing, p.healing);
-                if (!stat.weapon && p.weapon && isWeaponItemId(p.weapon)) stat.weapon = p.weapon;
-            }
-            if (guildStats.has(gKey)) {
-                const stat = guildStats.get(gKey);
-                stat.kills = Math.max(stat.kills, p.kills);
-                stat.deaths = Math.max(stat.deaths, p.deaths);
-                stat.fame = Math.max(stat.fame, p.fame);
+            const key = p.name.toLowerCase();
+            const old = reportStats.get(key);
+            if (!old) {
+                reportStats.set(key, {
+                    displayName: p.name,
+                    guild: p.guild || '',
+                    kills: Number(p.kills) || 0,
+                    deaths: Number(p.deaths) || 0,
+                    fame: Number(p.fame) || 0,
+                    damage: Number(p.damage) || 0,
+                    healing: Number(p.healing) || 0,
+                    weapon: p.weapon || ''
+                });
+            } else {
+                old.kills = Math.max(old.kills, Number(p.kills) || 0);
+                old.deaths = Math.max(old.deaths, Number(p.deaths) || 0);
+                old.fame = Math.max(old.fame, Number(p.fame) || 0);
+                old.damage = Math.max(old.damage, Number(p.damage) || 0);
+                old.healing = Math.max(old.healing, Number(p.healing) || 0);
+                if (!old.weapon && p.weapon) old.weapon = p.weapon;
+                if (!old.guild && p.guild) old.guild = p.guild;
             }
         }
 
@@ -474,7 +475,7 @@ async function processBattleReport(input, targetContext, isMessage = false) {
         report += `\x1b[1;37m${'Name'.padEnd(widths.name)}${centerString('Kills', widths.kills)}${centerString('Deaths', widths.deaths)}${centerString('Fame', widths.fame)}\x1b[0m\n`;
         report += '\x1b[30m--------------------------------------------------\x1b[0m\n';
         let totalKills = 0, totalDeaths = 0, totalFame = 0;
-        const rows = [...playerStats.values()].sort((a, b) => b.fame - a.fame || b.kills - a.kills || b.damage - a.damage);
+        const rows = [...reportStats.values()].sort((a, b) => b.fame - a.fame || b.kills - a.kills || b.damage - a.damage);
         for (const p of rows) {
             totalKills += p.kills; totalDeaths += p.deaths; totalFame += p.fame;
             const name = p.displayName.slice(0, widths.name - 1).padEnd(widths.name);
@@ -485,15 +486,17 @@ async function processBattleReport(input, targetContext, isMessage = false) {
         report += `\x1b[1;37m${'TOTAL'.padEnd(widths.name)}\x1b[32m${centerString(totalKills, widths.kills)}\x1b[31m${centerString(totalDeaths, widths.deaths)}\x1b[33m${centerString(formatFame(totalFame), widths.fame)}\x1b[0m\n`;
         report += '```';
 
-        const performancePlayers = allPlayers.filter(p => p.damage > 0 || p.healing > 0)
-            .sort((a, b) => (b.damage + b.healing) - (a.damage + a.healing)).slice(0, 5);
+        const performancePlayers = [...reportStats.values()]
+            .filter(p => p.damage > 0 || p.healing > 0)
+            .sort((a, b) => (b.damage + b.healing) - (a.damage + a.healing))
+            .slice(0, 5);
         let imageAttachment = null;
         if (performancePlayers.length) {
             const maxDamage = Math.max(1, ...performancePlayers.map(p => p.damage));
             const maxHealing = Math.max(1, ...performancePlayers.map(p => p.healing));
             const top = performancePlayers.map(p => {
                 const heal = p.healing > p.damage, value = heal ? p.healing : p.damage, max = heal ? maxHealing : maxDamage;
-                return { name: p.name, guild: p.guild, weapon: p.weapon, value, percent: Math.round((value / max) * 100), type: heal ? 'heal' : 'damage' };
+                return { name: p.displayName, guild: p.guild, weapon: p.weapon, value, percent: Math.round((value / max) * 100), type: heal ? 'heal' : 'damage' };
             });
             imageAttachment = await generateTopPerformanceImage(top);
         }
