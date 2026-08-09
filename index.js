@@ -35,13 +35,18 @@ if (!BOT_TOKEN) {
     process.exit(1);
 }
 
+// IMPORTANT:
+// Only non-privileged intents are enabled here so the Gateway can connect
+// even when Message Content / Server Members intents are not enabled in the
+// Discord Developer Portal. Slash commands do not require either privileged intent.
+// If automatic URL scanning in messageCreate is needed later, enable
+// Message Content Intent in the Discord Developer Portal and add it back.
 const client = new Client({
     intents: [
         GatewayIntentBits.Guilds,
-        GatewayIntentBits.GuildMessages,
-        GatewayIntentBits.MessageContent,
-        GatewayIntentBits.GuildMembers
-    ]
+        GatewayIntentBits.GuildMessages
+    ],
+    failIfNotExists: false
 });
 
 let targetPlayers = [];
@@ -612,9 +617,6 @@ const commands = [
 
 // ============================================================
 // READY / COMMAND REGISTRATION
-// IMPORTANT: no manual /users/@me request and no 45s watchdog.
-// These were causing unnecessary REST traffic/restarts while the
-// Gateway was still connecting. Register commands only once.
 // ============================================================
 let commandsRegistered = false;
 
@@ -740,34 +742,28 @@ client.on('interactionCreate', async interaction => {
     }
 });
 
-client.on('messageCreate', async message => {
-    if (message.author.bot) return;
-    const match = message.content.match(/https?:\/\/east\.albionbb\.com\/battles\/[^\s]+/i);
-    if (!match) return;
-    try {
-        const status = await message.reply('⏳ กำลังดึงสถิติจาก AlbionBB...');
-        await processBattleReport(match[0], status, true);
-    } catch (err) {
-        console.error('❌ messageCreate error:', err);
-    }
-});
+// Automatic URL scanning requires Message Content Intent. It is intentionally
+// disabled for now so the bot can connect without privileged intents.
+// Use /check battles with an AlbionBB URL or Match ID instead.
 
 client.on('error', err => console.error('❌ Discord client error:', err));
 client.on('warn', info => console.warn('⚠️ Discord warning:', info));
+client.on('shardError', error => console.error('❌ Gateway shard error:', error));
+client.on('shardDisconnect', (event, shardId) => console.error(`❌ Gateway shard ${shardId} disconnected:`, event?.code, event?.reason || 'no reason'));
+client.on('shardReconnecting', shardId => console.log(`🔄 Gateway shard ${shardId} reconnecting...`));
+client.on('shardReady', (id, unavailableGuilds) => console.log(`🟢 Gateway shard ${id} READY. Unavailable guilds: ${unavailableGuilds?.size ?? 0}`));
 process.on('unhandledRejection', err => console.error('❌ Unhandled rejection:', err));
 process.on('uncaughtException', err => console.error('❌ Uncaught exception:', err));
 
 // ============================================================
 // LOGIN
-// IMPORTANT: Do NOT call /users/@me before login.
-// discord.js already authenticates the token through the Gateway.
-// The previous manual REST check was creating extra requests and
-// could hit Cloudflare 1015/429 on Render.
 // ============================================================
 console.log('🔄 Attempting to login to Discord...');
 console.log(`🔑 BOT_TOKEN loaded: ${BOT_TOKEN ? 'YES' : 'NO'}`);
 console.log(`🔑 BOT_TOKEN length: ${BOT_TOKEN.length}`);
 console.log(`📌 DISCORD_GUILD_ID: ${GUILD_ID ? GUILD_ID : 'not set (global commands)'}`);
+console.log('🛡️ Gateway intents: Guilds=ON, GuildMessages=ON, MessageContent=OFF, GuildMembers=OFF');
+console.log('🌐 Starting Discord Gateway login (non-privileged intents only)...');
 
 client.login(BOT_TOKEN).then(() => {
     console.log('🌐 Discord Gateway login request accepted. Waiting for READY...');
