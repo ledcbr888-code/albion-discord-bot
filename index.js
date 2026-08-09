@@ -16,39 +16,22 @@ const fs = require('fs');
 const path = require('path');
 const express = require('express');
 
-// ==========================================
-// 🌐 1. EXPRESS WEB SERVER & KEEP ALIVE (ป้องกัน Render Sleep)
-// ==========================================
+// ============================================================
+// CONFIG
+// ============================================================
 const app = express();
 const PORT = Number(process.env.PORT) || 3000;
+const BOT_TOKEN = String(process.env.BOT_TOKEN || '').trim();
+const GUILD_ID = String(process.env.DISCORD_GUILD_ID || '').trim();
+const DATA_FILE = path.join(__dirname, 'tracking.json');
 
 app.get('/', (_, res) => res.status(200).send('BOSSBOT is online and running!'));
-
-// Binding กับ 0.0.0.0 เพื่อให้ Render ตรวจพบ Web Service ชัวร์ 100%
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`🌐 Web server listening on port ${PORT}`);
-    
-    // Self-Ping ทำงานทันทีเมื่อ Server เริ่มเปิดใช้งาน
-    const RENDER_URL = process.env.RENDER_EXTERNAL_URL || process.env.RENDER_URL;
-    if (RENDER_URL) {
-        console.log(`🔄 Self-Ping activated for URL: ${RENDER_URL}`);
-        setInterval(() => {
-            axios.get(RENDER_URL)
-                .then(() => console.log('Pinged successfully to keep alive.'))
-                .catch(err => console.log(`Ping failed: ${err.message}`));
-        }, 5 * 60 * 1000); // ทำงานทุกๆ 5 นาที
-    } else {
-        console.log('⚠️ Warning: RENDER_EXTERNAL_URL is not set. Bot might go to sleep on Free Tier if not pinging externally.');
-    }
 });
 
-// ==========================================
-// 🤖 2. DISCORD CLIENT CONFIGURATION
-// ==========================================
-const BOT_TOKEN = String(process.env.BOT_TOKEN || '').trim();
-
 if (!BOT_TOKEN) {
-    console.error('❌ BOT_TOKEN is missing. Set it in Environment Variables.');
+    console.error('❌ BOT_TOKEN is missing. Set it in Render Environment Variables.');
     process.exit(1);
 }
 
@@ -61,7 +44,6 @@ const client = new Client({
     ]
 });
 
-const DATA_FILE = path.join(__dirname, 'tracking.json');
 let targetPlayers = [];
 let targetGuilds = [];
 
@@ -74,7 +56,6 @@ function loadData() {
         const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
         targetPlayers = Array.isArray(data.players) ? data.players : [];
         targetGuilds = Array.isArray(data.guilds) ? data.guilds : [];
-        console.log(`📁 Tracking: ${targetGuilds.length} guilds, ${targetPlayers.length} players`);
     } catch (err) {
         console.error('❌ tracking.json load error:', err.message);
         targetPlayers = [];
@@ -84,10 +65,7 @@ function loadData() {
 
 function saveData() {
     try {
-        fs.writeFileSync(DATA_FILE, JSON.stringify({
-            players: targetPlayers,
-            guilds: targetGuilds
-        }, null, 2), 'utf8');
+        fs.writeFileSync(DATA_FILE, JSON.stringify({ players: targetPlayers, guilds: targetGuilds }, null, 2), 'utf8');
     } catch (err) {
         console.error('❌ tracking.json save error:', err.message);
     }
@@ -95,9 +73,9 @@ function saveData() {
 
 loadData();
 
-// ==========================================
-// 🛠️ 3. HELPER FUNCTIONS
-// ==========================================
+// ============================================================
+// HELPERS
+// ============================================================
 function parseFameValue(value) {
     if (value === null || value === undefined) return 0;
     if (typeof value === 'number') return Number.isFinite(value) ? value : 0;
@@ -119,13 +97,6 @@ function formatFame(num) {
     return num.toLocaleString();
 }
 
-function centerString(value, width) {
-    const str = String(value);
-    if (str.length >= width) return str.slice(0, width);
-    const pad = width - str.length;
-    return ' '.repeat(Math.floor(pad / 2)) + str + ' '.repeat(Math.ceil(pad / 2));
-}
-
 function formatUTCTime(input) {
     if (!input) return 'N/A';
     let date;
@@ -136,7 +107,8 @@ function formatUTCTime(input) {
     } else date = new Date(input);
     if (Number.isNaN(date.getTime())) return 'N/A';
     const formatted = new Intl.DateTimeFormat('en-GB', {
-        timeZone: 'Asia/Bangkok', day: '2-digit', month: '2-digit', year: 'numeric',
+        timeZone: 'Asia/Bangkok',
+        day: '2-digit', month: '2-digit', year: 'numeric',
         hour: '2-digit', minute: '2-digit', hour12: false
     }).format(date);
     return `${formatted.replace(',', '')} +07`;
@@ -146,15 +118,15 @@ function normalizeAlbionItemId(raw) {
     if (!raw) return '';
     let value = '';
     if (typeof raw === 'object') {
-        value = raw.itemId ?? raw.ItemId ?? raw.itemID ?? raw.ItemID ??
-            raw.type ?? raw.Type ?? raw.id ?? raw.Id ?? raw.itemType ?? raw.ItemType ??
-            raw.uniqueName ?? raw.UniqueName ?? raw.name ?? raw.Name ?? '';
+        value = raw.itemId ?? raw.ItemId ?? raw.itemID ?? raw.ItemID ?? raw.type ?? raw.Type ??
+            raw.id ?? raw.Id ?? raw.itemType ?? raw.ItemType ?? raw.uniqueName ?? raw.UniqueName ??
+            raw.name ?? raw.Name ?? '';
     } else value = String(raw);
     value = String(value).trim();
     if (!value) return '';
-    const urlMatch = value.match(/\/items\/([^/?#]+)/i) || value.match(/\/v1\/item\/([^/?#]+)/i);
-    if (urlMatch) {
-        try { value = decodeURIComponent(urlMatch[1]); } catch (_) {}
+    const match = value.match(/\/items\/([^/?#]+)/i) || value.match(/\/v1\/item\/([^/?#]+)/i);
+    if (match) {
+        try { value = decodeURIComponent(match[1]); } catch (_) {}
     }
     return value.replace(/\s+/g, '_').replace(/\.png(?:\?.*)?$/i, '').replace(/@(\d+)Q\d+/i, '@$1').trim();
 }
@@ -178,24 +150,16 @@ function isWeaponItemId(id) {
         s.includes('FIST') || s.includes('REAVER');
 }
 
-function isBadEquipmentItem(id) {
-    const s = normalizeAlbionItemId(id).toUpperCase();
-    if (!s) return true;
-    return s.includes('BAG') || s.includes('CAPE') || s.includes('HEAD') || s.includes('ARMOR') ||
-        s.includes('SHOES') || s.includes('FOOD') || s.includes('POTION') || s.includes('MOUNT') || isOffhandItemId(s);
-}
-
 function extractMainHandFromObject(obj) {
     if (!obj || typeof obj !== 'object') return '';
-    const direct = [
+    const candidates = [
         obj.MainHand, obj.mainHand, obj.MAINHAND, obj.mainhand, obj.Mainhand,
         obj.Equipment?.MainHand, obj.equipment?.MainHand, obj.Equipment?.mainHand, obj.equipment?.mainHand,
-        obj.Equipment?.mainhand, obj.equipment?.mainhand, obj.weapon, obj.Weapon, obj.weaponId, obj.WeaponId,
-        obj.mainHandItem, obj.MainHandItem
+        obj.weapon, obj.Weapon, obj.weaponId, obj.WeaponId, obj.mainHandItem, obj.MainHandItem
     ];
-    for (const candidate of direct) {
+    for (const candidate of candidates) {
         const id = normalizeAlbionItemId(candidate);
-        if (id && isWeaponItemId(id) && !isBadEquipmentItem(id)) return id;
+        if (id && isWeaponItemId(id)) return id;
     }
     const equipment = obj.Equipment || obj.equipment;
     if (equipment && typeof equipment === 'object') {
@@ -214,56 +178,45 @@ function extractMainHandFromRow($, row) {
         const $el = $(el);
         const attrs = [$el.attr('src'), $el.attr('data-src'), $el.attr('data-original'), $el.attr('data-item-id'),
             $el.attr('data-itemid'), $el.attr('data-type'), $el.attr('href')].filter(Boolean);
-        let id = '';
         for (const raw of attrs) {
-            const candidate = normalizeAlbionItemId(raw);
-            if (candidate) { id = candidate; break; }
+            const id = normalizeAlbionItemId(raw);
+            if (!id || !isWeaponItemId(id)) continue;
+            const context = [
+                $el.attr('alt'), $el.attr('title'), $el.attr('class'), $el.attr('data-slot'),
+                $el.attr('data-equipment-slot'), $el.parent().text(), $el.parent().attr('class')
+            ].filter(Boolean).join(' ').toLowerCase();
+            let score = 10 - Math.min(index, 20) * 0.1;
+            if (/main[\s_-]?hand/.test(context)) score += 100;
+            if (/weapon/.test(context)) score += 25;
+            if (/off[\s_-]?hand|shield|torch|tome|book|orb|horn/.test(context)) score -= 100;
+            candidates.push({ id, score });
+            break;
         }
-        if (!id || !isWeaponItemId(id)) return;
-        const ownText = [$el.attr('alt'), $el.attr('title'), $el.attr('class'), $el.attr('data-slot'),
-            $el.attr('data-equipment-slot')].filter(Boolean).join(' ').toLowerCase();
-        const parent = $el.closest('td, div, li, a').first();
-        const parentText = `${parent.text()} ${parent.attr('class') || ''} ${parent.attr('data-slot') || ''} ${parent.attr('data-equipment-slot') || ''}`.toLowerCase();
-        const context = `${ownText} ${parentText}`;
-        let score = 10 - Math.min(index, 20) * 0.1;
-        if (/main[\s_-]?hand/.test(context)) score += 100;
-        if (/weapon/.test(context)) score += 25;
-        if (/off[\s_-]?hand|shield|torch|tome|book|orb|horn/.test(context)) score -= 100;
-        candidates.push({ id, score });
     });
     candidates.sort((a, b) => b.score - a.score);
     return candidates[0]?.id || '';
 }
 
-function drawRoundRect(ctx, x, y, width, height, radius) {
-    if (typeof ctx.roundRect === 'function') {
-        ctx.beginPath();
-        ctx.roundRect(x, y, width, height, radius);
-        ctx.fill();
-    } else {
-        ctx.beginPath();
-        ctx.moveTo(x + radius, y);
-        ctx.lineTo(x + width - radius, y);
-        ctx.quadraticCurveTo(x + width, y, x + width, y + radius);
-        ctx.lineTo(x + width, y + height - radius);
-        ctx.quadraticCurveTo(x + width, y + height, x + width - radius, y + height);
-        ctx.lineTo(x + radius, y + height);
-        ctx.quadraticCurveTo(x, y + height, x, y + height - radius);
-        ctx.lineTo(x, y + radius);
-        ctx.quadraticCurveTo(x, y, x + radius, y);
-        ctx.closePath();
-        ctx.fill();
+function extractMatchId(input) {
+    const value = String(input || '').trim();
+    if (!value) throw new Error('Match ID ว่าง');
+    if (/^https?:\/\//i.test(value)) {
+        const match = value.match(/\/battles\/([^/?#]+)/i);
+        if (!match) throw new Error('ไม่สามารถอ่าน Match ID จากลิงก์ได้');
+        return match[1];
     }
+    return value;
 }
 
-// ==========================================
-// 📊 4. BATTLE DATA PARSING & GENERATION
-// ==========================================
+// ============================================================
+// ALBION DATA
+// ============================================================
 async function fetchAlbionBBPage(matchId) {
     const url = `https://east.albionbb.com/battles/${encodeURIComponent(matchId)}`;
     try {
         return await cloudscraper.get({
-            url, timeout: 20000,
+            url,
+            timeout: 20000,
             headers: {
                 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/151 Safari/537.36',
                 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
@@ -279,18 +232,39 @@ function readCellNumber(value) {
     return parseInt(String(value || '').replace(/[^\d.-]/g, ''), 10) || 0;
 }
 
+function objectToPlayer(obj) {
+    if (!obj || typeof obj !== 'object') return null;
+    const name = obj.name ?? obj.Name ?? obj.playerName ?? obj.PlayerName;
+    if (!name || typeof name !== 'string') return null;
+    const guild = obj.guildName ?? obj.GuildName ?? obj.guild ?? obj.Guild ?? '';
+    return {
+        name: String(name),
+        guild: typeof guild === 'string' ? guild : '',
+        kills: Number(obj.kills ?? obj.Kills ?? obj.kill ?? obj.Kill ?? 0) || 0,
+        deaths: Number(obj.deaths ?? obj.Deaths ?? obj.death ?? obj.Death ?? 0) || 0,
+        fame: parseFameValue(obj.killFame ?? obj.killfame ?? obj.fame ?? obj.Fame ?? obj.KillFame ?? 0),
+        damage: parseFameValue(obj.damage ?? obj.Damage ?? obj.totalDamage ?? obj.TotalDamage ?? 0),
+        healing: parseFameValue(obj.healing ?? obj.Healing ?? obj.totalHealing ?? obj.TotalHealing ?? 0),
+        weapon: extractMainHandFromObject(obj)
+    };
+}
+
 function parseDataFromHTML(html) {
     const $ = cheerio.load(html);
     const players = [];
-    const guilds = [];
     const battleTime = $('time[datetime]').attr('datetime') || $('time').first().text().trim() || $('.battle-time').first().text().trim() || null;
 
     $('table').each((_, table) => {
         const headers = [];
-        $(table).find('thead tr').first().find('th,td').each((__, cell) => headers.push($(cell).text().replace(/\s+/g, ' ').trim().toLowerCase()));
+        $(table).find('thead tr').first().find('th,td').each((__, cell) => {
+            headers.push($(cell).text().replace(/\s+/g, ' ').trim().toLowerCase());
+        });
         if (!headers.length) return;
         const indexOf = (...names) => {
-            for (const name of names) { const i = headers.indexOf(name); if (i !== -1) return i; }
+            for (const name of names) {
+                const i = headers.indexOf(name);
+                if (i !== -1) return i;
+            }
             return -1;
         };
         const nameIndex = indexOf('name', 'player', 'player name');
@@ -306,10 +280,10 @@ function parseDataFromHTML(html) {
             $(row).find('td').each((___, td) => cells.push($(td).text().replace(/\s+/g, ' ').trim()));
             if (!cells.length) return;
             const name = nameIndex >= 0 ? cells[nameIndex] : cells[0] || '';
-            const guild = guildIndex >= 0 ? cells[guildIndex] : '';
             if (!name) return;
             const p = {
-                name, guild,
+                name,
+                guild: guildIndex >= 0 ? cells[guildIndex] : '',
                 kills: killIndex >= 0 ? readCellNumber(cells[killIndex]) : 0,
                 deaths: deathIndex >= 0 ? readCellNumber(cells[deathIndex]) : 0,
                 fame: fameIndex >= 0 ? parseFameValue(cells[fameIndex]) : 0,
@@ -318,10 +292,9 @@ function parseDataFromHTML(html) {
                 weapon: extractMainHandFromRow($, row)
             };
             if (killIndex >= 0 || deathIndex >= 0 || damageIndex >= 0 || healingIndex >= 0) players.push(p);
-            if (guild && nameIndex < 0) guilds.push({ name: guild, kills: p.kills, deaths: p.deaths, fame: p.fame });
         });
     });
-    return { players, guilds, battleTime };
+    return { players, battleTime };
 }
 
 function parseNextData(html) {
@@ -335,12 +308,18 @@ function findTimeInNextData(obj) {
     if (!obj || typeof obj !== 'object') return null;
     const keys = ['startTime', 'endTime', 'time', 'timestamp', 'date', 'createdAt'];
     if (Array.isArray(obj)) {
-        for (const item of obj) { const found = findTimeInNextData(item); if (found) return found; }
+        for (const item of obj) {
+            const found = findTimeInNextData(item);
+            if (found) return found;
+        }
         return null;
     }
     for (const [key, value] of Object.entries(obj)) {
         if (keys.includes(key) && value) return value;
-        if (value && typeof value === 'object') { const found = findTimeInNextData(value); if (found) return found; }
+        if (value && typeof value === 'object') {
+            const found = findTimeInNextData(value);
+            if (found) return found;
+        }
     }
     return null;
 }
@@ -354,26 +333,10 @@ function findPlayerArrays(obj) {
             for (const item of value) walk(item);
             return;
         }
-        for (const child of Object.values(value)) if (child && typeof child === 'object') walk(child);
+        for (const child of Object.values(value)) walk(child);
     }
     walk(obj);
     return found;
-}
-
-function objectToPlayer(obj) {
-    if (!obj || typeof obj !== 'object') return null;
-    const name = obj.name ?? obj.Name ?? obj.playerName ?? obj.PlayerName;
-    if (!name || typeof name !== 'string') return null;
-    const guild = obj.guildName ?? obj.GuildName ?? obj.guild ?? obj.Guild ?? '';
-    return {
-        name: String(name), guild: typeof guild === 'string' ? guild : '',
-        kills: Number(obj.kills ?? obj.Kills ?? obj.kill ?? obj.Kill ?? 0) || 0,
-        deaths: Number(obj.deaths ?? obj.Deaths ?? obj.death ?? obj.Death ?? 0) || 0,
-        fame: parseFameValue(obj.killFame ?? obj.killfame ?? obj.fame ?? obj.Fame ?? obj.KillFame ?? 0),
-        damage: parseFameValue(obj.damage ?? obj.Damage ?? obj.totalDamage ?? obj.TotalDamage ?? 0),
-        healing: parseFameValue(obj.healing ?? obj.Healing ?? obj.totalHealing ?? obj.TotalHealing ?? 0),
-        weapon: extractMainHandFromObject(obj)
-    };
 }
 
 async function fetchOfficialBattle(matchId) {
@@ -385,7 +348,9 @@ async function fetchOfficialBattle(matchId) {
         try {
             const response = await axios.get(url, { timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' } });
             if (response.data) return response.data;
-        } catch (err) { console.log(`⚠️ Official API failed: ${err.message}`); }
+        } catch (err) {
+            console.log(`⚠️ Official API failed: ${err.message}`);
+        }
     }
     return null;
 }
@@ -403,7 +368,10 @@ function mergePlayerRecords(...lists) {
             if (!p?.name) continue;
             const key = p.name.toLowerCase();
             const old = map.get(key);
-            if (!old) { map.set(key, { ...p }); continue; }
+            if (!old) {
+                map.set(key, { ...p });
+                continue;
+            }
             old.guild ||= p.guild;
             old.kills = Math.max(old.kills, p.kills);
             old.deaths = Math.max(old.deaths, p.deaths);
@@ -425,56 +393,50 @@ async function generateTopPerformanceImage(players) {
     ctx.fillRect(0, 0, width, height);
 
     for (let i = 0; i < players.length; i++) {
-        const p = players[i], y = padding + i * (cardHeight + gap), cardX = padding, cardWidth = width - padding * 2;
+        const p = players[i];
+        const y = padding + i * (cardHeight + gap);
+        const cardX = padding;
+        const cardWidth = width - padding * 2;
         ctx.fillStyle = '#a28c78';
-        drawRoundRect(ctx, cardX, y, cardWidth, cardHeight, 12);
+        ctx.fillRect(cardX, y, cardWidth, cardHeight);
 
         const percent = Math.max(0, Math.min(100, Number(p.percent) || 0));
-        const barWidth = Math.min(cardWidth, cardWidth * percent / 100);
+        const barWidth = cardWidth * percent / 100;
         if (barWidth > 0) {
             ctx.fillStyle = p.type === 'heal' ? '#21b293' : '#ff4d6d';
-            drawRoundRect(ctx, cardX, y, barWidth, cardHeight, 12);
+            ctx.fillRect(cardX, y, barWidth, cardHeight);
         }
 
         const weaponId = normalizeAlbionItemId(p.weapon);
         if (weaponId && isWeaponItemId(weaponId)) {
             try {
-                const weaponImg = await loadImage(`https://render.albiononline.com/v1/item/${encodeURIComponent(weaponId)}.png`);
-                const size = 60;
-                ctx.drawImage(weaponImg, cardX + 12, y + (cardHeight - size) / 2, size, size);
-            } catch (err) { console.error(`⚠️ Weapon image failed: ${weaponId}: ${err.message}`); }
+                const img = await loadImage(`https://render.albiononline.com/v1/item/${encodeURIComponent(weaponId)}.png`);
+                ctx.drawImage(img, cardX + 12, y + 12, 60, 60);
+            } catch (err) {
+                console.error(`⚠️ Weapon image failed: ${weaponId}: ${err.message}`);
+            }
         }
 
         let name = p.name;
         if (name.length > 25) name = `${name.slice(0, 22)}...`;
-        ctx.fillStyle = '#000000';
+        ctx.fillStyle = '#000';
         ctx.font = 'bold 22px sans-serif';
         ctx.fillText(name, cardX + 88, y + 36);
-
-        ctx.fillStyle = '#111111';
+        ctx.fillStyle = '#111';
         ctx.font = 'bold 16px sans-serif';
-        const typeLabel = p.type === 'heal' ? '💚 HEAL' : '⚔️ DMG';
-        ctx.fillText(`${typeLabel}  ${Number(p.value || 0).toLocaleString()}  (${percent}%)`, cardX + 88, y + 62);
+        ctx.fillText(`${p.type === 'heal' ? '💚 HEAL' : '⚔️ DMG'}  ${Number(p.value || 0).toLocaleString()}  (${percent}%)`, cardX + 88, y + 62);
     }
     return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: 'top-performance.png' });
 }
 
-function extractMatchId(input) {
-    const value = String(input || '').trim();
-    if (!value) throw new Error('Match ID ว่าง');
-    if (/^https?:\/\//i.test(value)) {
-        const match = value.match(/\/battles\/([^/?#]+)/i);
-        if (!match) throw new Error('ไม่สามารถอ่าน Match ID จากลิงก์ได้');
-        return match[1];
-    }
-    return value;
-}
-
+// ============================================================
+// BATTLE REPORT
+// ============================================================
 async function processBattleReport(input, targetContext, isMessage = false) {
     try {
         const matchId = extractMatchId(input);
         const html = await fetchAlbionBBPage(matchId);
-        let htmlData = { players: [], guilds: [], battleTime: null };
+        let htmlData = { players: [], battleTime: null };
         if (html) htmlData = parseDataFromHTML(html);
 
         let nextPlayers = [], nextTime = null;
@@ -496,130 +458,97 @@ async function processBattleReport(input, targetContext, isMessage = false) {
         for (const p of allPlayers) {
             const key = p.name.toLowerCase();
             const old = reportStats.get(key);
-            if (!old) {
-                reportStats.set(key, {
-                    displayName: p.name,
-                    guild: p.guild || '',
-                    kills: Number(p.kills) || 0,
-                    deaths: Number(p.deaths) || 0,
-                    fame: Number(p.fame) || 0,
-                    damage: Number(p.damage) || 0,
-                    healing: Number(p.healing) || 0,
-                    weapon: p.weapon || ''
-                });
-            } else {
-                old.kills = Math.max(old.kills, Number(p.kills) || 0);
-                old.deaths = Math.max(old.deaths, Number(p.deaths) || 0);
-                old.fame = Math.max(old.fame, Number(p.fame) || 0);
-                old.damage = Math.max(old.damage, Number(p.damage) || 0);
-                old.healing = Math.max(old.healing, Number(p.healing) || 0);
+            if (!old) reportStats.set(key, {
+                displayName: p.name, guild: p.guild || '', kills: Number(p.kills) || 0,
+                deaths: Number(p.deaths) || 0, fame: Number(p.fame) || 0,
+                damage: Number(p.damage) || 0, healing: Number(p.healing) || 0, weapon: p.weapon || ''
+            });
+            else {
+                old.kills = Math.max(old.kills, p.kills);
+                old.deaths = Math.max(old.deaths, p.deaths);
+                old.fame = Math.max(old.fame, p.fame);
+                old.damage = Math.max(old.damage, p.damage);
+                old.healing = Math.max(old.healing, p.healing);
                 if (!old.weapon && p.weapon) old.weapon = p.weapon;
                 if (!old.guild && p.guild) old.guild = p.guild;
             }
         }
 
-        const widths = { name: 20, kills: 8, deaths: 8, fame: 10 };
-        const totalWidth = widths.name + widths.kills + widths.deaths + widths.fame;
-        const divider = '='.repeat(totalWidth);
-        const subDivider = '-'.repeat(totalWidth);
-
         const allSortedRows = [...reportStats.values()].sort((a, b) => b.fame - a.fame || b.kills - a.kills || b.damage - a.damage);
-
         const rows = allSortedRows.filter(p => {
-            if (targetGuilds.length === 0 && targetPlayers.length === 0) return true;
-
-            const isGuildName = targetGuilds.some(g => g.trim().toLowerCase() === p.displayName.trim().toLowerCase());
-            const isExplicitPlayer = targetPlayers.some(pl => pl.trim().toLowerCase() === p.displayName.trim().toLowerCase());
-
-            if (isGuildName && !isExplicitPlayer) return false;
-
-            const isGuildMatch = p.guild && targetGuilds.some(g => g.trim().toLowerCase() === p.guild.trim().toLowerCase());
-
-            return isGuildMatch || isExplicitPlayer;
+            if (!targetGuilds.length && !targetPlayers.length) return true;
+            const explicitPlayer = targetPlayers.some(x => x.trim().toLowerCase() === p.displayName.trim().toLowerCase());
+            const guildMatch = p.guild && targetGuilds.some(x => x.trim().toLowerCase() === p.guild.trim().toLowerCase());
+            return explicitPlayer || guildMatch;
         });
 
-        let totalKills = 0, totalDeaths = 0, totalFame = 0;
-        for (const p of rows) {
-            totalKills += p.kills;
-            totalDeaths += p.deaths;
-            totalFame += p.fame;
-        }
+        const selected = rows.length ? rows : (targetGuilds.length || targetPlayers.length ? [] : allSortedRows);
+        const totalKills = selected.reduce((n, p) => n + p.kills, 0);
+        const totalDeaths = selected.reduce((n, p) => n + p.deaths, 0);
+        const totalFame = selected.reduce((n, p) => n + p.fame, 0);
 
-        let header = `\x1b[1;36m⚔️ ALBIONBB BATTLE REPORT\x1b[0m | \x1b[1;33m🆔 ${matchId}\x1b[0m\n`;
-        header += `\x1b[1;33m🕒 Time:\x1b[0m \x1b[1;37m${formatUTCTime(battleTime)}\x1b[0m\n`;
-        header += `\x1b[30m${divider}\x1b[0m\n`;
-        header += `\x1b[1;37m${'Name'.padEnd(widths.name)}${centerString('Kills', widths.kills)}${centerString('Deaths', widths.deaths)}${centerString('Fame', widths.fame)}\x1b[0m\n`;
-        header += `\x1b[30m${subDivider}\x1b[0m\n`;
+        const widths = { name: 20, kills: 8, deaths: 8, fame: 10 };
+        const divider = '='.repeat(46);
+        const subDivider = '-'.repeat(46);
+        let report = '```ansi\n';
+        report += `\x1b[1;36m⚔️ ALBIONBB BATTLE REPORT\x1b[0m | \x1b[1;33m🆔 ${matchId}\x1b[0m\n`;
+        report += `\x1b[1;33m🕒 Time:\x1b[0m \x1b[1;37m${formatUTCTime(battleTime)}\x1b[0m\n`;
+        report += `\x1b[30m${divider}\x1b[0m\n`;
+        report += `\x1b[1;37m${'Name'.padEnd(widths.name)}${'Kills'.padStart(7)}${'Deaths'.padStart(8)}${'Fame'.padStart(10)}\x1b[0m\n`;
+        report += `\x1b[30m${subDivider}\x1b[0m\n`;
 
-        let footer = `\x1b[30m${subDivider}\x1b[0m\n`;
-        footer += `\x1b[1;37m${'TOTAL'.padEnd(widths.name)}\x1b[32m${centerString(totalKills, widths.kills)}\x1b[31m${centerString(totalDeaths, widths.deaths)}\x1b[33m${centerString(formatFame(totalFame), widths.fame)}\x1b[0m\n`;
-
-        const awardCandidates = rows.length > 0 ? rows : allSortedRows;
-        const mvp = [...awardCandidates].sort((a, b) => (b.damage + b.healing) - (a.damage + a.healing))[0];
-        const executioner = [...awardCandidates].sort((a, b) => b.kills - a.kills)[0];
-        const feeder = [...awardCandidates].sort((a, b) => b.deaths - a.deaths)[0];
-
-        let awardsText = `\x1b[30m${subDivider}\x1b[0m\n`;
-        awardsText += `\x1b[1;35m🏆 BATTLE AWARDS\x1b[0m\n`;
-        if (mvp && (mvp.damage > 0 || mvp.healing > 0)) {
-            const valText = mvp.healing > mvp.damage ? `Heal: ${formatFame(mvp.healing)}` : `DMG: ${formatFame(mvp.damage)}`;
-            awardsText += `\x1b[1;33m👑 MVP        :\x1b[0m \x1b[1;37m${mvp.displayName.padEnd(14)}\x1b[0m \x1b[36m(${valText})\x1b[0m\n`;
-        }
-        if (executioner && executioner.kills > 0) {
-            awardsText += `\x1b[1;32m🎯 Executioner :\x1b[0m \x1b[1;37m${executioner.displayName.padEnd(14)}\x1b[0m \x1b[32m(${executioner.kills} Kills)\x1b[0m\n`;
-        }
-        if (feeder && feeder.deaths > 0) {
-            awardsText += `\x1b[1;31m💀 Feeder      :\x1b[0m \x1b[1;37m${feeder.displayName.padEnd(14)}\x1b[0m \x1b[31m(${feeder.deaths} Deaths)\x1b[0m\n`;
-        }
-
-        let body = '';
-        if (rows.length === 0) {
-            body = `\x1b[30m(ไม่พบกิลด์หรือผู้เล่นที่ติดตามในไฟต์นี้)\x1b[0m\n`;
+        if (!selected.length) {
+            report += '\x1b[30m(ไม่พบกิลด์หรือผู้เล่นที่ติดตามในไฟต์นี้)\x1b[0m\n';
         } else {
-            for (let i = 0; i < rows.length; i++) {
-                const p = rows[i];
-                const name = p.displayName.slice(0, widths.name - 1).padEnd(widths.name);
-                const kills = centerString(p.kills, widths.kills);
-                const deaths = centerString(p.deaths, widths.deaths);
-                const fame = centerString(formatFame(p.fame), widths.fame);
-
-                const line = `\x1b[1;37m${name}\x1b[0m${p.kills > 0 ? `\x1b[32m${kills}\x1b[0m` : `\x1b[30m${kills}\x1b[0m`}${p.deaths > 0 ? `\x1b[31m${deaths}\x1b[0m` : `\x1b[30m${deaths}\x1b[0m`}${p.fame > 0 ? `\x1b[33m${fame}\x1b[0m` : `\x1b[30m${fame}\x1b[0m`}\n`;
-
-                const remainingCount = rows.length - i;
-                const testReportLength = ('```ansi\n' + header + body + line + `\x1b[30m... +${remainingCount} more players\x1b[0m\n` + footer + awardsText + '```').length;
-
-                if (testReportLength > 1950) {
-                    body += `\x1b[30m... +${remainingCount} more players\x1b[0m\n`;
+            for (const p of selected) {
+                const name = p.displayName.slice(0, 19).padEnd(20);
+                report += `\x1b[1;37m${name}\x1b[0m`;
+                report += p.kills ? `\x1b[32m${String(p.kills).padStart(7)}\x1b[0m` : `\x1b[30m${String(p.kills).padStart(7)}\x1b[0m`;
+                report += p.deaths ? `\x1b[31m${String(p.deaths).padStart(8)}\x1b[0m` : `\x1b[30m${String(p.deaths).padStart(8)}\x1b[0m`;
+                report += p.fame ? `\x1b[33m${formatFame(p.fame).padStart(10)}\x1b[0m` : `\x1b[30m${'0'.padStart(10)}\x1b[0m`;
+                report += '\n';
+                if (report.length > 1850) {
+                    report += `\x1b[30m... +${Math.max(0, selected.length - selected.indexOf(p) - 1)} more players\x1b[0m\n`;
                     break;
                 }
-                body += line;
             }
         }
 
-        const report = '```ansi\n' + header + body + footer + awardsText + '```';
+        report += `\x1b[30m${subDivider}\x1b[0m\n`;
+        report += `\x1b[1;37m${'TOTAL'.padEnd(20)}\x1b[32m${String(totalKills).padStart(7)}\x1b[31m${String(totalDeaths).padStart(8)}\x1b[33m${formatFame(totalFame).padStart(10)}\x1b[0m\n`;
 
-        const performancePlayers = rows
-            .filter(p => p.damage > 0 || p.healing > 0)
-            .sort((a, b) => (b.damage + b.healing) - (a.damage + a.healing))
-            .slice(0, 5);
+        const awardCandidates = selected.length ? selected : allSortedRows;
+        const mvp = awardCandidates[0] ? [...awardCandidates].sort((a, b) => (b.damage + b.healing) - (a.damage + a.healing))[0] : null;
+        const executioner = awardCandidates[0] ? [...awardCandidates].sort((a, b) => b.kills - a.kills)[0] : null;
+        const feeder = awardCandidates[0] ? [...awardCandidates].sort((a, b) => b.deaths - a.deaths)[0] : null;
+        report += `\x1b[30m${subDivider}\x1b[0m\n\x1b[1;35m🏆 BATTLE AWARDS\x1b[0m\n`;
+        if (mvp && (mvp.damage || mvp.healing)) report += `\x1b[1;33m👑 MVP        :\x1b[0m ${mvp.displayName} (${mvp.healing > mvp.damage ? `Heal: ${formatFame(mvp.healing)}` : `DMG: ${formatFame(mvp.damage)}`})\n`;
+        if (executioner?.kills) report += `\x1b[1;32m🎯 Executioner :\x1b[0m ${executioner.displayName} (${executioner.kills} Kills)\n`;
+        if (feeder?.deaths) report += `\x1b[1;31m💀 Feeder      :\x1b[0m ${feeder.displayName} (${feeder.deaths} Deaths)\n`;
+        report += '```';
 
+        const performancePlayers = selected.filter(p => p.damage > 0 || p.healing > 0).sort((a, b) => (b.damage + b.healing) - (a.damage + a.healing)).slice(0, 5);
         let imageAttachment = null;
         if (performancePlayers.length) {
             const maxDamage = Math.max(1, ...performancePlayers.map(p => p.damage));
             const maxHealing = Math.max(1, ...performancePlayers.map(p => p.healing));
             const top = performancePlayers.map(p => {
-                const heal = p.healing > p.damage, value = heal ? p.healing : p.damage, max = heal ? maxHealing : maxDamage;
-                return { name: p.displayName, guild: p.guild, weapon: p.weapon, value, percent: Math.round((value / max) * 100), type: heal ? 'heal' : 'damage' };
+                const heal = p.healing > p.damage;
+                const value = heal ? p.healing : p.damage;
+                const max = heal ? maxHealing : maxDamage;
+                return { name: p.displayName, weapon: p.weapon, value, percent: Math.round(value / max * 100), type: heal ? 'heal' : 'damage' };
             });
             imageAttachment = await generateTopPerformanceImage(top);
         }
 
         const payload = { content: report, files: imageAttachment ? [imageAttachment] : [] };
-        if (isMessage) await targetContext.edit(payload); else await targetContext.editReply(payload);
+        if (isMessage) await targetContext.edit(payload);
+        else await targetContext.editReply(payload);
     } catch (err) {
         console.error('❌ Process battle report error:', err);
-        const message = `❌ เกิดข้อผิดพลาดในการประมวลผลไฟต์: \`${err.message}\``;
-        if (isMessage) await targetContext.edit(message); else await targetContext.editReply(message);
+        const msg = `❌ เกิดข้อผิดพลาดในการประมวลผลไฟต์: \`${err.message}\``;
+        if (isMessage) await targetContext.edit(msg);
+        else await targetContext.editReply(msg);
     }
 }
 
@@ -636,7 +565,9 @@ async function checkMarketPrice(itemId, city, interaction) {
         const price = priceRes.data[0];
         const history = historyRes?.data?.[0]?.data;
         const volume = Array.isArray(history) && history.length ? history[history.length - 1].item_count || 0 : 0;
-        const embed = new EmbedBuilder().setColor(0x9b59b6).setTitle(`🏷️ Price Check: ${city} (Asia Server)`)
+        const embed = new EmbedBuilder()
+            .setColor(0x9b59b6)
+            .setTitle(`🏷️ Price Check: ${city} (Asia Server)`)
             .setDescription(`**Item ID:** \`${itemId}\``)
             .setThumbnail(`https://render.albiononline.com/v1/item/${encoded}.png`)
             .addFields(
@@ -644,7 +575,9 @@ async function checkMarketPrice(itemId, city, interaction) {
                 { name: '🏷️ Sell Order ต่ำสุด', value: `\`${Number(price.sell_price_min || 0).toLocaleString()}\` Silver`, inline: true },
                 { name: '📊 ยอดขายล่าสุด 24 ชม.', value: `\`${Number(volume).toLocaleString()}\` ชิ้น`, inline: false },
                 { name: '🕒 อัปเดต Buy Order', value: price.buy_price_max_date ? formatUTCTime(price.buy_price_max_date) : 'N/A', inline: false }
-            ).setFooter({ text: 'ข้อมูลจาก Albion Online Data Project' }).setTimestamp();
+            )
+            .setFooter({ text: 'ข้อมูลจาก Albion Online Data Project' })
+            .setTimestamp();
         await interaction.editReply({ embeds: [embed] });
     } catch (err) {
         console.error('❌ Price error:', err);
@@ -652,9 +585,9 @@ async function checkMarketPrice(itemId, city, interaction) {
     }
 }
 
-// ==========================================
-// 📜 5. COMMAND DECLARATIONS
-// ==========================================
+// ============================================================
+// SLASH COMMANDS
+// ============================================================
 const commands = [
     new SlashCommandBuilder().setName('check').setDescription('ระบบตรวจสอบสถิติและรายชื่อ')
         .addSubcommand(s => s.setName('battles').setDescription('เช็กสถิติไฟต์จาก Match ID หรือ ลิงก์').addStringOption(o => o.setName('link_or_id').setDescription('ลิงก์ AlbionBB หรือ Match ID').setRequired(true)))
@@ -667,11 +600,8 @@ const commands = [
         .addStringOption(o => o.setName('city').setDescription('เมือง').addChoices(
             { name: 'Black Market', value: 'BlackMarket' }, { name: 'Martlock', value: 'Martlock' }, { name: 'Bridgewatch', value: 'Bridgewatch' },
             { name: 'Caerleon', value: 'Caerleon' }, { name: 'Lymhurst', value: 'Lymhurst' }, { name: 'Fort Sterling', value: 'FortSterling' }, { name: 'Thetford', value: 'Thetford' }))
-        .addIntegerOption(o => o.setName('tier').setDescription('Tier 1-8').addChoices(
-            { name: 'Tier 1', value: 1 }, { name: 'Tier 2', value: 2 }, { name: 'Tier 3', value: 3 }, { name: 'Tier 4', value: 4 },
-            { name: 'Tier 5', value: 5 }, { name: 'Tier 6', value: 6 }, { name: 'Tier 7', value: 7 }, { name: 'Tier 8', value: 8 }))
-        .addIntegerOption(o => o.setName('enhancement').setDescription('Enhancement 0-4').addChoices(
-            { name: '.0', value: 0 }, { name: '.1', value: 1 }, { name: '.2', value: 2 }, { name: '.3', value: 3 }, { name: '.4', value: 4 })),
+        .addIntegerOption(o => o.setName('tier').setDescription('Tier 1-8').addChoices(...[1,2,3,4,5,6,7,8].map(v => ({ name: `Tier ${v}`, value: v }))))
+        .addIntegerOption(o => o.setName('enhancement').setDescription('Enhancement 0-4').addChoices(...[0,1,2,3,4].map(v => ({ name: `.${v}`, value: v })))),
     new SlashCommandBuilder().setName('add').setDescription('เพิ่มรายการติดตาม')
         .addSubcommand(s => s.setName('guild').setDescription('เพิ่มกิลด์').addStringOption(o => o.setName('name').setDescription('ชื่อกิลด์').setRequired(true)))
         .addSubcommand(s => s.setName('player').setDescription('เพิ่มผู้เล่น').addStringOption(o => o.setName('name').setDescription('ชื่อผู้เล่น').setRequired(true))),
@@ -680,42 +610,63 @@ const commands = [
         .addSubcommand(s => s.setName('player').setDescription('ลบผู้เล่น').addStringOption(o => o.setName('name').setDescription('ชื่อผู้เล่น').setRequired(true)))
 ].map(c => c.toJSON());
 
-// ==========================================
-// 🚀 6. EVENT HANDLERS & BOT LOGIN
-// ==========================================
+// ============================================================
+// READY / COMMAND REGISTRATION
+// IMPORTANT: no manual /users/@me request and no 45s watchdog.
+// These were causing unnecessary REST traffic/restarts while the
+// Gateway was still connecting. Register commands only once.
+// ============================================================
+let commandsRegistered = false;
+
 client.once('ready', async () => {
-    console.log(`✅ Logged in as ${client.user.tag}`);
-    const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
+    console.log(`🟢 BOT ONLINE: ${client.user.tag}`);
+    console.log(`🆔 Bot ID: ${client.user.id}`);
+    console.log(`🏠 Servers: ${client.guilds.cache.size}`);
+
+    if (commandsRegistered) return;
+    commandsRegistered = true;
+
     try {
-        await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
-        console.log('✅ Slash commands registered successfully.');
-    } catch (err) { console.error('❌ Slash command registration error:', err); }
+        if (GUILD_ID) {
+            console.log(`📌 Registering slash commands to guild ${GUILD_ID}...`);
+            await client.application.commands.set(commands, GUILD_ID);
+            console.log('✅ Guild slash commands registered.');
+        } else {
+            console.log('🌐 DISCORD_GUILD_ID not set; registering global slash commands once...');
+            await client.application.commands.set(commands);
+            console.log('✅ Global slash commands registered.');
+        }
+    } catch (err) {
+        commandsRegistered = false;
+        console.error('❌ Slash command registration failed:', err.message);
+        console.error('ℹ️ Bot will stay online. Try again after Discord rate limit clears.');
+    }
 });
 
 client.on('interactionCreate', async interaction => {
     if (!interaction.isChatInputCommand()) return;
     const { commandName } = interaction;
 
-    if (commandName === 'check') {
-        const sub = interaction.options.getSubcommand();
-        if (sub === 'guilds') {
-            if (!targetGuilds.length) return interaction.reply('🛡️ ไม่มีกิลด์ในระบบติดตาม');
-            return interaction.reply(`🛡️ **กิลด์ที่ติดตาม (${targetGuilds.length})**\n\`\`\`\n${targetGuilds.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\`\`\``);
+    try {
+        if (commandName === 'check') {
+            const sub = interaction.options.getSubcommand();
+            if (sub === 'guilds') {
+                if (!targetGuilds.length) return interaction.reply('🛡️ ไม่มีกิลด์ในระบบติดตาม');
+                return interaction.reply(`🛡️ **กิลด์ที่ติดตาม (${targetGuilds.length})**\n\`\`\`\n${targetGuilds.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\`\`\``);
+            }
+            if (sub === 'members') {
+                if (!targetPlayers.length) return interaction.reply('📋 ไม่มีผู้เล่นในระบบติดตาม');
+                return interaction.reply(`📋 **ผู้เล่นที่ติดตาม (${targetPlayers.length})**\n\`\`\`\n${targetPlayers.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\`\`\``);
+            }
+            if (sub === 'battles') {
+                await interaction.deferReply();
+                return processBattleReport(interaction.options.getString('link_or_id'), interaction);
+            }
         }
-        if (sub === 'members') {
-            if (!targetPlayers.length) return interaction.reply('📋 ไม่มีผู้เล่นในระบบติดตาม');
-            return interaction.reply(`📋 **ผู้เล่นที่ติดตาม (${targetPlayers.length})**\n\`\`\`\n${targetPlayers.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\`\`\``);
-        }
-        if (sub === 'battles') {
-            await interaction.deferReply();
-            return processBattleReport(interaction.options.getString('link_or_id'), interaction);
-        }
-    }
 
-    if (commandName === 'guild') {
-        const name = interaction.options.getString('name');
-        await interaction.deferReply();
-        try {
+        if (commandName === 'guild') {
+            const name = interaction.options.getString('name');
+            await interaction.deferReply();
             const search = await axios.get(`https://gameinfo.albiononline.com/api/gameinfo/search?q=${encodeURIComponent(name)}`, { timeout: 15000 });
             const guild = search.data.guilds?.find(g => String(g.Name).toLowerCase() === name.toLowerCase());
             if (!guild) return interaction.editReply(`❌ ไม่พบกิลด์ **${name}**`);
@@ -728,12 +679,10 @@ client.on('interactionCreate', async interaction => {
                 { name: '💀 Death Fame', value: formatFame(g.DeathFame), inline: true }
             ).setTimestamp();
             return interaction.editReply({ embeds: [embed] });
-        } catch (err) { return interaction.editReply(`❌ เกิดข้อผิดพลาด: ${err.message}`); }
-    }
+        }
 
-    if (commandName === 'mvp') {
-        await interaction.deferReply();
-        try {
+        if (commandName === 'mvp') {
+            await interaction.deferReply();
             const matchId = extractMatchId(interaction.options.getString('link_or_id'));
             const html = await fetchAlbionBBPage(matchId);
             if (!html) return interaction.editReply('❌ ไม่สามารถเข้าถึงข้อมูล AlbionBB ได้');
@@ -748,48 +697,46 @@ client.on('interactionCreate', async interaction => {
                 { name: '💀 Feeder', value: `**${feeder.name}**\nDeaths: ${feeder.deaths}`, inline: true }
             ).setTimestamp();
             return interaction.editReply({ embeds: [embed] });
-        } catch (err) { return interaction.editReply(`❌ เกิดข้อผิดพลาดในการวิเคราะห์ MVP: ${err.message}`); }
-    }
+        }
 
-    if (commandName === 'ราคา') {
-        let rawName = interaction.options.getString('name').trim().toUpperCase();
-        const city = interaction.options.getString('city') || 'BlackMarket';
-        const tier = interaction.options.getInteger('tier');
-        const enhancement = interaction.options.getInteger('enhancement');
-        rawName = rawName.replace(/^(NOVICE'S|JOURNEYMAN'S|ADEPT'S|EXPERT'S|MASTER'S|GRANDMASTER'S|ELDER'S)\s+/i, '');
-        const aliases = { 'SATCHEL OF INSIGHT': 'BAG_TALISMAN', SATCHEL: 'BAG_TALISMAN', 'MAIN SWORD': 'MAIN_SWORD', SWORD: 'MAIN_SWORD' };
-        rawName = aliases[rawName] || rawName;
-        let itemId = rawName.replace(/\s+/g, '_');
-        if (tier && !/^T\d_/i.test(itemId)) itemId = `T${tier}_${itemId}`;
-        if (enhancement !== null && enhancement !== undefined && enhancement > 0) itemId = `${itemId.split('@')[0]}@${enhancement}`;
-        await interaction.deferReply();
-        return checkMarketPrice(itemId, city, interaction);
-    }
+        if (commandName === 'ราคา') {
+            let rawName = interaction.options.getString('name').trim().toUpperCase();
+            const city = interaction.options.getString('city') || 'BlackMarket';
+            const tier = interaction.options.getInteger('tier');
+            const enhancement = interaction.options.getInteger('enhancement');
+            rawName = rawName.replace(/^(NOVICE'S|JOURNEYMAN'S|ADEPT'S|EXPERT'S|MASTER'S|GRANDMASTER'S|ELDER'S)\s+/i, '');
+            const aliases = { 'SATCHEL OF INSIGHT': 'BAG_TALISMAN', SATCHEL: 'BAG_TALISMAN', 'MAIN SWORD': 'MAIN_SWORD', SWORD: 'MAIN_SWORD' };
+            rawName = aliases[rawName] || rawName;
+            let itemId = rawName.replace(/\s+/g, '_');
+            if (tier && !/^T\d_/i.test(itemId)) itemId = `T${tier}_${itemId}`;
+            if (enhancement !== null && enhancement !== undefined && enhancement > 0) itemId = `${itemId.split('@')[0]}@${enhancement}`;
+            await interaction.deferReply();
+            return checkMarketPrice(itemId, city, interaction);
+        }
 
-    if (commandName === 'add') {
-        const sub = interaction.options.getSubcommand(), name = interaction.options.getString('name').trim();
-        if (sub === 'guild') {
-            if (targetGuilds.some(x => x.toLowerCase() === name.toLowerCase())) return interaction.reply({ content: `⚠️ กิลด์ **${name}** มีอยู่แล้ว`, ephemeral: true });
-            targetGuilds.push(name); saveData(); return interaction.reply(`🛡️ เพิ่มกิลด์ **${name}** แล้ว`);
+        if (commandName === 'add' || commandName === 'remove') {
+            const sub = interaction.options.getSubcommand();
+            const name = interaction.options.getString('name').trim();
+            const isAdd = commandName === 'add';
+            const list = sub === 'guild' ? targetGuilds : targetPlayers;
+            const exists = list.some(x => x.toLowerCase() === name.toLowerCase());
+            if (isAdd) {
+                if (exists) return interaction.reply({ content: `⚠️ ${sub === 'guild' ? 'กิลด์' : 'ผู้เล่น'} **${name}** มีอยู่แล้ว`, ephemeral: true });
+                list.push(name);
+                saveData();
+                return interaction.reply(`${sub === 'guild' ? '🛡️ เพิ่มกิลด์' : '✅ เพิ่มผู้เล่น'} **${name}** แล้ว`);
+            }
+            if (!exists) return interaction.reply({ content: `❌ ไม่พบ${sub === 'guild' ? 'กิลด์' : 'ผู้เล่น'} **${name}**`, ephemeral: true });
+            if (sub === 'guild') targetGuilds = targetGuilds.filter(x => x.toLowerCase() !== name.toLowerCase());
+            else targetPlayers = targetPlayers.filter(x => x.toLowerCase() !== name.toLowerCase());
+            saveData();
+            return interaction.reply(`🗑️ ลบ${sub === 'guild' ? 'กิลด์' : 'ผู้เล่น'} **${name}** แล้ว`);
         }
-        if (sub === 'player') {
-            if (targetPlayers.some(x => x.toLowerCase() === name.toLowerCase())) return interaction.reply({ content: `⚠️ ผู้เล่น **${name}** มีอยู่แล้ว`, ephemeral: true });
-            targetPlayers.push(name); saveData(); return interaction.reply(`✅ เพิ่มผู้เล่น **${name}** แล้ว`);
-        }
-    }
-
-    if (commandName === 'remove') {
-        const sub = interaction.options.getSubcommand(), name = interaction.options.getString('name').trim();
-        if (sub === 'guild') {
-            const before = targetGuilds.length; targetGuilds = targetGuilds.filter(x => x.toLowerCase() !== name.toLowerCase());
-            if (before === targetGuilds.length) return interaction.reply({ content: `❌ ไม่พบกิลด์ **${name}**`, ephemeral: true });
-            saveData(); return interaction.reply(`🗑️ ลบกิลด์ **${name}** แล้ว`);
-        }
-        if (sub === 'player') {
-            const before = targetPlayers.length; targetPlayers = targetPlayers.filter(x => x.toLowerCase() !== name.toLowerCase());
-            if (before === targetPlayers.length) return interaction.reply({ content: `❌ ไม่พบผู้เล่น **${name}**`, ephemeral: true });
-            saveData(); return interaction.reply(`🗑️ ลบผู้เล่น **${name}** แล้ว`);
-        }
+    } catch (err) {
+        console.error('❌ Interaction error:', err);
+        const text = `❌ เกิดข้อผิดพลาด: \`${err.message}\``;
+        if (interaction.deferred || interaction.replied) await interaction.editReply(text).catch(() => {});
+        else await interaction.reply({ content: text, ephemeral: true }).catch(() => {});
     }
 });
 
@@ -800,62 +747,33 @@ client.on('messageCreate', async message => {
     try {
         const status = await message.reply('⏳ กำลังดึงสถิติจาก AlbionBB...');
         await processBattleReport(match[0], status, true);
-    } catch (err) { console.error('❌ messageCreate error:', err); }
+    } catch (err) {
+        console.error('❌ messageCreate error:', err);
+    }
 });
 
 client.on('error', err => console.error('❌ Discord client error:', err));
+client.on('warn', info => console.warn('⚠️ Discord warning:', info));
 process.on('unhandledRejection', err => console.error('❌ Unhandled rejection:', err));
 process.on('uncaughtException', err => console.error('❌ Uncaught exception:', err));
 
+// ============================================================
+// LOGIN
+// IMPORTANT: Do NOT call /users/@me before login.
+// discord.js already authenticates the token through the Gateway.
+// The previous manual REST check was creating extra requests and
+// could hit Cloudflare 1015/429 on Render.
+// ============================================================
 console.log('🔄 Attempting to login to Discord...');
 console.log(`🔑 BOT_TOKEN loaded: ${BOT_TOKEN ? 'YES' : 'NO'}`);
 console.log(`🔑 BOT_TOKEN length: ${BOT_TOKEN.length}`);
+console.log(`📌 DISCORD_GUILD_ID: ${GUILD_ID ? GUILD_ID : 'not set (global commands)'}`);
 
-// Test the token through Discord REST before opening the Gateway.
-// This distinguishes an invalid token (401) from a Gateway/network problem.
-(async () => {
-    try {
-        console.log('🌐 Testing Discord REST API connection...');
-        const test = await axios.get('https://discord.com/api/v10/users/@me', {
-            headers: { Authorization: `Bot ${BOT_TOKEN}` },
-            timeout: 15000,
-            validateStatus: () => true
-        });
-        console.log(`🌐 Discord REST HTTP status: ${test.status}`);
-        if (test.status !== 200) {
-            console.error('❌ Discord REST authentication failed.');
-            console.error('Response:', JSON.stringify(test.data));
-            process.exit(1);
-            return;
-        }
-        console.log(`✅ Discord REST API OK: ${test.data.username} (${test.data.id})`);
-        console.log('🌐 Starting Discord Gateway connection...');
-        client.login(BOT_TOKEN).catch(error => {
-            console.error('❌ Discord login failed!');
-            console.error('Error name:', error?.name || 'Unknown');
-            console.error('Error message:', error?.message || String(error));
-            console.error(error);
-            process.exit(1);
-        });
-    } catch (error) {
-        console.error('❌ Discord REST API request failed.');
-        console.error('Error name:', error?.name || 'Unknown');
-        console.error('Error message:', error?.message || String(error));
-        process.exit(1);
-    }
-})();
-
-const gatewayTimeout = setTimeout(() => {
-    if (!client.isReady()) {
-        console.error('❌ Discord Gateway timeout: READY was not received within 45 seconds.');
-        console.error('🔎 REST token authentication passed, so the problem is likely Gateway/network/proxy related.');
-        process.exit(1);
-    }
-}, 45000);
-
-client.once('ready', () => {
-    clearTimeout(gatewayTimeout);
-    console.log(`🟢 BOT ONLINE: ${client.user.tag}`);
-    console.log(`🆔 Bot ID: ${client.user.id}`);
-    console.log(`🏠 Servers: ${client.guilds.cache.size}`);
+client.login(BOT_TOKEN).then(() => {
+    console.log('🌐 Discord Gateway login request accepted. Waiting for READY...');
+}).catch(error => {
+    console.error('❌ Discord login failed!');
+    console.error('Error name:', error?.name || 'Unknown');
+    console.error('Error message:', error?.message || String(error));
+    console.error(error);
 });
