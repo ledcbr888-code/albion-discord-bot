@@ -810,79 +810,52 @@ process.on('uncaughtException', err => console.error('❌ Uncaught exception:', 
 console.log('🔄 Attempting to login to Discord...');
 console.log(`🔑 BOT_TOKEN loaded: ${BOT_TOKEN ? 'YES' : 'NO'}`);
 console.log(`🔑 BOT_TOKEN length: ${BOT_TOKEN.length}`);
-console.log(`🔑 Token prefix: ${BOT_TOKEN ? BOT_TOKEN.slice(0, 6) + '...' : 'NONE'}`);
 
-// REST preflight separates token problems from Gateway/network problems.
-async function discordPreflight() {
-    console.log('🌐 Testing Discord REST API connection...');
-    try {
-        const response = await axios.get('https://discord.com/api/v10/users/@me', {
-            timeout: 15000,
-            headers: {
-                Authorization: `Bot ${BOT_TOKEN}`,
-                'User-Agent': 'Albion-Discord-Bot/1.0'
-            }
-        });
-        console.log(`✅ Discord REST API OK: ${response.data?.username || 'unknown'} (${response.data?.id || 'unknown'})`);
-        return true;
-    } catch (error) {
-        const status = error?.response?.status;
-        const data = error?.response?.data;
-        console.error('❌ Discord REST API test failed.');
-        console.error('HTTP status:', status || 'NO_RESPONSE');
-        console.error('Error code:', error?.code || 'UNKNOWN');
-        console.error('Error message:', error?.message || String(error));
-        if (data?.message) console.error('Discord message:', data.message);
-        return false;
-    }
-}
-
-let discordReady = false;
-let loginStartedAt = Date.now();
-
-client.once('ready', () => {
-    discordReady = true;
-    console.log(`🟢 BOT ONLINE: ${client.user.tag}`);
-    console.log(`🆔 Bot ID: ${client.user.id}`);
-    console.log(`🏠 Servers: ${client.guilds.cache.size}`);
-    console.log(`⏱️ Discord READY time: ${Date.now() - loginStartedAt}ms`);
-});
-
-client.on('debug', (message) => {
-    if (/gateway|websocket|identify|resume|heartbeat|connect|disconnect/i.test(message)) {
-        console.log(`🔎 Discord debug: ${message}`);
-    }
-});
-
-client.on('warn', (message) => console.warn(`⚠️ Discord warning: ${message}`));
-
-const loginTimeout = setTimeout(() => {
-    if (discordReady) return;
-    console.error('❌ Discord Gateway timeout: READY was not received within 30 seconds.');
-    console.error('🔎 REST API may have succeeded, which means the token is valid and the problem is Gateway connectivity/handshake.');
-    process.exit(1);
-}, 30000);
-
+// Test the token through Discord REST before opening the Gateway.
+// This distinguishes an invalid token (401) from a Gateway/network problem.
 (async () => {
-    const restOK = await discordPreflight();
-    if (!restOK) {
-        clearTimeout(loginTimeout);
-        console.error('❌ Stopping startup because Discord REST authentication/connectivity failed.');
-        process.exit(1);
-    }
-
-    console.log('🌐 Starting Discord Gateway connection...');
-    loginStartedAt = Date.now();
     try {
-        await client.login(BOT_TOKEN);
-        console.log('✅ Discord login request completed; waiting for READY event...');
+        console.log('🌐 Testing Discord REST API connection...');
+        const test = await axios.get('https://discord.com/api/v10/users/@me', {
+            headers: { Authorization: `Bot ${BOT_TOKEN}` },
+            timeout: 15000,
+            validateStatus: () => true
+        });
+        console.log(`🌐 Discord REST HTTP status: ${test.status}`);
+        if (test.status !== 200) {
+            console.error('❌ Discord REST authentication failed.');
+            console.error('Response:', JSON.stringify(test.data));
+            process.exit(1);
+            return;
+        }
+        console.log(`✅ Discord REST API OK: ${test.data.username} (${test.data.id})`);
+        console.log('🌐 Starting Discord Gateway connection...');
+        client.login(BOT_TOKEN).catch(error => {
+            console.error('❌ Discord login failed!');
+            console.error('Error name:', error?.name || 'Unknown');
+            console.error('Error message:', error?.message || String(error));
+            console.error(error);
+            process.exit(1);
+        });
     } catch (error) {
-        clearTimeout(loginTimeout);
-        console.error('❌ Discord Gateway login failed!');
+        console.error('❌ Discord REST API request failed.');
         console.error('Error name:', error?.name || 'Unknown');
-        console.error('Error code:', error?.code || 'Unknown');
         console.error('Error message:', error?.message || String(error));
-        console.error(error);
         process.exit(1);
     }
 })();
+
+const gatewayTimeout = setTimeout(() => {
+    if (!client.isReady()) {
+        console.error('❌ Discord Gateway timeout: READY was not received within 45 seconds.');
+        console.error('🔎 REST token authentication passed, so the problem is likely Gateway/network/proxy related.');
+        process.exit(1);
+    }
+}, 45000);
+
+client.once('ready', () => {
+    clearTimeout(gatewayTimeout);
+    console.log(`🟢 BOT ONLINE: ${client.user.tag}`);
+    console.log(`🆔 Bot ID: ${client.user.id}`);
+    console.log(`🏠 Servers: ${client.guilds.cache.size}`);
+});
