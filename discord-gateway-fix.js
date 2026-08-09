@@ -1,10 +1,12 @@
 // Discord Gateway compatibility fix for Render.
-// The bot only needs Guilds/GuildMessages for slash commands.
-// GuildMembers and MessageContent are privileged intents and can cause
-// Gateway close code 4014 if they are not enabled for the application.
-// MessageContent can be enabled later with ENABLE_MESSAGE_CONTENT=true.
+// Use ONLY the non-privileged Guilds intent for the initial Gateway connection.
+// This avoids 4013/4014 when privileged intents are not enabled in Discord.
+// Slash commands do not require Message Content or Guild Members intents.
+//
+// If you later enable Message Content Intent in the Discord Developer Portal,
+// set ENABLE_MESSAGE_CONTENT=true in Render to restore message-content handling.
 
-const { Client, GatewayIntentBits } = require('discord.js');
+const { Client, GatewayIntentBits, IntentsBitField } = require('discord.js');
 
 const originalLogin = Client.prototype.login;
 
@@ -13,31 +15,29 @@ Client.prototype.login = function patchedLogin(token) {
         String(process.env.ENABLE_MESSAGE_CONTENT || '').trim()
     );
 
+    // IMPORTANT: replace the complete intent object instead of trying to mutate
+    // its internal bitfield. This guarantees privileged intents are really removed.
+    // Guilds is sufficient for slash-command interactions and READY.
+    const intents = [GatewayIntentBits.Guilds];
+
+    // MessageCreate is intentionally disabled until the privileged intent is
+    // explicitly enabled in Discord Developer Portal and Render.
+    if (allowMessageContent) {
+        intents.push(GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent);
+    }
+
     try {
-        if (this.options?.intents) {
-            const before = this.options.intents.bitfield;
-
-            // Always remove GuildMembers: this bot does not use member events/cache.
-            this.options.intents.bitfield &= ~GatewayIntentBits.GuildMembers;
-
-            // Remove MessageContent unless explicitly enabled in Render.
-            if (!allowMessageContent) {
-                this.options.intents.bitfield &= ~GatewayIntentBits.MessageContent;
-            }
-
-            const after = this.options.intents.bitfield;
-            if (before !== after) {
-                console.log(
-                    `🛡️ Gateway intents adjusted: GuildMembers=OFF, MessageContent=${allowMessageContent ? 'ON' : 'OFF'}`
-                );
-            }
-        }
+        this.options.intents = new IntentsBitField(intents);
+        console.log(
+            `🛡️ Gateway intents forced: Guilds=ON, GuildMembers=OFF, MessageContent=${allowMessageContent ? 'ON' : 'OFF'}`
+        );
     } catch (err) {
-        console.warn('⚠️ Could not adjust Discord intents:', err.message);
+        console.error('❌ Failed to configure Discord Gateway intents:', err.message);
     }
 
     this.once('ready', () => {
         console.log(`🟢 Discord Gateway READY: ${this.user.tag} (${this.user.id})`);
+        console.log(`🏠 Connected guilds: ${this.guilds.cache.size}`);
     });
 
     this.on('warn', warning => console.warn('⚠️ Discord.js warning:', warning));
@@ -55,8 +55,8 @@ Client.prototype.login = function patchedLogin(token) {
         console.log(`🟢 Discord shard ${shardId} READY`);
     });
 
-    console.log(`🌐 Starting Discord Gateway login (MessageContent=${allowMessageContent ? 'ON' : 'OFF'})...`);
+    console.log(`🌐 Starting Discord Gateway login (privileged intents disabled)...`);
 
-    // Let discord.js handle authentication/reconnects normally.
+    // Let discord.js handle Gateway authentication and reconnects normally.
     return originalLogin.call(this, token);
 };
