@@ -1,7 +1,6 @@
 // Discord Gateway stability patch for Render.
-// This file is loaded before index.js and only suppresses the custom
-// 45-second watchdog from killing the process while Discord Gateway is
-// connecting. It also prints low-level Gateway diagnostics.
+// Loaded before index.js to keep the Render process alive while Discord
+// Gateway is reconnecting instead of terminating on the custom watchdog.
 
 const { Client } = require('discord.js');
 
@@ -14,7 +13,7 @@ console.error = (...args) => {
     if (/Discord Gateway timeout: READY was not received/i.test(text)) {
         ignoreGatewayWatchdog = true;
         originalConsoleError(...args);
-        originalConsoleError('⚠️ Gateway watchdog ignored by startup patch; Discord.js will keep reconnecting instead of terminating the Render process.');
+        originalConsoleError('⚠️ Gateway watchdog ignored; Discord.js will keep the process alive for reconnects.');
         return;
     }
     originalConsoleError(...args);
@@ -52,8 +51,6 @@ Client.prototype.login = function patchedLogin(token) {
 
     return tryLogin();
 };
-
-Client.prototype.on('debug', () => {});
 
 process.on('SIGTERM', () => originalExit(0));
 process.on('SIGINT', () => originalExit(0));
