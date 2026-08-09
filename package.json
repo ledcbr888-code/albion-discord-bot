@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "main": "index.js",
   "scripts": {
-    "start": "node -r ./discord-gateway-fix.js index.js"
+    "start": "node index.js"
   },
   "dependencies": {
     "@napi-rs/canvas": "^0.1.52",
