@@ -1,25 +1,35 @@
 // Discord Gateway compatibility fix for Render.
-// If Message Content Intent is not enabled in the Discord Developer Portal,
-// sending it can close the Gateway with 4014 (Disallowed Intents).
-// We disable that privileged intent by default so the bot can come online.
-// Set ENABLE_MESSAGE_CONTENT=true in Render only after enabling Message Content Intent.
+// The bot only needs Guilds/GuildMessages for slash commands.
+// GuildMembers and MessageContent are privileged intents and can cause
+// Gateway close code 4014 if they are not enabled for the application.
+// MessageContent can be enabled later with ENABLE_MESSAGE_CONTENT=true.
 
 const { Client, GatewayIntentBits } = require('discord.js');
 
 const originalLogin = Client.prototype.login;
 
 Client.prototype.login = function patchedLogin(token) {
-    const allowMessageContent = String(process.env.ENABLE_MESSAGE_CONTENT || '').toLowerCase() === 'true';
+    const allowMessageContent = /^(true|1|yes)$/i.test(
+        String(process.env.ENABLE_MESSAGE_CONTENT || '').trim()
+    );
 
     try {
-        if (!allowMessageContent && this.options?.intents) {
-            // MessageContent = 1 << 15. Keep Guilds/GuildMessages and remove only
-            // the privileged Message Content intent that commonly causes 4014.
+        if (this.options?.intents) {
             const before = this.options.intents.bitfield;
-            this.options.intents.bitfield &= ~GatewayIntentBits.MessageContent;
+
+            // Always remove GuildMembers: this bot does not use member events/cache.
+            this.options.intents.bitfield &= ~GatewayIntentBits.GuildMembers;
+
+            // Remove MessageContent unless explicitly enabled in Render.
+            if (!allowMessageContent) {
+                this.options.intents.bitfield &= ~GatewayIntentBits.MessageContent;
+            }
+
             const after = this.options.intents.bitfield;
             if (before !== after) {
-                console.log('🛡️ Message Content Intent disabled for Gateway login (ENABLE_MESSAGE_CONTENT is not true).');
+                console.log(
+                    `🛡️ Gateway intents adjusted: GuildMembers=OFF, MessageContent=${allowMessageContent ? 'ON' : 'OFF'}`
+                );
             }
         }
     } catch (err) {
@@ -33,7 +43,7 @@ Client.prototype.login = function patchedLogin(token) {
     this.on('warn', warning => console.warn('⚠️ Discord.js warning:', warning));
     this.on('error', error => console.error('❌ Discord.js client error:', error));
     this.on('debug', info => {
-        if (/gateway|identify|4013|4014|disconnect|connect/i.test(info)) {
+        if (/gateway|identify|4013|4014|disconnect|connect|heartbeat/i.test(info)) {
             console.log(`🔎 Discord Gateway: ${info}`);
         }
     });
@@ -47,12 +57,6 @@ Client.prototype.login = function patchedLogin(token) {
 
     console.log(`🌐 Starting Discord Gateway login (MessageContent=${allowMessageContent ? 'ON' : 'OFF'})...`);
 
-    const loginPromise = originalLogin.call(this, token);
-    if (loginPromise?.catch) {
-        loginPromise.catch(error => {
-            console.error('❌ Discord Gateway login failed:', error?.message || error);
-            console.error(error);
-        });
-    }
-    return loginPromise;
+    // Let discord.js handle authentication/reconnects normally.
+    return originalLogin.call(this, token);
 };
