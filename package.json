@@ -1,9 +1,9 @@
 {
   "name": "albion-discord-bot",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "bot.js",
   "scripts": {
-    "start": "node index.js"
+    "start": "node bot.js"
   },
   "dependencies": {
     "@napi-rs/canvas": "^0.1.52",
