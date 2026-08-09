@@ -1,8 +1,11 @@
-// Discord Gateway stability patch for Render.
-// Loaded before index.js to keep the Render process alive while Discord
-// Gateway is reconnecting instead of terminating on the custom watchdog.
+// Discord Gateway / Discord REST stability patch for Render.
+// Loaded before index.js.
+// - Retries Discord REST preflight requests when Discord/Cloudflare returns 429.
+// - Prevents the custom Gateway watchdog from terminating the Render process.
+// - Lets discord.js handle Gateway authentication/reconnect normally.
 
 const { Client } = require('discord.js');
+const axios = require('axios');
 
 const originalExit = process.exit.bind(process);
 let ignoreGatewayWatchdog = false;
@@ -27,6 +30,31 @@ process.exit = (code = 0) => {
     return originalExit(code);
 };
 
+// Discord may temporarily rate-limit the /users/@me preflight request from Render.
+// Retry according to Discord's retry_after value instead of immediately exiting.
+const originalAxiosGet = axios.get.bind(axios);
+axios.get = async function patchedAxiosGet(url, config = {}) {
+    const isDiscordMeRequest = /^https:\/\/discord\.com\/api\/v\d+\/users\/@me$/i.test(String(url));
+    if (!isDiscordMeRequest) return originalAxiosGet(url, config);
+
+    const maxRetries = 6;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        const response = await originalAxiosGet(url, config);
+
+        if (response.status !== 429) return response;
+
+        const retryAfter = Number(response.data?.retry_after) || Number(response.headers?.['retry-after']) || 30;
+        const delaySeconds = Math.max(30, Math.ceil(retryAfter));
+        originalConsoleError(`⏳ Discord REST rate limited (429). Waiting ${delaySeconds}s before retry ${attempt}/${maxRetries}...`);
+        await new Promise(resolve => setTimeout(resolve, delaySeconds * 1000));
+    }
+
+    // Return the final response after the retry loop so index.js can report the
+    // actual Discord response rather than crashing inside the patch.
+    return originalAxiosGet(url, config);
+};
+
+// Extra diagnostics for Gateway errors without changing discord.js behavior.
 const originalLogin = Client.prototype.login;
 Client.prototype.login = function patchedLogin(token) {
     const client = this;
@@ -55,4 +83,4 @@ Client.prototype.login = function patchedLogin(token) {
 process.on('SIGTERM', () => originalExit(0));
 process.on('SIGINT', () => originalExit(0));
 
-originalConsoleError('🛡️ Discord Gateway stability patch loaded.');
+originalConsoleError('🛡️ Discord Gateway/REST stability patch loaded.');
