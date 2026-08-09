@@ -14,7 +14,6 @@ const { createCanvas, loadImage } = require('@napi-rs/canvas');
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
-const https = require('https');
 
 const TOKEN = String(process.env.BOT_TOKEN || '').trim();
 const PORT = Number(process.env.PORT) || 3000;
@@ -25,19 +24,17 @@ if (!TOKEN) {
   process.exit(1);
 }
 
+// Start the health server independently of Discord.
 const app = express();
 app.get('/', (_, res) => res.status(200).send('BOSSBOT is online!'));
 app.get('/health', (_, res) => res.json({ ok: true, discord: client?.isReady?.() || false }));
 app.listen(PORT, '0.0.0.0', () => console.log(`🌐 Web server listening on port ${PORT}`));
 
-// Only Guilds is required for slash commands. No privileged intents.
+// Discord only needs the Guilds intent for slash commands.
+// Do NOT pass a custom https.Agent here; discord.js manages the WebSocket itself.
 const client = new Client({
   intents: [GatewayIntentBits.Guilds],
-  failIfNotExists: false,
-  ws: {
-    // Force IPv4 for Render environments where IPv6 routing can stall WebSocket handshakes.
-    agent: new https.Agent({ keepAlive: true, family: 4 })
-  }
+  failIfNotExists: false
 });
 
 let targetPlayers = [];
@@ -307,7 +304,7 @@ client.on('warn', m => console.warn(`⚠️ Discord: ${m}`));
 client.on('error', e => console.error('❌ Discord client:', e));
 client.on('shardError', e => console.error('❌ Gateway shard error:', e));
 client.on('shardDisconnect', (event, id) => console.error(`❌ Gateway disconnected shard ${id}:`, event?.code, event?.reason || ''));
-client.on('shardReconnecting', id => console.log(`🔄 Gateway reconnecting shard ${id}...`));
+client.on('shardReconnecting', id => console.error(`🔄 Gateway reconnecting shard ${id}...`));
 
 client.on('interactionCreate', async interaction => {
   if (!interaction.isChatInputCommand()) return;
@@ -339,6 +336,7 @@ console.log(`🔑 BOT_TOKEN loaded: ${TOKEN ? 'YES' : 'NO'}`);
 console.log(`🔑 BOT_TOKEN length: ${TOKEN.length}`);
 console.log('🛡️ Gateway intents: Guilds=ON ONLY');
 console.log('🌐 Starting Discord Gateway login...');
+// Never print any portion of the Discord token.
 client.login(TOKEN).catch(e => {
   console.error('❌ Discord login failed:', e?.message || e);
   process.exit(1);
