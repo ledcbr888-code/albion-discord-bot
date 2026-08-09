@@ -808,6 +808,52 @@ process.on('unhandledRejection', err => console.error('❌ Unhandled rejection:'
 process.on('uncaughtException', err => console.error('❌ Uncaught exception:', err));
 
 console.log('🔄 Attempting to login to Discord...');
+console.log(`🔑 BOT_TOKEN loaded: ${BOT_TOKEN ? 'YES' : 'NO'}`);
+console.log(`🔑 BOT_TOKEN length: ${BOT_TOKEN.length}`);
+console.log('🌐 Starting Discord Gateway connection...');
+
+let discordReady = false;
+const loginStartedAt = Date.now();
+
+client.once('ready', () => {
+    discordReady = true;
+    console.log(`🟢 BOT ONLINE: ${client.user.tag}`);
+    console.log(`🆔 Bot ID: ${client.user.id}`);
+    console.log(`🏠 Servers: ${client.guilds.cache.size}`);
+    console.log(`⏱️ Discord login/READY time: ${Date.now() - loginStartedAt}ms`);
+});
+
+client.on('error', (error) => {
+    console.error('❌ Discord Client Error:', error);
+    console.error('Error name:', error?.name || 'Unknown');
+    console.error('Error message:', error?.message || String(error));
+});
+
+process.on('unhandledRejection', (error) => {
+    console.error('❌ Unhandled Promise Rejection:', error);
+});
+
+process.on('uncaughtException', (error) => {
+    console.error('❌ Uncaught Exception:', error);
+});
+
+const loginTimeout = setTimeout(() => {
+    if (discordReady) return;
+    console.error('❌ Discord login timeout: no READY event received within 30 seconds.');
+    console.error('🔎 Check Render Environment Variables: BOT_TOKEN must contain the current Discord Bot Token.');
+    console.error('🔎 Also check Discord Developer Portal: Bot is enabled and the token has not been reset.');
+    process.exit(1);
+}, 30000);
+
 client.login(BOT_TOKEN)
-    .then(() => console.log('✅ Login function executed successfully.'))
-    .catch(err => console.error('❌ Login failed:', err.message));
+    .then(() => {
+        console.log('✅ Discord login request accepted; waiting for READY event...');
+    })
+    .catch((error) => {
+        clearTimeout(loginTimeout);
+        console.error('❌ Discord login failed!');
+        console.error('Error name:', error?.name || 'Unknown');
+        console.error('Error message:', error?.message || String(error));
+        console.error(error);
+        process.exit(1);
+    });
