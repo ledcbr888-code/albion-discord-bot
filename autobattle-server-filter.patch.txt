@@ -1,1 +1,0 @@
-Planned Auto-Battle fix: add East/West/Asia server selection to /autobattle set; store server per tracked guild; query/build Battle URLs using selected server; verify each Battle belongs to the configured tracked Guild before alerting; prevent unrelated guild alerts; improve battle time extraction; preserve existing behavior.
