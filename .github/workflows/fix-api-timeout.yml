@@ -4,11 +4,11 @@ on:
   push:
     paths:
       - 'index.js'
+      - '.github/workflows/fix-api-timeout.yml'
 permissions:
   contents: write
 jobs:
   fix:
-    if: github.actor == 'ledcbr888-code'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -18,9 +18,10 @@ jobs:
           from pathlib import Path
           p = Path('index.js')
           s = p.read_text()
-          s = s.replace("const {\n    Client,", "const {\n    Client,")
-          s = s.replace("timeout: 8000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' }", "timeout: 20000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' }")
+          s = s.replace("timeout: 8000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' }", "timeout: 30000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' }")
+          s = s.replace("timeout: 20000,\n                headers: {\n                    'User-Agent': 'Albion-Discord-Bot/1.0',", "timeout: 30000,\n                headers: {\n                    'User-Agent': 'Albion-Discord-Bot/1.0',")
           s = s.replace("console.log(`⚠️ Official API skipped: ${err.message}`);", "console.warn(`⚠️ Official battle API skipped: ${err.response?.status === 404 ? 'endpoint returned 404' : err.message}`);")
+          s = s.replace("console.warn(`⚠️ Official recent battles API skipped: ${err.message}`);", "console.warn(`⚠️ Official recent battles API skipped: ${err.response?.status === 404 ? 'endpoint returned 404' : err.message}`);")
           s = s.replace("ephemeral: true", "flags: 64")
           s = s.replace("client.once('ready', async () => {", "client.once('clientReady', async () => {")
           p.write_text(s)
@@ -34,7 +35,7 @@ jobs:
           if git diff --cached --quiet; then
             echo 'No changes needed.'
           else
-            git commit -m 'Harden Albion API polling and Discord interaction flags'
+            git commit -m 'Harden Albion API polling and Discord warnings'
             git push
           fi
       - name: Remove temporary workflow
