@@ -42,7 +42,8 @@ const DATA_FILE = path.join(__dirname, 'tracking.json');
 let targetPlayers = [];
 let targetGuilds = [];
 let autoBattleConfigs = []; 
-let processedBattles = new Set(); 
+let processedBattles = new Set();
+let autoBattleCheckRunning = false;
 
 function loadData() {
     try {
@@ -242,7 +243,7 @@ async function fetchRecentOfficialBattles() {
     for (const url of urls) {
         try {
             const response = await axios.get(url, {
-                timeout: 10000,
+                timeout: 20000,
                 headers: {
                     'User-Agent': 'Albion-Discord-Bot/1.0',
                     'Accept': 'application/json'
@@ -668,6 +669,12 @@ async function processBattleReport(input, targetContext, isMessage = false) {
 
 async function checkAutoBattles() {
     if (!autoBattleConfigs.length) return;
+    if (autoBattleCheckRunning) {
+        console.warn('⚠️ Auto-Battle check skipped because the previous check is still running.');
+        return;
+    }
+
+    autoBattleCheckRunning = true;
     try {
         // Do not scrape the Cloudflare-protected AlbionBB homepage.
         const recentMatches = await fetchRecentOfficialBattles();
@@ -697,6 +704,8 @@ async function checkAutoBattles() {
         }
     } catch (err) {
         console.error('❌ Auto-Battle background polling error:', err.message);
+    } finally {
+        autoBattleCheckRunning = false;
     }
 }
 
@@ -721,7 +730,7 @@ const commands = [
             .addStringOption(o => o.setName('guild').setDescription('ชื่อ Guild ที่ต้องการยกเลิกติดตาม Auto-Battle').setRequired(true)))
 ].map(c => c.toJSON());
 
-client.once('ready', async () => {
+client.once('clientReady', async () => {
     console.log(`✅ Logged in as ${client.user.tag}`);
     const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
     try {
@@ -737,6 +746,7 @@ client.once('ready', async () => {
         console.error('⚠️ Initial battle fetch failed:', err.message);
     }
 
+    setTimeout(checkAutoBattles, 15000);
     setInterval(checkAutoBattles, 5 * 60 * 1000);
 });
 
