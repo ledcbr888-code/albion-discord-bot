@@ -243,7 +243,7 @@ async function fetchRecentOfficialBattles() {
     for (const url of urls) {
         try {
             const response = await axios.get(url, {
-                timeout: 20000,
+                timeout: 30000,
                 headers: {
                     'User-Agent': 'Albion-Discord-Bot/1.0',
                     'Accept': 'application/json'
@@ -266,7 +266,7 @@ async function fetchRecentOfficialBattles() {
 
             if (ids.length) return [...new Set(ids)];
         } catch (err) {
-            console.warn(`⚠️ Official recent battles API skipped: ${err.message}`);
+            console.warn(`⚠️ Official recent battles API skipped: ${err.response?.status === 404 ? 'endpoint returned 404' : err.message}`);
         }
     }
 
@@ -397,9 +397,9 @@ async function fetchOfficialBattle(matchId) {
     ];
     for (const url of urls) {
         try {
-            const response = await axios.get(url, { timeout: 8000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' } });
+            const response = await axios.get(url, { timeout: 30000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' } });
             if (response.data) return response.data;
-        } catch (err) { console.log(`⚠️ Official API skipped: ${err.message}`); }
+        } catch (err) { console.warn(`⚠️ Official battle API skipped: ${err.response?.status === 404 ? 'endpoint returned 404' : err.message}`); }
     }
     return null;
 }
@@ -773,11 +773,11 @@ client.on('interactionCreate', async interaction => {
     if (commandName === 'add') {
         const sub = interaction.options.getSubcommand(), name = interaction.options.getString('name').trim();
         if (sub === 'guild') {
-            if (targetGuilds.some(x => x.toLowerCase() === name.toLowerCase())) return interaction.reply({ content: `⚠️ กิลด์ **${name}** มีอยู่แล้ว`, ephemeral: true });
+            if (targetGuilds.some(x => x.toLowerCase() === name.toLowerCase())) return interaction.reply({ content: `⚠️ กิลด์ **${name}** มีอยู่แล้ว`, flags: 64 });
             targetGuilds.push(name); saveData(); return interaction.reply(`🛡️ เพิ่มกิลด์ **${name}** แล้ว`);
         }
         if (sub === 'player') {
-            if (targetPlayers.some(x => x.toLowerCase() === name.toLowerCase())) return interaction.reply({ content: `⚠️ ผู้เล่น **${name}** มีอยู่แล้ว`, ephemeral: true });
+            if (targetPlayers.some(x => x.toLowerCase() === name.toLowerCase())) return interaction.reply({ content: `⚠️ ผู้เล่น **${name}** มีอยู่แล้ว`, flags: 64 });
             targetPlayers.push(name); saveData(); return interaction.reply(`✅ เพิ่มผู้เล่น **${name}** แล้ว`);
         }
     }
@@ -786,12 +786,12 @@ client.on('interactionCreate', async interaction => {
         const sub = interaction.options.getSubcommand(), name = interaction.options.getString('name').trim();
         if (sub === 'guild') {
             const before = targetGuilds.length; targetGuilds = targetGuilds.filter(x => x.toLowerCase() !== name.toLowerCase());
-            if (before === targetGuilds.length) return interaction.reply({ content: `❌ ไม่พบกิลด์ **${name}**`, ephemeral: true });
+            if (before === targetGuilds.length) return interaction.reply({ content: `❌ ไม่พบกิลด์ **${name}**`, flags: 64 });
             saveData(); return interaction.reply(`🗑️ ลบกิลด์ **${name}** แล้ว`);
         }
         if (sub === 'player') {
             const before = targetPlayers.length; targetPlayers = targetPlayers.filter(x => x.toLowerCase() !== name.toLowerCase());
-            if (before === targetPlayers.length) return interaction.reply({ content: `❌ ไม่พบผู้เล่น **${name}**`, ephemeral: true });
+            if (before === targetPlayers.length) return interaction.reply({ content: `❌ ไม่พบผู้เล่น **${name}**`, flags: 64 });
             saveData(); return interaction.reply(`🗑️ ผู้เล่น **${name}** แล้ว`);
         }
     }
@@ -829,7 +829,7 @@ client.on('interactionCreate', async interaction => {
 
         if (sub === 'list') {
             const serverConfigs = autoBattleConfigs.filter(c => c.guildId === interaction.guildId);
-            if (!serverConfigs.length) return interaction.reply({ content: '🛡️ เซิร์ฟเวอร์นี้ยังไม่มีการตั้งค่า Auto-Battle สำหรับกิลด์ใดๆ', ephemeral: true });
+            if (!serverConfigs.length) return interaction.reply({ content: '🛡️ เซิร์ฟเวอร์นี้ยังไม่มีการตั้งค่า Auto-Battle สำหรับกิลด์ใดๆ', flags: 64 });
 
             let listText = serverConfigs.map((c, i) => `${i + 1}. กิลด์: **${c.targetGuild}** | ห้อง: <#${c.channelId}> | ขั้นต่ำ Fame: **${formatFame(c.minFame)}**`).join('\n');
             const embed = new EmbedBuilder()
@@ -847,7 +847,7 @@ client.on('interactionCreate', async interaction => {
             autoBattleConfigs = autoBattleConfigs.filter(c => !(c.guildId === interaction.guildId && c.targetGuild.toLowerCase() === guildName.toLowerCase()));
 
             if (beforeCount === autoBattleConfigs.length) {
-                return interaction.reply({ content: `❌ ไม่พบกิลด์ **${guildName}** ในระบบ Auto-Battle ของเซิร์ฟเวอร์นี้`, ephemeral: true });
+                return interaction.reply({ content: `❌ ไม่พบกิลด์ **${guildName}** ในระบบ Auto-Battle ของเซิร์ฟเวอร์นี้`, flags: 64 });
             }
 
             saveData();
