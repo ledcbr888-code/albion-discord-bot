@@ -1,0 +1,302 @@
+name: Update Albion Kill Death Card
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  patch:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Patch index.js
+        shell: python
+        run: |
+          from pathlib import Path
+          import re
+          import os
+
+          path = Path('index.js')
+          source = path.read_text(encoding='utf-8')
+
+          start = source.find('async function generateKillDeathCardImage')
+          end_marker = '\nfunction extractMatchId'
+          end = source.find(end_marker, start)
+          if start < 0 or end < 0:
+              raise SystemExit('Could not locate generateKillDeathCardImage block')
+
+          new_function = r'''async function generateKillDeathCardImage(eventData, isDeath = false) {
+    const width = 1200;
+    const height = 650;
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext('2d');
+
+    const COLORS = {
+        bg: '#c7ab8c',
+        paper: '#e4c9a4',
+        paperDark: '#b99670',
+        ink: '#2b2119',
+        muted: '#725f4b',
+        green: '#4b9b63',
+        red: '#b94a48',
+        gold: '#c58b32',
+        white: '#fff7e8'
+    };
+
+    // Albion-style parchment background
+    ctx.fillStyle = COLORS.bg;
+    ctx.fillRect(0, 0, width, height);
+
+    ctx.fillStyle = COLORS.paper;
+    ctx.beginPath();
+    ctx.roundRect(18, 18, width - 36, height - 36, 18);
+    ctx.fill();
+
+    // Subtle border / inner frame
+    ctx.strokeStyle = '#8e7255';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.roundRect(18, 18, width - 36, height - 36, 18);
+    ctx.stroke();
+
+    // Header
+    ctx.fillStyle = COLORS.ink;
+    ctx.font = 'bold 34px sans-serif';
+    ctx.fillText(isDeath ? 'DEATH DETAILS' : 'KILL DETAILS', 48, 62);
+
+    ctx.fillStyle = COLORS.muted;
+    ctx.font = '18px sans-serif';
+    ctx.fillText(formatUTCTime(eventData.eventTime), 48, 91);
+
+    const totalFame = Number(eventData.totalFame || 0).toLocaleString();
+    ctx.textAlign = 'right';
+    ctx.fillStyle = COLORS.gold;
+    ctx.font = 'bold 25px sans-serif';
+    ctx.fillText(`${totalFame} KILL FAME`, width - 48, 67);
+    ctx.textAlign = 'left';
+
+    // Helpers
+    const getNested = (obj, keys) => {
+        if (!obj || typeof obj !== 'object') return null;
+        for (const key of keys) {
+            if (obj[key] !== undefined && obj[key] !== null && obj[key] !== '') return obj[key];
+        }
+        return null;
+    };
+
+    const getEquipment = (player) => {
+        const eq = getNested(player, ['Equipment', 'equipment', 'Gear', 'gear']) || {};
+        const inv = getNested(player, ['Inventory', 'inventory']) || {};
+        const find = (keys) => {
+            const direct = getNested(player, keys);
+            if (direct) return direct;
+            const fromEq = getNested(eq, keys);
+            if (fromEq) return fromEq;
+            return null;
+        };
+        return {
+            head: find(['Head', 'head', 'Headgear', 'headgear', 'Helmet', 'helmet']),
+            armor: find(['Armor', 'armor', 'Chest', 'chest', 'Body', 'body']),
+            shoes: find(['Shoes', 'shoes', 'Boots', 'boots', 'Foot', 'foot']),
+            mainHand: find(['MainHand', 'mainHand', 'MAINHAND', 'mainhand', 'Weapon', 'weapon', 'WeaponId', 'weaponId']),
+            offHand: find(['OffHand', 'offHand', 'OFFHAND', 'offhand', 'Offhand']),
+            cape: find(['Cape', 'cape']),
+            bag: find(['Bag', 'bag']),
+            mount: find(['Mount', 'mount']),
+            food: find(['Food', 'food']),
+            potion: find(['Potion', 'potion']),
+            inventory: inv
+        };
+    };
+
+    const itemIdFrom = (raw) => {
+        if (!raw) return '';
+        if (typeof raw === 'string') return normalizeAlbionItemId(raw);
+        return normalizeAlbionItemId(raw.itemId ?? raw.ItemId ?? raw.itemID ?? raw.ItemID ?? raw.type ?? raw.Type ?? raw.id ?? raw.Id ?? raw.name ?? raw.Name ?? '');
+    };
+
+    const loadItem = async (raw) => {
+        const id = itemIdFrom(raw);
+        if (!id) return null;
+        const candidates = [
+            `https://render.albiononline.com/v1/item/${encodeURIComponent(id)}.png`,
+            `https://render.albiononline.com/v1/item/${encodeURIComponent(id.split('@')[0])}.png`
+        ];
+        for (const url of candidates) {
+            try {
+                return await Promise.race([
+                    loadImage(url),
+                    new Promise((_, reject) => setTimeout(() => reject(new Error('item timeout')), 2500))
+                ]);
+            } catch (_) {}
+        }
+        return null;
+    };
+
+    const drawAvatar = (x, y, player, accent) => {
+        ctx.fillStyle = accent;
+        ctx.beginPath();
+        ctx.arc(x + 38, y + 38, 32, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.fillStyle = COLORS.white;
+        ctx.font = 'bold 25px sans-serif';
+        ctx.textAlign = 'center';
+        const name = String(player?.Name || player?.name || 'Unknown');
+        ctx.fillText(name.slice(0, 1).toUpperCase(), x + 38, y + 47);
+        ctx.textAlign = 'left';
+    };
+
+    const drawPlayer = async (x, y, player, accent, side) => {
+        const name = String(player?.Name || player?.name || 'Unknown');
+        const guild = String(player?.GuildName || player?.guildName || player?.guild || 'No Guild');
+        const eq = getEquipment(player);
+
+        ctx.fillStyle = '#d9bd96';
+        ctx.beginPath();
+        ctx.roundRect(x, y, 440, 480, 14);
+        ctx.fill();
+        ctx.strokeStyle = '#947653';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+
+        drawAvatar(x + 18, y + 18, player, accent);
+
+        ctx.fillStyle = COLORS.ink;
+        ctx.font = 'bold 24px sans-serif';
+        let shortName = name.length > 24 ? `${name.slice(0, 21)}...` : name;
+        ctx.fillText(shortName, x + 72, y + 36);
+
+        ctx.fillStyle = COLORS.muted;
+        ctx.font = '17px sans-serif';
+        const guildText = guild.length > 31 ? `${guild.slice(0, 28)}...` : guild;
+        ctx.fillText(guildText, x + 72, y + 61);
+
+        // 3 x 3 equipment grid, similar to Albion killboard presentation
+        const slots = [
+            ['head', 0, 0], ['mainHand', 1, 0], ['offHand', 2, 0],
+            ['armor', 0, 1], ['cape', 1, 1], ['bag', 2, 1],
+            ['shoes', 0, 2], ['mount', 1, 2], ['food', 2, 2]
+        ];
+        const slotSize = 92;
+        const gap = 12;
+        const gridX = x + 34;
+        const gridY = y + 92;
+
+        for (const [key, gx, gy] of slots) {
+            const sx = gridX + gx * (slotSize + gap);
+            const sy = gridY + gy * (slotSize + gap);
+            ctx.fillStyle = '#b18f6d';
+            ctx.beginPath();
+            ctx.roundRect(sx, sy, slotSize, slotSize, 10);
+            ctx.fill();
+            ctx.strokeStyle = '#8d6e50';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            const img = await loadItem(eq[key]);
+            if (img) {
+                ctx.drawImage(img, sx + 7, sy + 7, slotSize - 14, slotSize - 14);
+            } else {
+                ctx.fillStyle = '#8d765e';
+                ctx.font = 'bold 13px sans-serif';
+                ctx.textAlign = 'center';
+                ctx.fillText(key === 'mainHand' ? 'WEAPON' : key.toUpperCase(), sx + slotSize / 2, sy + slotSize / 2 + 5);
+                ctx.textAlign = 'left';
+            }
+        }
+
+        const ip = Number(player?.AverageItemPower || player?.averageItemPower || player?.IP || player?.ip || 0);
+        const kills = Number(player?.Kills || player?.kills || 0);
+        ctx.fillStyle = COLORS.ink;
+        ctx.font = 'bold 18px sans-serif';
+        ctx.fillText(ip ? `IP ${ip.toLocaleString()}` : '', x + 34, y + 395);
+        ctx.fillText(kills ? `Kills ${kills.toLocaleString()}` : '', x + 190, y + 395);
+
+        ctx.fillStyle = accent;
+        ctx.beginPath();
+        ctx.roundRect(x + 34, y + 414, 372, 40, 9);
+        ctx.fill();
+        ctx.fillStyle = COLORS.white;
+        ctx.font = 'bold 18px sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(side, x + 220, y + 441);
+        ctx.textAlign = 'left';
+    };
+
+    const killer = eventData.killer || {
+        Name: eventData.killerName,
+        GuildName: eventData.killerGuild
+    };
+    const victim = eventData.victim || {
+        Name: eventData.victimName,
+        GuildName: eventData.victimGuild
+    };
+
+    // Victim is on the left and killer on the right, matching common Albion killboard layouts.
+    await drawPlayer(48, 125, victim, COLORS.red, 'VICTIM');
+    await drawPlayer(width - 488, 125, killer, COLORS.green, 'KILLER');
+
+    // Center kill/death seal
+    const cx = width / 2;
+    const cy = 355;
+    ctx.fillStyle = COLORS.paper;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 78, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = COLORS.gold;
+    ctx.lineWidth = 5;
+    ctx.stroke();
+
+    ctx.fillStyle = isDeath ? COLORS.red : COLORS.green;
+    ctx.font = 'bold 42px sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(isDeath ? '☠' : '⚔', cx, cy + 8);
+    ctx.font = 'bold 18px sans-serif';
+    ctx.fillText(isDeath ? 'DEATH' : 'KILLED', cx, cy + 39);
+
+    ctx.fillStyle = COLORS.gold;
+    ctx.font = 'bold 22px sans-serif';
+    ctx.fillText(`${totalFame} Fame`, cx, cy + 112);
+    ctx.fillStyle = COLORS.muted;
+    ctx.font = '15px sans-serif';
+    ctx.fillText('albion kill report', cx, cy + 137);
+    ctx.textAlign = 'left';
+
+    return new AttachmentBuilder(canvas.toBuffer('image/png'), {
+        name: isDeath ? 'albion-death-report.png' : 'albion-kill-report.png'
+    });
+}'''
+
+          source = source[:start] + new_function + source[end:]
+
+          old_payload = 'const eventPayload = { killerName, killerGuild, victimName, victimGuild, totalFame, eventTime };'
+          new_payload = 'const eventPayload = { killerName, killerGuild, victimName, victimGuild, totalFame, eventTime, killer, victim };'
+          count = source.count(old_payload)
+          if count == 0:
+              raise SystemExit('Could not locate eventPayload lines')
+          source = source.replace(old_payload, new_payload)
+
+          path.write_text(source, encoding='utf-8')
+
+          # One-time workflow: remove this file after the patch is committed.
+          workflow = Path('.github/workflows/patch-kill-death-card.yml')
+          if workflow.exists():
+              workflow.unlink()
+
+      - name: Validate JavaScript
+        run: node --check index.js
+
+      - name: Commit patched code
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet && exit 0
+          git commit -m "Update /kill and /death cards to Albion killboard style"
+          git push
