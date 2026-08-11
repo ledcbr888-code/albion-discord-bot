@@ -1,36 +1,52 @@
 name: Apply AlbionKB Kill Death Renderer
+
 on:
   push:
     branches: [main]
+  workflow_dispatch:
+
 permissions:
   contents: write
+
 jobs:
   apply:
     if: ${{ !contains(github.event.head_commit.message, 'Apply AlbionKB kill/death renderer') }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
       - name: Patch index.js
         run: |
           node <<'NODE'
           const fs = require('fs');
-          let s = fs.readFileSync('index.js','utf8');
-          const patch = fs.readFileSync('killdeath_patch.txt','utf8').trimEnd()+'\n';
-          const a=s.indexOf('async function generateKillDeathCardImage('), b=s.indexOf('\nfunction extractMatchId(',a);
-          if(a<0||b<0) throw new Error('renderer block not found');
-          s=s.slice(0,a)+patch+s.slice(b+1);
-          const reKill=/const eventPayload = \{ killerName, killerGuild, victimName, victimGuild, totalFame, eventTime \};\s+const mainCard = await generateKillDeathCardImage\(eventPayload, false\);[\s\S]*?files: \[mainCard\]/;
-          const reDeath=/const eventPayload = \{ killerName, killerGuild, victimName, victimGuild, totalFame, eventTime \};\s+const mainCard = await generateKillDeathCardImage\(eventPayload, true\);[\s\S]*?files: \[mainCard\]/;
-          s=s.replace(reKill,`const eventPayload = { killerName, killerGuild, victimName, victimGuild, totalFame, eventTime, eventId };\n                    const cards = await buildKillDeathImages(eventPayload, false);\n                    \n                    await channel.send({\n                        content: \`🎯 **Kill Alert!** **\${killerName}** (\${killerGuild || 'No Guild'}) ได้ทำการสังหาร **\${victimName}**\`,\n                        files: [cards.main, cards.details]`);
-          s=s.replace(reDeath,`const eventPayload = { killerName, killerGuild, victimName, victimGuild, totalFame, eventTime, eventId };\n                    const cards = await buildKillDeathImages(eventPayload, true);\n\n                    await channel.send({\n                        content: \`💀 **Death Alert!** **\${victimName}** (\${victimGuild || 'No Guild'}) ได้เสียชีวิตจากการถูกสังหารโดย **\${killerName}\``,\n                        files: [cards.main, cards.details]`);
-          fs.writeFileSync('index.js',s);
+          const indexPath = 'index.js';
+          const patchPath = 'killdeath_patch.txt';
+          let s = fs.readFileSync(indexPath, 'utf8');
+          const patch = fs.readFileSync(patchPath, 'utf8').trimEnd() + '\n';
+          const start = s.indexOf('async function generateKillDeathCardImage(');
+          const end = s.indexOf('\nfunction extractMatchId(', start);
+          if (start < 0 || end < 0) throw new Error('Could not locate generateKillDeathCardImage');
+          s = s.slice(0, start) + patch + s.slice(end + 1);
+
+          const killOld = `const eventPayload = { killerName, killerGuild, victimName, victimGuild, totalFame, eventTime };\n                    const mainCard = await generateKillDeathCardImage(eventPayload, false);\n                    \n                    await channel.send({\n                        content: \`🎯 **Kill Alert!** **\${killerName}** (\${killerGuild || 'No Guild'}) ได้ทำการสังหาร **\${victimName}**\`,\n                        files: [mainCard]\n                    }).catch(() => {});`;
+          const killNew = `const eventPayload = { killerName, killerGuild, victimName, victimGuild, totalFame, eventTime, eventId };\n                    const cards = await buildKillDeathImages(eventPayload, false);\n                    \n                    await channel.send({\n                        content: \`🎯 **Kill Alert!** **\${killerName}** (\${killerGuild || 'No Guild'}) ได้ทำการสังหาร **\${victimName}**\`,\n                        files: [cards.main, cards.details]\n                    }).catch(() => {});`;
+          if (!s.includes(killOld)) throw new Error('Could not locate kill tracker block');
+          s = s.replace(killOld, killNew);
+
+          const deathOld = `const eventPayload = { killerName, killerGuild, victimName, victimGuild, totalFame, eventTime };\n                    const mainCard = await generateKillDeathCardImage(eventPayload, true);\n\n                    await channel.send({\n                        content: \`💀 **Death Alert!** **\${victimName}** (\${victimGuild || 'No Guild'}) ได้เสียชีวิตจากการถูกสังหารโดย **\${killerName}\``,\n                        files: [mainCard]\n                    }).catch(() => {});`;
+          const deathNew = `const eventPayload = { killerName, killerGuild, victimName, victimGuild, totalFame, eventTime, eventId };\n                    const cards = await buildKillDeathImages(eventPayload, true);\n\n                    await channel.send({\n                        content: \`💀 **Death Alert!** **\${victimName}** (\${victimGuild || 'No Guild'}) ได้เสียชีวิตจากการถูกสังหารโดย **\${killerName}\``,\n                        files: [cards.main, cards.details]\n                    }).catch(() => {});`;
+          if (!s.includes(deathOld)) throw new Error('Could not locate death tracker block');
+          s = s.replace(deathOld, deathNew);
+
+          fs.writeFileSync(indexPath, s, 'utf8');
           NODE
           node --check index.js
-      - name: Commit
+
+      - name: Commit renderer update
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          rm -f killdeath_patch.txt .github/workflows/apply-killdeath.yml
-          git add index.js killdeath_patch.txt .github/workflows/apply-killdeath.yml
+          rm -f killdeath_patch.txt .github/workflows/apply-killdeath.yml KILLDEATH_APPLY_TRIGGER.txt
+          git add index.js killdeath_patch.txt .github/workflows/apply-killdeath.yml KILLDEATH_APPLY_TRIGGER.txt
           git commit -m "Apply AlbionKB kill/death renderer"
           git push
