@@ -1,0 +1,129 @@
+name: Remove Kill Death Features
+
+on:
+  push:
+    paths:
+      - REMOVE_KILL_DEATH
+
+permissions:
+  contents: write
+
+jobs:
+  remove:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Remove kill/death code
+        run: |
+          node <<'NODE'
+          const fs = require('fs');
+          const file = 'index.js';
+          let s = fs.readFileSync(file, 'utf8');
+
+          function findMatchingBrace(text, open) {
+            let depth = 0, quote = null, esc = false, lineComment = false, blockComment = false;
+            for (let i = open; i < text.length; i++) {
+              const c = text[i], n = text[i + 1];
+              if (lineComment) { if (c === '\n') lineComment = false; continue; }
+              if (blockComment) { if (c === '*' && n === '/') { blockComment = false; i++; } continue; }
+              if (quote) { if (esc) { esc = false; continue; } if (c === '\\') { esc = true; continue; } if (c === quote) quote = null; continue; }
+              if (c === '/' && n === '/') { lineComment = true; i++; continue; }
+              if (c === '/' && n === '*') { blockComment = true; i++; continue; }
+              if (c === '`') { quote = '`'; continue; }
+              if (c === "'") { quote = "'"; continue; }
+              if (c === '"') { quote = '"'; continue; }
+              if (c === '{') depth++;
+              else if (c === '}') { depth--; if (depth === 0) return i; }
+            }
+            return -1;
+          }
+
+          function removeFunctions(names) {
+            for (const name of names) {
+              const re = new RegExp('(?:async\\s+)?function\\s+' + name + '\\s*\\(');
+              let m;
+              while ((m = re.exec(s))) {
+                const open = s.indexOf('{', m.index + m[0].length);
+                if (open < 0) break;
+                const close = findMatchingBrace(s, open);
+                if (close < 0) break;
+                let end = close + 1;
+                if (s[end] === '\\n') end++;
+                s = s.slice(0, m.index) + s.slice(end);
+              }
+            }
+          }
+
+          // Remove the dedicated renderer(s).
+          removeFunctions(['generateKillDeathCardImage', 'generateTopPerformanceImage']);
+
+          // Remove standalone tracker state and persistence fields.
+          s = s.replace(/^.*targetKillTrackers.*$/gm, '');
+          s = s.replace(/^.*targetDeathTrackers.*$/gm, '');
+          s = s.replace(/^\s*killTrackers:\s*targetKillTrackers,?\s*$/gm, '');
+          s = s.replace(/^\s*deathTrackers:\s*targetDeathTrackers,?\s*$/gm, '');
+
+          // Remove slash-command builder declarations whose name is kill/death.
+          for (const cmd of ['kill', 'death']) {
+            const nameRe = new RegExp('\\.setName\\(\\s*[\'\"]' + cmd + '[\'\"]\\s*\\)');
+            let m;
+            while ((m = nameRe.exec(s))) {
+              const start = s.lastIndexOf('new SlashCommandBuilder()', m.index);
+              if (start < 0) break;
+              const endSemi = s.indexOf(';', m.index);
+              if (endSemi < 0) break;
+              s = s.slice(0, start) + s.slice(endSemi + 1);
+            }
+          }
+
+          // Remove interaction branches such as: if (interaction.commandName === 'kill') { ... }
+          function removeCommandBranches(text) {
+            const re = /(?:else\\s+)?if\\s*\\(\\s*interaction\\.commandName\\s*===\\s*['\"](kill|death)['\"]\s*\\)\\s*\{/g;
+            let m;
+            while ((m = re.exec(text))) {
+              const open = text.indexOf('{', m.index + m[0].length - 1);
+              const close = findMatchingBrace(text, open);
+              if (close < 0) break;
+              let start = m.index;
+              let end = close + 1;
+              if (text[end] === '\n') end++;
+              text = text.slice(0, start) + text.slice(end);
+              re.lastIndex = Math.max(0, start - 1);
+            }
+            return text;
+          }
+          s = removeCommandBranches(s);
+
+          // Remove common switch cases if the project uses switch(commandName).
+          for (const cmd of ['kill', 'death']) {
+            const re = new RegExp('case\\s*[\'\"]' + cmd + '[\'\"]\\s*:\\s*');
+            let m;
+            while ((m = re.exec(s))) {
+              const next = s.slice(m.index + m[0].length).search(/\\n\\s*case\\s*[\'\"]|\\n\\s*default\\s*:/);
+              if (next < 0) break;
+              const end = m.index + m[0].length + next;
+              s = s.slice(0, m.index) + s.slice(end);
+            }
+          }
+
+          // Remove obvious kill/death tracker command registration entries.
+          s = s.replace(/^.*(?:killCommand|deathCommand|killTrackerCommand|deathTrackerCommand).*$/gm, '');
+
+          // Clean empty array/object artifacts caused by removed persistence fields.
+          s = s.replace(/,\s*,/g, ',').replace(/\{\s*,/g, '{').replace(/,\s*\}/g, '\n}');
+          s = s.replace(/\n{3,}/g, '\n\n');
+          fs.writeFileSync(file, s, 'utf8');
+          NODE
+
+          node --check index.js
+
+      - name: Remove trigger and commit
+        run: |
+          rm -f REMOVE_KILL_DEATH
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.js REMOVE_KILL_DEATH
+          git diff --cached --quiet || git commit -m "chore: remove /kill /death and related features"
+          git push
