@@ -1,1 +1,0 @@
-Trigger GitHub Actions to apply the AlbionKB-style /kill and /death renderer.
