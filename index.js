@@ -2403,12 +2403,12 @@ async function detectAvaMapNameFromImage(imageBuffer) {
 }
 
 function extractAvaExactMarkerCount(text, labels) {
-    const normalized = String(text || '').replace(/\\s+/g, ' ').trim();
+    const normalized = String(text || '').replace(/\s+/g, ' ').trim();
     for (const label of labels) {
-        const escaped = String(label || '').replace(/[.*+?^$\\{\\}()|[\\]\\\\]/g, '\\\\$&');
+        const escaped = String(label || '').replace(/[.*+?^$\{\}()|[\]\\]/g, '\\$&');
         const patterns = [
-            new RegExp('(?:^|[^A-Za-z0-9])' + escaped + '\\\\s*(?:×|x|X)\\\\s*(\\\\d+)\\\\b', 'i'),
-            new RegExp('(?:^|[^A-Za-z0-9])' + escaped + '[^0-9]{0,12}(\\\\d+)\\\\s*(?:×|x|X)', 'i')
+            new RegExp('(?:^|[^A-Za-z0-9])' + escaped + '\\s*(?:×|x|X)\\s*(\\d+)\\b', 'i'),
+            new RegExp('(?:^|[^A-Za-z0-9])' + escaped + '[^0-9]{0,12}(\\d+)\\s*(?:×|x|X)', 'i')
         ];
         for (const re of patterns) {
             const match = normalized.match(re);
@@ -2419,12 +2419,12 @@ function extractAvaExactMarkerCount(text, labels) {
 }
 
 function extractAlbionRoadsNumberNearText(text, labels) {
-    const normalized = String(text || '').replace(/\\s+/g, ' ');
+    const normalized = String(text || '').replace(/\s+/g, ' ');
     for (const label of labels) {
-        const escaped = label.replace(/[.*+?^$\\{\\}()|[\\]\\\\]/g, '\\\\$&');
-        const after = normalized.match(new RegExp(escaped + '[^0-9]{0,80}(\\\\d+)', 'i'));
+        const escaped = label.replace(/[.*+?^$\{\}()|[\]\\]/g, '\\$&');
+        const after = normalized.match(new RegExp(escaped + '[^0-9]{0,80}(\\d+)', 'i'));
         if (after) return Number(after[1]) || 0;
-        const before = normalized.match(new RegExp('(\\\\d+)[^A-Za-z0-9]{0,20}' + escaped, 'i'));
+        const before = normalized.match(new RegExp('(\\d+)[^A-Za-z0-9]{0,20}' + escaped, 'i'));
         if (before) return Number(before[1]) || 0;
     }
     return 0;
