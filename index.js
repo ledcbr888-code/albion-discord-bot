@@ -2960,7 +2960,7 @@ async function processAvaImageMessage(message) {
     if (!attachments.length) return false;
     if (avaProcessedMessages.has(message.id)) return true;
     avaProcessedMessages.add(message.id); if (avaProcessedMessages.size > 500) avaProcessedMessages.delete(avaProcessedMessages.values().next().value);
-    const status = await message.reply('🗺️ กำลังอ่านชื่อแมพ AVA จากรูป และตรวจข้อมูลจาก Albion Roads / Battle Hub / Avalon Tracker...');
+    const status = await message.reply('🗺️ กำลังอ่านชื่อแมพ AVA จากรูป → ค้นหาหน้า Avalon Roads Tracker → ดึงรูปแผนที่และข้อมูลมารายงาน...');
     try {
         const imageResponse = await axios.get(attachments[0].url, { responseType: 'arraybuffer', timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'image/*,*/*;q=0.8' }, validateStatus: status => status >= 200 && status < 300 });
         const ocr = await detectAvaMapNameFromImage(Buffer.from(imageResponse.data));
