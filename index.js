@@ -1142,7 +1142,14 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
     const battleUrl = `https://east.albionbb.com/battles/${matchId}`;
     const report = `🔗 **Battle Link:** <${battleUrl}>\n` + '```ansi\n' + header + body + footer + awardsText + '```';
 
-    const performancePlayers = displayRows
+    const trackedPlayerNames = new Set(
+        targetPlayers.map(name => String(name || '').trim().toLowerCase()).filter(Boolean)
+    );
+    const explicitlyTrackedRows = displayRows.filter(p =>
+        trackedPlayerNames.has(String(p.displayName || p.name || '').trim().toLowerCase())
+    );
+
+    const performancePlayers = explicitlyTrackedRows
         .filter(p => p.damage > 0 || p.healing > 0)
         .sort((a, b) => (b.damage + b.healing) - (a.damage + a.healing))
         .slice(0, 5);
@@ -1150,7 +1157,9 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
     const attachments = [];
 
     try {
-        const playerReport = await generatePlayerWeaponReportImage(displayRows, {
+        // IMPORTANT: /add guild does not implicitly add every guild member's
+        // weapon to this image. Only /add player entries are rendered here.
+        const playerReport = await generatePlayerWeaponReportImage(explicitlyTrackedRows, {
             matchId: matchId,
             battleTime: battleTime
         });
@@ -3063,100 +3072,36 @@ function drawAvaStatBox(ctx, x, y, w, title, rows, accent) {
 }
 
 async function generateAvaRoadsCard(data, ocrText = '') {
-    // Large map-first AVA report: the map gets most of the canvas while the
-    // information rail is intentionally compact on the right.
-    const width = 1600, height = 1000;
-    const canvas = createCanvas(width, height), ctx = canvas.getContext('2d');
-    const bg = ctx.createLinearGradient(0, 0, width, height);
-    bg.addColorStop(0, '#090b10'); bg.addColorStop(1, '#17110a');
-    ctx.fillStyle = bg; ctx.fillRect(0, 0, width, height);
+    // AVA report is map-only: no stats/header/footer. Render the source map
+    // as large as possible so the map itself uses the entire report.
+    const width = 2400, height = 1600;
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext('2d');
 
-    ctx.fillStyle = '#f4c15d'; ctx.font = '900 32px Arial, sans-serif';
-    ctx.fillText('ALBION ROADS • AVALON MAP CHECK', 42, 48);
-    ctx.fillStyle = '#e9edf2'; ctx.font = '900 46px Arial, sans-serif';
-    ctx.fillText(data.name, 42, 100);
-    ctx.fillStyle = '#9aa6b2'; ctx.font = '700 20px Arial, sans-serif';
-    ctx.fillText(`${data.tier}${data.layout ? `  •  Layout ${data.layout}` : ''}  •  Source: ${data.source}`, 44, 132);
+    ctx.fillStyle = '#05070b';
+    ctx.fillRect(0, 0, width, height);
 
     const mapImage = await downloadImageForCanvas(data.mapImage);
-    const mapX = 36, mapY = 160, mapW = 1130, mapH = 770;
-    drawRoundRect(ctx, mapX, mapY, mapW, mapH, 20);
-    ctx.fillStyle = '#05070b'; ctx.fill();
-    ctx.strokeStyle = '#394454'; ctx.lineWidth = 2; ctx.stroke();
-
-    if (mapImage) {
-        const inner = 18;
-        const scale = Math.min((mapW - inner * 2) / mapImage.width, (mapH - inner * 2) / mapImage.height);
-        const dw = mapImage.width * scale, dh = mapImage.height * scale;
-        const dx = mapX + (mapW - dw) / 2, dy = mapY + (mapH - dh) / 2;
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(mapX + 2, mapY + 2, mapW - 4, mapH - 4);
-        ctx.clip();
-        ctx.drawImage(mapImage, dx, dy, dw, dh);
-        ctx.restore();
-    } else {
-        ctx.fillStyle = '#8b95a3'; ctx.font = '700 24px Arial, sans-serif';
-        ctx.textAlign = 'center'; ctx.fillText('MAP IMAGE NOT AVAILABLE', mapX + mapW / 2, mapY + mapH / 2);
+    if (!mapImage) {
+        ctx.fillStyle = '#f1f5f9';
+        ctx.font = '900 52px Arial, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('MAP IMAGE NOT AVAILABLE', width / 2, height / 2);
         ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+    } else {
+        const scale = Math.min(width / mapImage.width, height / mapImage.height);
+        const dw = Math.round(mapImage.width * scale);
+        const dh = Math.round(mapImage.height * scale);
+        const dx = Math.round((width - dw) / 2);
+        const dy = Math.round((height - dh) / 2);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(mapImage, dx, dy, dw, dh);
     }
 
-    // Compact right rail. It is deliberately much narrower than the map.
-    const railX = 1200, railW = 360;
-    const c = data.counts;
-    const iconNames = ['Gold', 'Blue', 'Green', 'Wood', 'Ore', 'Stone', 'Hide', 'Fiber', 'GroupDungeon'];
-    const iconEntries = await Promise.all(iconNames.map(async name => [name, await loadAvaCardIcon(name)]));
-    const icons = Object.fromEntries(iconEntries);
-    const item = (icon, label, value) => ({ icon: icons[icon], label, value: value || 0 });
-
-    const drawCompactBox = (y, h, title, rows, accent) => {
-        drawRoundRect(ctx, railX, y, railW, h, 16);
-        ctx.fillStyle = '#11151d'; ctx.fill();
-        ctx.strokeStyle = accent; ctx.lineWidth = 2; ctx.stroke();
-        ctx.fillStyle = accent; ctx.font = '900 19px Arial, sans-serif';
-        ctx.fillText(title, railX + 16, y + 30);
-
-        let yy = y + 46;
-        rows.forEach(row => {
-            row.forEach(it => {
-                if (it.icon) ctx.drawImage(it.icon, railX + 14, yy, 26, 26);
-                ctx.fillStyle = '#f1f5f9'; ctx.font = '700 18px Arial, sans-serif';
-                ctx.fillText(`${it.label}  ${it.value}`, railX + 48, yy + 20);
-                yy += 30;
-            });
-        });
-    };
-
-    drawCompactBox(160, 145, 'CHESTS', [
-        [item('Gold', 'Gold', c['Gold chest'])],
-        [item('Blue', 'Blue', c['Blue chest'])],
-        [item('Green', 'Green', c['Green chest'])]
-    ], '#eab308');
-
-    drawCompactBox(320, 235, 'RESOURCES', [
-        [item('Wood', 'Wood', c.Wood)],
-        [item('Ore', 'Ore', c.Ore)],
-        [item('Stone', 'Rock', c.Stone)],
-        [item('Hide', 'Hide', c.Hide)],
-        [item('Fiber', 'Fiber', c.Fiber)]
-    ], '#65a30d');
-
-    drawCompactBox(570, 145, 'DUNGEON', [
-        [item('GroupDungeon', 'Group', c['Group dungeon'])],
-        [{ icon: null, label: 'Solo', value: c['Solo dungeon'] || 0 }]
-    ], '#a855f7');
-
-    drawCompactBox(730, 120, 'TOTAL', [
-        [{ icon: null, label: 'Chests', value: data.totalChests }],
-        [{ icon: null, label: 'Resources', value: data.totalResources }],
-        [{ icon: null, label: 'Dungeons', value: data.totalDungeons }]
-    ], '#2dd4bf');
-
-    ctx.fillStyle = '#7f8b99'; ctx.font = '600 15px Arial, sans-serif';
-    ctx.fillText('OCR: ' + (ocrText || data.name), 42, 962);
-    ctx.fillText('ข้อมูล: ' + data.source, 1200, 962);
-
-    return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: `ava-${data.name}.png` });
+    return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: `ava-map-${data.name}.png` });
 }
 
 async function processAvaImageMessage(message) {
