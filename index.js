@@ -2189,9 +2189,34 @@ function formatAvaConnection(connection) {
         DEEP: 'Tunnel Deep',
         'DEEP RAID': 'Tunnel Deep Raid',
         HIDEOUT: 'Tunnel Hideout',
-        'HIDEOUT DEEP': 'Tunnel Hideout Deep'
+        'HIDEOUT DEEP': 'Tunnel Hideout Deep',
+        ROYAL: 'Tunnel Royal'
     };
     return map[connection] || `Tunnel ${connection}`;
+}
+
+function normalizeAvaDataTotals(data) {
+    const c = data?.counts || {};
+    const counts = {
+        'Gold chest': Number(c['Gold chest']) || 0,
+        'Blue chest': Number(c['Blue chest']) || 0,
+        'Green chest': Number(c['Green chest']) || 0,
+        'Group dungeon': Number(c['Group dungeon']) || 0,
+        'Solo dungeon': Number(c['Solo dungeon']) || 0,
+        Wood: Number(c.Wood) || 0, Ore: Number(c.Ore) || 0,
+        Stone: Number(c.Stone) || 0, Hide: Number(c.Hide) || 0, Fiber: Number(c.Fiber) || 0
+    };
+    return {
+        ...data, counts,
+        totalChests: counts['Gold chest'] + counts['Blue chest'] + counts['Green chest'],
+        totalResources: counts.Wood + counts.Ore + counts.Stone + counts.Hide + counts.Fiber,
+        totalDungeons: counts['Group dungeon'] + counts['Solo dungeon']
+    };
+}
+
+function avaDataPointCount(data) {
+    const d = normalizeAvaDataTotals(data);
+    return d.totalChests + d.totalResources + d.totalDungeons;
 }
 
 async function fetchAvaMapData(input) {
