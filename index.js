@@ -2658,45 +2658,106 @@ async function fetchBattleHubMapData(mapName) {
 
 async function fetchAvalonTrackerMapData(mapName) {
     const correctedName = normalizeAvaOcrMapName(mapName);
-    const slug = normalizeMapNameText(correctedName).toLowerCase().replace(/\s+/g, '-');
+    const slug = normalizeMapNameText(correctedName).toLowerCase().replace(/\\s+/g, '-');
     const url = `https://avalonroads-97617.web.app/mapas/${encodeURIComponent(slug)}.html`;
+
     const response = await axios.get(url, {
-        timeout: 15000,
-        headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'text/html,application/xhtml+xml' },
+        timeout: 20000,
+        headers: {
+            'User-Agent': 'Mozilla/5.0',
+            Accept: 'text/html,application/xhtml+xml,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            Referer: 'https://avalonroads-97617.web.app/'
+        },
         validateStatus: status => status >= 200 && status < 400
     });
+
     const html = String(response.data || '');
     const $ = cheerio.load(html);
-    const bodyText = $('body').text().replace(/\s+/g, ' ').trim();
-    const name = $('h1').first().text().trim() || mapName;
-    if (!name || !/Resources|Chests|Tier/i.test(bodyText)) throw new Error(`Avalon Tracker ไม่พบแมพ ${mapName}`);
-    const countLabel = (label, aliases = []) => {
-        const labels = [label, ...aliases];
-        const exact = extractAvaExactMarkerCount(bodyText, labels);
-        if (exact > 0) return exact;
+    const bodyText = $('body').text().replace(/\\s+/g, ' ').trim();
 
-        // Fallback for tracker pages that render "Label 2" rather than "Label ×2".
-        for (const current of labels) {
-            const escaped = current.replace(/[.*+?^$\\{\\}()|[\\]\\\\]/g, '\\\\$&');
-            const numbered =
-                bodyText.match(new RegExp(escaped + '\\s+(\\d+)\\b', 'i')) ||
-                bodyText.match(new RegExp('(?:^|[^0-9])\\(?(\\d+)\\)?\\s+' + escaped + '\\b', 'i'));
-            if (numbered) return Number(numbered[1]) || 0;
+    const findCount = (labels) => {
+        for (const label of labels) {
+            const escaped = String(label).replace(/[.*+?^$\\{\\}()|[\\]\\\\]/g, '\\\\$&');
+            const patterns = [
+                new RegExp(escaped + '\\s*(?:×|x|X|:|-)?\\s*(\\d{1,4})\\b', 'i'),
+                new RegExp('\\b(\\d{1,4})\\s*(?:×|x|X|:|-)?\\s*' + escaped + '\\b', 'i')
+            ];
+            for (const re of patterns) {
+                const m = bodyText.match(re);
+                if (m) return Number(m[1]) || 0;
+            }
         }
-        return 0;
-    };    const counts = {
-        'Gold chest': countLabel('Gold Chest'),
-        'Blue chest': countLabel('Blue Chest'),
-        'Green chest': countLabel('Green Chest'),
-        'Group dungeon': countLabel('Avalonian Dungeon', ['Group dungeon']),
-        'Solo dungeon': countLabel('Solo dungeon'),
-        Wood: countLabel('Wood'), Ore: countLabel('Ore'), Stone: countLabel('Stone'),
-        Hide: countLabel('Hide'), Fiber: countLabel('Fiber')
+
+        // Some versions render the icon name and number in separate DOM nodes.
+        let result = 0;
+        $('body *').each((_, el) => {
+            if (result) return;
+            const text = $(el).text().replace(/\\s+/g, ' ').trim();
+            if (!text || text.length > 160) return;
+            for (const label of labels) {
+                if (!new RegExp(label.replace(/[.*+?^$\\{\\}()|[\\]\\\\]/g, '\\\\$&'), 'i').test(text)) continue;
+                const m = text.match(/(?:^|[^0-9])(\\d{1,4})(?:[^0-9]|$)/);
+                if (m) { result = Number(m[1]) || 0; return; }
+            }
+        });
+        return result;
     };
-    const tier = bodyText.match(/\bT([468])\b/i);
-    const imageRaw = $('a[href*="img_webp"], img[src*="img_webp"], meta[property="og:image"]').first().attr('href') || $('a[href*="img_webp"], img[src*="img_webp"], meta[property="og:image"]').first().attr('src') || $('meta[property="og:image"]').attr('content') || '';
-    const mapImage = imageRaw ? new URL(imageRaw, url).href : '';
-    return { name, tier: tier ? `T${tier[1]}` : 'ไม่พบข้อมูล', layout: '', connection: null, counts, mapImage, sourceUrl: url, source: 'Avalon Roads Tracker' };
+
+    const counts = {
+        'Gold chest': findCount(['Gold Chest', 'Gold chest']),
+        'Blue chest': findCount(['Blue Chest', 'Blue chest']),
+        'Green chest': findCount(['Green Chest', 'Green chest']),
+        'Group dungeon': findCount(['Avalonian Dungeon', 'Group dungeon']),
+        'Solo dungeon': findCount(['Solo dungeon', 'Solo Dungeon']),
+        Wood: findCount(['Wood', 'LOGS']),
+        Ore: findCount(['Ore', 'ORE']),
+        Stone: findCount(['Stone', 'ROCK']),
+        Hide: findCount(['Hide', 'HIDE']),
+        Fiber: findCount(['Fiber', 'COTTON'])
+    };
+
+    const tier = bodyText.match(/\\bT\\s*([468])\\b/i);
+    const title = $('h1').first().text().trim() || $('title').first().text().trim();
+    const nameMatch = title.match(/([A-Za-z0-9]{3,18}-[A-Za-z0-9]{3,18})/);
+    const name = nameMatch ? nameMatch[1] : correctedName;
+
+    const imageCandidates = [];
+    $('meta[property="og:image"],meta[name="twitter:image"]').each((_, el) => {
+        const v = $(el).attr('content'); if (v) imageCandidates.push(v);
+    });
+    $('img').each((_, el) => {
+        const v = $(el).attr('src') || $(el).attr('data-src');
+        if (v) imageCandidates.push(v);
+        const ss = $(el).attr('srcset') || $(el).attr('data-srcset');
+        if (ss) imageCandidates.push(ss.split(',').pop().trim().split(/\\s+/)[0]);
+    });
+    $('a[href*="img_webp"],a[href$=".png"],a[href$=".jpg"],a[href$=".jpeg"],a[href$=".webp"]').each((_, el) => {
+        const v = $(el).attr('href'); if (v) imageCandidates.push(v);
+    });
+
+    let mapImage = '';
+    for (const raw of [...new Set(imageCandidates)]) {
+        try {
+            const absolute = new URL(raw, url).href;
+            if (/\\.(?:png|jpe?g|webp|gif)(?:[?#].*)?$/i.test(absolute) || /img_webp/i.test(absolute)) {
+                mapImage = absolute;
+                break;
+            }
+        } catch (_) {}
+    }
+
+    const tunnel = html.match(/TUNNEL(?:_BLACK)?_[A-Z_]+/i);
+    return {
+        name,
+        tier: tier ? `T${tier[1]}` : 'ไม่พบข้อมูล',
+        layout: '',
+        connection: tunnel ? tunnel[0].toUpperCase() : '',
+        counts,
+        mapImage,
+        sourceUrl: url,
+        source: 'Avalon Roads Tracker'
+    };
 }
 
 async function fetchAlbionRoadsMapData(mapName) {
