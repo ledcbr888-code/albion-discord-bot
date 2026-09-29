@@ -3063,34 +3063,99 @@ function drawAvaStatBox(ctx, x, y, w, title, rows, accent) {
 }
 
 async function generateAvaRoadsCard(data, ocrText = '') {
-    const width = 1200, height = 820, canvas = createCanvas(width, height), ctx = canvas.getContext('2d');
-    const bg = ctx.createLinearGradient(0, 0, width, height); bg.addColorStop(0, '#090b10'); bg.addColorStop(1, '#17110a'); ctx.fillStyle = bg; ctx.fillRect(0, 0, width, height);
-    ctx.fillStyle = '#f4c15d'; ctx.font = '900 30px Arial, sans-serif'; ctx.fillText('ALBION ROADS • AVALON MAP CHECK', 42, 48);
-    ctx.fillStyle = '#e9edf2'; ctx.font = '900 42px Arial, sans-serif'; ctx.fillText(data.name, 42, 98);
-    ctx.fillStyle = '#9aa6b2'; ctx.font = '700 20px Arial, sans-serif'; ctx.fillText(`${data.tier}${data.layout ? `  •  Layout ${data.layout}` : ''}  •  Source: ${data.source}`, 44, 130);
+    // Large map-first AVA report: the map gets most of the canvas while the
+    // information rail is intentionally compact on the right.
+    const width = 1600, height = 1000;
+    const canvas = createCanvas(width, height), ctx = canvas.getContext('2d');
+    const bg = ctx.createLinearGradient(0, 0, width, height);
+    bg.addColorStop(0, '#090b10'); bg.addColorStop(1, '#17110a');
+    ctx.fillStyle = bg; ctx.fillRect(0, 0, width, height);
+
+    ctx.fillStyle = '#f4c15d'; ctx.font = '900 32px Arial, sans-serif';
+    ctx.fillText('ALBION ROADS • AVALON MAP CHECK', 42, 48);
+    ctx.fillStyle = '#e9edf2'; ctx.font = '900 46px Arial, sans-serif';
+    ctx.fillText(data.name, 42, 100);
+    ctx.fillStyle = '#9aa6b2'; ctx.font = '700 20px Arial, sans-serif';
+    ctx.fillText(`${data.tier}${data.layout ? `  •  Layout ${data.layout}` : ''}  •  Source: ${data.source}`, 44, 132);
+
     const mapImage = await downloadImageForCanvas(data.mapImage);
+    const mapX = 36, mapY = 160, mapW = 1130, mapH = 770;
+    drawRoundRect(ctx, mapX, mapY, mapW, mapH, 20);
+    ctx.fillStyle = '#05070b'; ctx.fill();
+    ctx.strokeStyle = '#394454'; ctx.lineWidth = 2; ctx.stroke();
+
     if (mapImage) {
-        const boxX = 42, boxY = 165, boxW = 560, boxH = 590; drawRoundRect(ctx, boxX, boxY, boxW, boxH, 18); ctx.fillStyle = '#0d1016'; ctx.fill(); ctx.strokeStyle = '#2d3748'; ctx.stroke();
-        const scale = Math.min((boxW - 20) / mapImage.width, (boxH - 20) / mapImage.height), dw = mapImage.width * scale, dh = mapImage.height * scale; ctx.drawImage(mapImage, boxX + (boxW - dw) / 2, boxY + (boxH - dh) / 2, dw, dh);
+        const inner = 18;
+        const scale = Math.min((mapW - inner * 2) / mapImage.width, (mapH - inner * 2) / mapImage.height);
+        const dw = mapImage.width * scale, dh = mapImage.height * scale;
+        const dx = mapX + (mapW - dw) / 2, dy = mapY + (mapH - dh) / 2;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(mapX + 2, mapY + 2, mapW - 4, mapH - 4);
+        ctx.clip();
+        ctx.drawImage(mapImage, dx, dy, dw, dh);
+        ctx.restore();
+    } else {
+        ctx.fillStyle = '#8b95a3'; ctx.font = '700 24px Arial, sans-serif';
+        ctx.textAlign = 'center'; ctx.fillText('MAP IMAGE NOT AVAILABLE', mapX + mapW / 2, mapY + mapH / 2);
+        ctx.textAlign = 'left';
     }
+
+    // Compact right rail. It is deliberately much narrower than the map.
+    const railX = 1200, railW = 360;
     const c = data.counts;
     const iconNames = ['Gold', 'Blue', 'Green', 'Wood', 'Ore', 'Stone', 'Hide', 'Fiber', 'GroupDungeon'];
     const iconEntries = await Promise.all(iconNames.map(async name => [name, await loadAvaCardIcon(name)]));
     const icons = Object.fromEntries(iconEntries);
     const item = (icon, label, value) => ({ icon: icons[icon], label, value: value || 0 });
-    drawAvaStatBox(ctx, 635, 165, 520, 'CHESTS', [
-        [item('Gold', 'Gold', c['Gold chest'])], [item('Blue', 'Blue', c['Blue chest'])], [item('Green', 'Green', c['Green chest'])]
+
+    const drawCompactBox = (y, h, title, rows, accent) => {
+        drawRoundRect(ctx, railX, y, railW, h, 16);
+        ctx.fillStyle = '#11151d'; ctx.fill();
+        ctx.strokeStyle = accent; ctx.lineWidth = 2; ctx.stroke();
+        ctx.fillStyle = accent; ctx.font = '900 19px Arial, sans-serif';
+        ctx.fillText(title, railX + 16, y + 30);
+
+        let yy = y + 46;
+        rows.forEach(row => {
+            row.forEach(it => {
+                if (it.icon) ctx.drawImage(it.icon, railX + 14, yy, 26, 26);
+                ctx.fillStyle = '#f1f5f9'; ctx.font = '700 18px Arial, sans-serif';
+                ctx.fillText(`${it.label}  ${it.value}`, railX + 48, yy + 20);
+                yy += 30;
+            });
+        });
+    };
+
+    drawCompactBox(160, 145, 'CHESTS', [
+        [item('Gold', 'Gold', c['Gold chest'])],
+        [item('Blue', 'Blue', c['Blue chest'])],
+        [item('Green', 'Green', c['Green chest'])]
     ], '#eab308');
-    drawAvaStatBox(ctx, 635, 370, 520, 'RESOURCES', [
-        [item('Wood', 'Wood', c.Wood), item('Ore', 'Ore', c.Ore)],
-        [item('Stone', 'Stone', c.Stone), item('Hide', 'Hide', c.Hide)],
+
+    drawCompactBox(320, 235, 'RESOURCES', [
+        [item('Wood', 'Wood', c.Wood)],
+        [item('Ore', 'Ore', c.Ore)],
+        [item('Stone', 'Rock', c.Stone)],
+        [item('Hide', 'Hide', c.Hide)],
         [item('Fiber', 'Fiber', c.Fiber)]
     ], '#65a30d');
-    drawAvaStatBox(ctx, 635, 575, 520, 'DUNGEON', [
-        [item('GroupDungeon', 'Group Dungeon', c['Group dungeon'])],
-        [{ icon: null, label: 'Solo Dungeon', value: c['Solo dungeon'] || 0 }]
+
+    drawCompactBox(570, 145, 'DUNGEON', [
+        [item('GroupDungeon', 'Group', c['Group dungeon'])],
+        [{ icon: null, label: 'Solo', value: c['Solo dungeon'] || 0 }]
     ], '#a855f7');
-    ctx.fillStyle = '#7f8b99'; ctx.font = '600 17px Arial, sans-serif'; ctx.fillText('OCR: ' + (ocrText || data.name), 44, 790); ctx.fillText('นับจากข้อมูลจุดสำรวจรายชนิด: ' + data.source, 700, 790);
+
+    drawCompactBox(730, 120, 'TOTAL', [
+        [{ icon: null, label: 'Chests', value: data.totalChests }],
+        [{ icon: null, label: 'Resources', value: data.totalResources }],
+        [{ icon: null, label: 'Dungeons', value: data.totalDungeons }]
+    ], '#2dd4bf');
+
+    ctx.fillStyle = '#7f8b99'; ctx.font = '600 15px Arial, sans-serif';
+    ctx.fillText('OCR: ' + (ocrText || data.name), 42, 962);
+    ctx.fillText('ข้อมูล: ' + data.source, 1200, 962);
+
     return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: `ava-${data.name}.png` });
 }
 
@@ -3101,7 +3166,7 @@ async function processAvaImageMessage(message) {
     if (!attachments.length) return false;
     if (avaProcessedMessages.has(message.id)) return true;
     avaProcessedMessages.add(message.id); if (avaProcessedMessages.size > 500) avaProcessedMessages.delete(avaProcessedMessages.values().next().value);
-    const status = await message.reply('🗺️ กำลังอ่านชื่อแมพ AVA จากรูป → ค้นหาหน้า Avalon Roads Tracker → ดึงรูปแผนที่และข้อมูลมารายงาน...');
+    const status = await message.reply('🗺️ กำลังอ่านชื่อแมพ AVA จากรูป → ค้นหาหน้า Albion Online Builds → ดึงรูปแมพขนาดใหญ่และข้อมูลมารายงาน...');
     try {
         const imageResponse = await axios.get(attachments[0].url, { responseType: 'arraybuffer', timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'image/*,*/*;q=0.8' }, validateStatus: status => status >= 200 && status < 300 });
         const ocr = await detectAvaMapNameFromImage(Buffer.from(imageResponse.data));
