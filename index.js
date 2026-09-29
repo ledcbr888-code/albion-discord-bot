@@ -2872,26 +2872,57 @@ async function fetchAlbionRoadsMapData(mapName) {
 async function fetchAvaMapDataWithFallback(mapName) {
     const errors = [];
     const sources = [
-        // Primary: this tracker has the actual Avalon map image plus POI/resource counts.
         ['Avalon Roads Tracker', fetchAvalonTrackerMapData],
-        // Fallbacks if the tracker is temporarily unavailable.
         ['Albion Battle Hub', fetchBattleHubMapData],
         ['Albion Roads', fetchAlbionRoadsMapData]
     ];
 
-    for (const [sourceName, fetcher] of sources) {
+    // Tracker is authoritative. Keep every field it actually found and only
+    // fill fields that are absent from the Tracker page with a fallback source.
+    try {
+        const primary = normalizeAvaDataTotals(await fetchAvalonTrackerMapData(mapName));
+        if (avaDataPointCount(primary) > 0) {
+            const missing = Object.keys(primary.counts || {}).filter(key => !primary.countMeta?.[key]);
+
+            for (const [sourceName, fetcher] of sources.slice(1)) {
+                if (!missing.some(key => !primary.countMeta?.[key])) break;
+                try {
+                    const fallback = normalizeAvaDataTotals(await fetcher(mapName));
+                    for (const key of missing) {
+                        if (primary.countMeta?.[key]) continue;
+                        const value = Number(fallback.counts?.[key]) || 0;
+                        if (value > 0) {
+                            primary.counts[key] = value;
+                            primary.countMeta[key] = true;
+                        }
+                    }
+                } catch (err) {
+                    errors.push(sourceName + ': ' + err.message);
+                    console.warn('⚠️ AVA ' + sourceName + ' fallback failed for ' + mapName + ': ' + err.message);
+                }
+            }
+
+            return normalizeAvaDataTotals(primary);
+        }
+        errors.push('Avalon Roads Tracker: พบหน้าแต่ยังไม่พบตัวเลข POI');
+    } catch (err) {
+        errors.push('Avalon Roads Tracker: ' + err.message);
+        console.warn('⚠️ AVA Avalon Roads Tracker unavailable for ' + mapName + ': ' + err.message);
+    }
+
+    // If the primary page is unavailable, use complete fallback sources.
+    for (const [sourceName, fetcher] of sources.slice(1)) {
         try {
             const data = normalizeAvaDataTotals(await fetcher(mapName));
             if (avaDataPointCount(data) > 0) return data;
-            errors.push(`${sourceName}: พบหน้าแต่ไม่มีตัวเลข`);
+            errors.push(sourceName + ': พบหน้าแต่ไม่มีตัวเลข');
         } catch (err) {
-            errors.push(`${sourceName}: ${err.message}`);
-            console.warn(`⚠️ AVA ${sourceName} unavailable for ${mapName}: ${err.message}`);
+            errors.push(sourceName + ': ' + err.message);
+            console.warn('⚠️ AVA ' + sourceName + ' unavailable for ' + mapName + ': ' + err.message);
         }
     }
 
-    // Final static dataset fallback. This source is useful when the dynamic
-    // pages are reachable but return a page shell without the POI numbers.
+    // Final static dataset fallback.
     try {
         const url = 'https://lucioreyli.github.io/ava-maps/';
         const response = await axios.get(url, {
@@ -2910,7 +2941,7 @@ async function fetchAvaMapDataWithFallback(mapName) {
         const next = titles.find(m => m.index > hit.index);
         const section = body.slice(hit.index, next ? next.index : hit.index + 5000);
         const countFor = key => {
-            const re = new RegExp('(\\d+)\\s*Image\\s*:?\\s*' + key + '\\b', 'i');
+            const re = new RegExp('(\\d+)\\s*Image\\s*:?' + key + '\\b', 'i');
             const m = section.match(re);
             return m ? Number(m[1]) || 0 : 0;
         };
@@ -2926,13 +2957,13 @@ async function fetchAvaMapDataWithFallback(mapName) {
             Hide: countFor('hide'),
             Fiber: countFor('fiber')
         };
-        const tier = hit[0].match(/\((IV|VI)\)/i);
-        const tunnel = section.match(/\bTUNNEL_([A-Z_]+)\b/i);
+        const tierMatch = hit[0].match(/\((IV|VI)\)/i);
+        const tunnelMatch = section.match(/\bTUNNEL_([A-Z_]+)\b/i);
         const data = normalizeAvaDataTotals({
             name: hit[0].replace(/\s*\((?:IV|VI)\)/, ''),
-            tier: tier ? (tier[1].toUpperCase() === 'IV' ? 'T4' : 'T6') : 'ไม่พบข้อมูล',
+            tier: tierMatch ? (tierMatch[1].toUpperCase() === 'VI' ? 'T6' : 'T4') : 'ไม่พบข้อมูล',
             layout: '',
-            connection: tunnel ? tunnel[1].toUpperCase() : null,
+            connection: tunnelMatch ? tunnelMatch[1].toUpperCase() : '',
             counts,
             mapImage: '',
             sourceUrl: url,
@@ -2941,12 +2972,13 @@ async function fetchAvaMapDataWithFallback(mapName) {
         if (avaDataPointCount(data) > 0) return data;
         errors.push('Albion Avalon Maps: พบแมพแต่ไม่มีตัวเลข');
     } catch (err) {
-        errors.push(`Albion Avalon Maps: ${err.message}`);
-        console.warn(`⚠️ AVA static source unavailable for ${mapName}: ${err.message}`);
+        errors.push('Albion Avalon Maps: ' + err.message);
+        console.warn('⚠️ AVA static source unavailable for ' + mapName + ': ' + err.message);
     }
 
-    throw new Error(`ไม่พบข้อมูล AVA สำหรับ ${mapName} | ${errors.join(' | ')}`);
+    throw new Error('ไม่พบข้อมูล AVA สำหรับ ' + mapName + ' | ' + errors.join(' | '));
 }
+
 async function downloadImageForCanvas(url) {
     if (!url) return null;
     try { const response = await axios.get(url, { responseType: 'arraybuffer', timeout: 12000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'image/*,*/*;q=0.8' }, validateStatus: status => status >= 200 && status < 300 }); return await loadImage(Buffer.from(response.data)); } catch (_) { return null; }
