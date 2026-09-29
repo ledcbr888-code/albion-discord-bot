@@ -2478,6 +2478,19 @@ function avaNameSimilarity(a, b) {
     return (distanceScore * 0.35) + (prefixScore * 0.35) + (suffixScore * 0.30);
 }
 
+// OCR มักสับสน i/l/I/u และตัวอักษรที่หน้าตาคล้ายกันในชื่อแมพ AVA.
+// แก้เฉพาะ typo ที่ยืนยันจากฐานข้อมูลจริงก่อน เพื่อไม่ให้เดาไปเป็นแมพอื่น.
+const AVA_OCR_NAME_ALIASES = new Map([
+    ['teros-aulusum', 'Teros-Auiusum'],
+    ['teros-auiusum', 'Teros-Auiusum'],
+    ['teros-auiusum', 'Teros-Auiusum']
+]);
+
+function normalizeAvaOcrMapName(value) {
+    const normalized = normalizeAvaLookupName(value);
+    return AVA_OCR_NAME_ALIASES.get(normalized) || normalizeMapNameText(value);
+}
+
 function parseAvaNameFromHref(href) {
     const m = String(href || '').match(/(?:avalon-maps|maps\/avalon)\/([^/?#]+)/i);
     return m ? decodeURIComponent(m[1]).replace(/-/g, '-').trim() : '';
@@ -2527,7 +2540,7 @@ async function fetchBattleHubMapIndex() {
 }
 
 async function resolveAvaMapName(input) {
-    const normalizedInput = normalizeMapNameText(input);
+    const normalizedInput = normalizeAvaOcrMapName(input);
     if (!normalizedInput) return { name: '', score: 0, exact: false };
 
     // First try the exact name against Battle Hub. This is important for OCR results
@@ -2552,8 +2565,9 @@ async function resolveAvaMapName(input) {
     const ranked = candidates.map(name => ({ name, score: avaNameSimilarity(normalizedInput, name) }))
         .sort((a, b) => b.score - a.score);
     const best = ranked[0];
-    // Avoid silently mapping a bad OCR result to an unrelated road.
-    if (!best || best.score < 0.72) return { name: normalizedInput, score: best?.score || 0, exact: false };
+    // OCR can be off by 1-2 characters. Require a reasonably strong fuzzy match,
+    // but do not reject a clear one-character OCR typo such as Aulusum -> Auiusum.
+    if (!best || best.score < 0.62) return { name: normalizedInput, score: best?.score || 0, exact: false };
     return { name: best.name, score: best.score, exact: false };
 }
 
@@ -2612,7 +2626,8 @@ async function fetchBattleHubMapData(mapName) {
 }
 
 async function fetchAvalonTrackerMapData(mapName) {
-    const slug = normalizeMapNameText(mapName).toLowerCase().replace(/\s+/g, '-');
+    const correctedName = normalizeAvaOcrMapName(mapName);
+    const slug = normalizeMapNameText(correctedName).toLowerCase().replace(/\s+/g, '-');
     const url = `https://avalonroads-97617.web.app/mapas/${encodeURIComponent(slug)}.html`;
     const response = await axios.get(url, {
         timeout: 15000,
