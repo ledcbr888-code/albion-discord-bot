@@ -2405,11 +2405,24 @@ async function detectAvaMapNameFromImage(imageBuffer) {
 function extractAvaExactMarkerCount(text, labels) {
     const normalized = String(text || '')
         .replace(/\\u00d7/g, '×')
-        .replace(/\s+/g, ' ')
+        .replace(/\\s+/g, ' ')
         .trim();
 
     for (const label of labels) {
-        const escaped = String(label || '').replace(/[.*+?^$\\{\\}()|[\\]\\\\]/g, '\\\\function extractAlbionRoadsNumberNearText(text, labels) {');
+        const escaped = String(label || '').replace(/[.*+?^$\\{\\}()|[\\]\\\\]/g, '\\\\$&');
+        const patterns = [
+            new RegExp('(?:^|[^A-Za-z0-9])' + escaped + '\\\\s*(?:×|x|X)\\\\s*(\\\\d+)\\\\b', 'i'),
+            new RegExp('(?:^|[^A-Za-z0-9])' + escaped + '[^0-9]{0,12}(\\\\d+)\\\\s*(?:×|x|X)', 'i')
+        ];
+        for (const re of patterns) {
+            const match = normalized.match(re);
+            if (match) return Number(match[1]) || 0;
+        }
+    }
+    return 0;
+}
+
+function extractAlbionRoadsNumberNearText(text, labels) {');
         // Prefer the explicit marker used by Avalon map pages: Label × 2 / Label x2.
         const patterns = [
             new RegExp('(?:^|[^A-Za-z0-9])' + escaped + '\\s*(?:×|x|X)\\s*(\\d+)\\b', 'i'),
