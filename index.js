@@ -3717,7 +3717,7 @@ client.on('interactionCreate', async interaction => {
             const config = { guildId: interaction.guildId, channelId: channel.id, enabled: true };
             if (existing >= 0) avaAutoConfigs[existing] = config; else avaAutoConfigs.push(config);
             saveData();
-            return interaction.reply(`✅ ตั้งค่าตรวจรูป AVA อัตโนมัติแล้ว\n📢 ห้อง: <#${channel.id}>\n\nวางรูปแผนที่ AVA ในห้องนี้ได้เลย บอทจะ OCR ชื่อแมพ → ค้นข้อมูลจาก **Albion Roads** → ถ้าเว็บตอบ 403/406 จะใช้ **Albion Battle Hub** และ **Avalon Roads Tracker** เป็นแหล่งสำรอง → สร้างรายงานเป็นรูปให้อัตโนมัติ`);
+            return interaction.reply(`✅ ตั้งค่าตรวจรูป AVA อัตโนมัติแล้ว\n📢 ห้อง: <#${channel.id}>\n\nวางรูปแผนที่ AVA ในห้องนี้ได้เลย บอทจะ OCR ชื่อแมพ → ค้นหน้าแมพตรงจาก **Albion Online Builds** → ดึงจำนวนหีบ/ทรัพยากร/ดันเจี้ยนและรูปแมพจากหน้าเว็บ → สร้างรายงานเป็นรูปให้อัตโนมัติ (มีแหล่งสำรองเมื่อหน้าเว็บหลักใช้ไม่ได้)`);
         }
         if (sub === 'status') {
             const config = avaAutoConfigs.find(x => x.guildId === interaction.guildId);
