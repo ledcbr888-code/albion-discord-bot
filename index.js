@@ -2407,8 +2407,11 @@ function extractAvaExactMarkerCount(text, labels) {
     for (const label of labels) {
         const escaped = String(label || '').replace(/[.*+?^$\{\}()|[\]\\]/g, '\\$&');
         const patterns = [
-            new RegExp('(?:^|[^A-Za-z0-9])' + escaped + '\\s*(?:×|x|X)\\s*(\\d+)\\b', 'i'),
-            new RegExp('(?:^|[^A-Za-z0-9])' + escaped + '[^0-9]{0,12}(\\d+)\\s*(?:×|x|X)', 'i')
+            // Battle Hub renders entries like "ImageGreen chest×2". The icon/image
+            // token may touch the label, so do NOT require a non-alphanumeric
+            // boundary before the label.
+            new RegExp(escaped + '\\s*(?:×|x|X)\\s*(\\d+)\\b', 'i'),
+            new RegExp(escaped + '[^0-9]{0,12}(\\d+)\\s*(?:×|x|X)', 'i')
         ];
         for (const re of patterns) {
             const match = normalized.match(re);
