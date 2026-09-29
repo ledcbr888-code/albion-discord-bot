@@ -2659,13 +2659,13 @@ async function fetchBattleHubMapData(mapName) {
 async function fetchAvalonTrackerMapData(mapName) {
     const correctedName = normalizeAvaOcrMapName(mapName);
     const slug = normalizeMapNameText(correctedName).toLowerCase().replace(/\s+/g, '-');
-    const url = \`https://avalonroads-97617.web.app/mapas/\${encodeURIComponent(slug)}.html\`;
+    const url = 'https://avalonroads-97617.web.app/mapas/' + encodeURIComponent(slug) + '.html';
 
     const response = await axios.get(url, {
-        timeout: 20000,
+        timeout: 25000,
         headers: {
-            'User-Agent': 'Mozilla/5.0',
-            Accept: 'text/html,application/xhtml+xml,image/avif,image/webp,*/*;q=0.8',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36',
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
             'Accept-Language': 'en-US,en;q=0.9',
             Referer: 'https://avalonroads-97617.web.app/'
         },
@@ -2676,65 +2676,133 @@ async function fetchAvalonTrackerMapData(mapName) {
     const $ = cheerio.load(html);
     const bodyText = $('body').text().replace(/\s+/g, ' ').trim();
 
-    const findCount = (labels) => {
-        for (const label of labels) {
-            const escaped = String(label).replace(/[.*+?^$\\{}()|[\]\\]/g, '\\$&');
+    // Avalon Roads has multiple page layouts. Values may be visible text,
+    // data-* attributes, or JavaScript state, so parse all representations.
+    const sourceText = [
+        bodyText,
+        $('body').html() || '',
+        ...$('script').map((_, el) => $(el).html() || '').get()
+    ].join(' ');
+
+    const escapeRe = value => String(value).replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+
+    const findCount = labels => {
+        const labelList = labels.map(String);
+
+        // Structured values: "ore":67, ore:67, data-ore="67", etc.
+        for (const label of labelList) {
+            const key = label.toLowerCase().replace(/[^a-z0-9]+/g, '');
+            if (!key) continue;
             const patterns = [
-                new RegExp(escaped + '\\s*(?:×|x|X|:|-)?\\s*(\\d{1,4})\\b', 'i'),
-                new RegExp('\\b(\\d{1,4})\\s*(?:×|x|X|:|-)?\\s*' + escaped + '\\b', 'i')
+                new RegExp('["]' + escapeRe(label) + '["]\\s*[:=]\\s*["]?([0-9]{1,5})\\b', 'i'),
+                new RegExp('\\bdata-(?:count-)?' + escapeRe(key) + '\\s*=\\s*["]?([0-9]{1,5})\\b', 'i'),
+                new RegExp('\\b' + escapeRe(label) + '\\s*[:=]\\s*([0-9]{1,5})\\b', 'i')
             ];
             for (const re of patterns) {
-                const m = bodyText.match(re);
-                if (m) return Number(m[1]) || 0;
+                const m = sourceText.match(re);
+                if (m) return { value: Number(m[1]) || 0, found: true };
             }
         }
 
-        let result = 0;
+        // Human-readable forms: Ore 67, 67 Ore, Ore x 67, 67 ImageOre.
+        for (const label of labelList) {
+            const escaped = escapeRe(label);
+            const patterns = [
+                new RegExp('\\b' + escaped + '\\s*(?:×|x|X|:|-)?\\s*([0-9]{1,5})\\b', 'i'),
+                new RegExp('\\b([0-9]{1,5})\\s*(?:×|x|X|:|-)?\\s*' + escaped + '\\b', 'i'),
+                new RegExp('([0-9]{1,5})\\s*Image\\s*' + escaped + '\\b', 'i'),
+                new RegExp('Image\\s*' + escaped + '\\s*(?:×|x|X|:|-)?\\s*([0-9]{1,5})\\b', 'i')
+            ];
+            for (const re of patterns) {
+                const m = sourceText.match(re);
+                if (m) return { value: Number(m[1]) || 0, found: true };
+            }
+        }
+
+        // DOM-local parsing prevents unrelated page numbers from being used.
+        let result = { value: 0, found: false };
         $('body *').each((_, el) => {
-            if (result) return;
+            if (result.found) return;
             const text = $(el).text().replace(/\s+/g, ' ').trim();
-            if (!text || text.length > 160) return;
-            for (const label of labels) {
-                const escaped = String(label).replace(/[.*+?^$\\{}()|[\]\\]/g, '\\$&');
-                if (!new RegExp(escaped, 'i').test(text)) continue;
-                const m = text.match(/(?:^|[^0-9])(\d{1,4})(?:[^0-9]|$)/);
-                if (m) { result = Number(m[1]) || 0; return; }
+            if (!text || text.length > 220) return;
+
+            for (const label of labelList) {
+                const hasLabel = new RegExp('\\b' + escapeRe(label) + '\\b', 'i').test(text) ||
+                    new RegExp('Image\\s*' + escapeRe(label), 'i').test(text);
+                if (!hasLabel) continue;
+
+                const patterns = [
+                    new RegExp('\\b([0-9]{1,5})\\s*(?:×|x|X|:|-)?\\s*' + escapeRe(label) + '\\b', 'i'),
+                    new RegExp('\\b' + escapeRe(label) + '\\s*(?:×|x|X|:|-)?\\s*([0-9]{1,5})\\b', 'i'),
+                    new RegExp('([0-9]{1,5})\\s*Image\\s*' + escapeRe(label) + '\\b', 'i'),
+                    new RegExp('Image\\s*' + escapeRe(label) + '\\s*(?:×|x|X|:|-)?\\s*([0-9]{1,5})\\b', 'i')
+                ];
+
+                for (const re of patterns) {
+                    const m = text.match(re);
+                    if (m) {
+                        result = { value: Number(m[1]) || 0, found: true };
+                        return;
+                    }
+                }
+
+                const nearby = text.match(/\b([0-9]{1,5})\b/g) || [];
+                if (nearby.length === 1) {
+                    result = { value: Number(nearby[0]) || 0, found: true };
+                    return;
+                }
             }
         });
+
         return result;
     };
 
-    const counts = {
-        'Gold chest': findCount(['Gold Chest', 'Gold chest']),
-        'Blue chest': findCount(['Blue Chest', 'Blue chest']),
-        'Green chest': findCount(['Green Chest', 'Green chest']),
-        'Group dungeon': findCount(['Avalonian Dungeon', 'Group dungeon']),
-        'Solo dungeon': findCount(['Solo dungeon', 'Solo Dungeon']),
-        Wood: findCount(['Wood', 'LOGS']),
-        Ore: findCount(['Ore', 'ORE']),
-        Stone: findCount(['Stone', 'ROCK']),
-        Hide: findCount(['Hide', 'HIDE']),
-        Fiber: findCount(['Fiber', 'COTTON'])
+    const fields = {
+        'Gold chest': findCount(['Gold Chest', 'Gold chest', 'gold-chest', 'goldChest']),
+        'Blue chest': findCount(['Blue Chest', 'Blue chest', 'blue-chest', 'blueChest']),
+        'Green chest': findCount(['Green Chest', 'Green chest', 'green-chest', 'greenChest']),
+        'Group dungeon': findCount(['Avalonian Dungeon', 'Group dungeon', 'Group Dungeon', 'dg-group', 'dgGroup']),
+        'Solo dungeon': findCount(['Solo dungeon', 'Solo Dungeon', 'dg-solo', 'dgSolo']),
+        Wood: findCount(['Wood', 'wood', 'LOGS']),
+        Ore: findCount(['Ore', 'ore', 'ORE']),
+        Stone: findCount(['Stone', 'stone', 'ROCK']),
+        Hide: findCount(['Hide', 'hide', 'HIDE']),
+        Fiber: findCount(['Fiber', 'fiber', 'COTTON'])
     };
+
+    const counts = Object.fromEntries(Object.entries(fields).map(([key, info]) => [key, Number(info.value) || 0]));
+    const countMeta = Object.fromEntries(Object.entries(fields).map(([key, info]) => [key, Boolean(info.found)]));
 
     const tier = bodyText.match(/\bT\s*([468])\b/i);
     const title = $('h1').first().text().trim() || $('title').first().text().trim();
     const nameMatch = title.match(/([A-Za-z0-9]{3,18}-[A-Za-z0-9]{3,18})/);
     const name = nameMatch ? nameMatch[1] : correctedName;
 
+    // Prefer the actual map image from the tracker page.
     const imageCandidates = [];
-    $('meta[property="og:image"],meta[name="twitter:image"]').each((_, el) => {
-        const v = $(el).attr('content'); if (v) imageCandidates.push(v);
-    });
+    const pushImage = value => {
+        if (!value) return;
+        const raw = String(value).trim().replace(/^['"]|['"]$/g, '');
+        if (raw) imageCandidates.push(raw);
+    };
+
+    $('meta[property="og:image"],meta[name="twitter:image"],meta[itemprop="image"]').each((_, el) => pushImage($(el).attr('content')));
     $('img').each((_, el) => {
-        const v = $(el).attr('src') || $(el).attr('data-src');
-        if (v) imageCandidates.push(v);
+        pushImage($(el).attr('src'));
+        pushImage($(el).attr('data-src'));
+        pushImage($(el).attr('data-lazy-src'));
         const ss = $(el).attr('srcset') || $(el).attr('data-srcset');
-        if (ss) imageCandidates.push(ss.split(',').pop().trim().split(/\s+/)[0]);
+        if (ss) pushImage(ss.split(',').pop().trim().split(/\s+/)[0]);
     });
-    $('a[href*="img_webp"],a[href$=".png"],a[href$=".jpg"],a[href$=".jpeg"],a[href$=".webp"]').each((_, el) => {
-        const v = $(el).attr('href'); if (v) imageCandidates.push(v);
+    $('[style*="background-image"]').each((_, el) => {
+        const style = $(el).attr('style') || '';
+        const m = style.match(/url\((['"]?)(.*?)\1\)/i);
+        if (m) pushImage(m[2]);
     });
+    $('a[href*="img_webp"],a[href$=".png"],a[href$=".jpg"],a[href$=".jpeg"],a[href$=".webp"],a[href$=".gif"]').each((_, el) => pushImage($(el).attr('href')));
+
+    const imageUrlRe = /https?:[^"'\s<>]+?\.(?:png|jpe?g|webp|gif)(?:\?[^"'\s<>]*)?/ig;
+    for (const m of sourceText.matchAll(imageUrlRe)) pushImage(m[0]);
 
     let mapImage = '';
     for (const raw of [...new Set(imageCandidates)]) {
@@ -2747,13 +2815,14 @@ async function fetchAvalonTrackerMapData(mapName) {
         } catch (_) {}
     }
 
-    const tunnel = html.match(/TUNNEL(?:_BLACK)?_[A-Z_]+/i);
+    const tunnel = sourceText.match(/TUNNEL(?:_BLACK)?_[A-Z_]+/i);
     return {
         name,
-        tier: tier ? \`T\${tier[1]}\` : 'ไม่พบข้อมูล',
+        tier: tier ? 'T' + tier[1] : 'ไม่พบข้อมูล',
         layout: '',
         connection: tunnel ? tunnel[0].toUpperCase() : '',
         counts,
+        countMeta,
         mapImage,
         sourceUrl: url,
         source: 'Avalon Roads Tracker'
