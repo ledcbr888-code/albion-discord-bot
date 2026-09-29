@@ -2353,12 +2353,14 @@ function extractMapNameFromOcr(text) {
 
 async function renderAvaOcrCrop(imageBuffer) {
     const image = await loadImage(imageBuffer);
-    const scale = 2.5;
+    const scale = 3;
     const width = Math.max(1, Math.round(image.width * scale));
-    const cropHeight = Math.max(1, Math.round(Math.min(image.height * 0.62, 650) * scale));
+    const sourceCropHeight = Math.max(1, Math.min(image.height * 0.72, 900));
+    const cropHeight = Math.max(1, Math.round(sourceCropHeight * scale));
     const canvas = createCanvas(width, cropHeight);
     const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#ffffff'; ctx.fillRect(0, 0, width, cropHeight);
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, width, cropHeight);
     ctx.drawImage(image, 0, 0, width, Math.round(image.height * scale));
     return canvas.toBuffer('image/png');
 }
@@ -2398,6 +2400,35 @@ async function detectAvaMapNameFromImage(imageBuffer) {
     avaOcrCache.set(cacheKey, result);
     if (avaOcrCache.size > 100) avaOcrCache.delete(avaOcrCache.keys().next().value);
     return result;
+}
+
+function extractAvaExactMarkerCount(text, labels) {
+    const normalized = String(text || '')
+        .replace(/\\u00d7/g, '×')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+    for (const label of labels) {
+        const escaped = String(label || '').replace(/[.*+?^$\\{\\}()|[\\]\\\\]/g, '\\\\function extractAlbionRoadsNumberNearText(text, labels) {');
+        // Prefer the explicit marker used by Avalon map pages: Label × 2 / Label x2.
+        const patterns = [
+            new RegExp('(?:^|[^A-Za-z0-9])' + escaped + '\\s*(?:×|x|X)\\s*(\\d+)\\b', 'i'),
+            new RegExp('(?:^|[^A-Za-z0-9])' + escaped + '[^0-9]{0,12}(\\d+)\\s*(?:×|x|X)', 'i')
+        ];
+        for (const re of patterns) {
+            const match = normalized.match(re);
+            if (match) return Number(match[1]) || 0;
+        }
+    }
+    return 0;
+}
+
+function extractAvaCountFromPageText(text, labels) {
+    // Exact per-marker counts must win over aggregate counts such as:
+    // "Chests 3", "Resources 3", "Dungeons 0".
+    const exact = extractAvaExactMarkerCount(text, labels);
+    if (exact > 0) return exact;
+    return extractAlbionRoadsNumberNearText(text, labels);
 }
 
 function extractAlbionRoadsNumberNearText(text, labels) {
@@ -2540,7 +2571,7 @@ function parseBattleHubAvaData(html, url, requestedName) {
     const h1 = $('h1').first().text().trim() || requestedName;
     const tierMatch = bodyText.match(/\bT\s*([468])\b/i);
     const layoutMatch = bodyText.match(/Road Layout\s+([A-Z])/i) || bodyText.match(/เส้นทางรูปแบบ\s+([A-Z])/i);
-    const getCount = labels => extractAlbionRoadsNumberNearText(bodyText, labels);
+    const getCount = labels => extractAvaCountFromPageText(bodyText, labels);
     const counts = {
         'Gold chest': getCount(['Gold chest', 'Gold Chest', 'หีบทอง', 'Peti emas', 'Cofre dorado', 'صندوق ذهبي']),
         'Blue chest': getCount(['Blue chest', 'Blue Chest', 'หีบน้ำเงิน', 'หีบฟ้า', 'Peti biru', 'Cofre azul', 'صندوق أزرق']),
@@ -2603,16 +2634,19 @@ async function fetchAvalonTrackerMapData(mapName) {
     if (!name || !/Resources|Chests|Tier/i.test(bodyText)) throw new Error(`Avalon Tracker ไม่พบแมพ ${mapName}`);
     const countLabel = (label, aliases = []) => {
         const labels = [label, ...aliases];
+        const exact = extractAvaExactMarkerCount(bodyText, labels);
+        if (exact > 0) return exact;
+
+        // Fallback for tracker pages that render "Label 2" rather than "Label ×2".
         for (const current of labels) {
-            const escaped = current.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-            const numbered = bodyText.match(new RegExp(`${escaped}\\s+(\\d+)`, 'i')) || bodyText.match(new RegExp(`(\\d+)\\s+${escaped}`, 'i'));
+            const escaped = current.replace(/[.*+?^$\\{\\}()|[\\]\\\\]/g, '\\\\$&');
+            const numbered =
+                bodyText.match(new RegExp(escaped + '\\s+(\\d+)\\b', 'i')) ||
+                bodyText.match(new RegExp('(?:^|[^0-9])\\(?(\\d+)\\)?\\s+' + escaped + '\\b', 'i'));
             if (numbered) return Number(numbered[1]) || 0;
-            const occurrences = bodyText.match(new RegExp(escaped, 'gi')) || [];
-            if (occurrences.length) return Math.min(occurrences.length, 9);
         }
         return 0;
-    };
-    const counts = {
+    };    const counts = {
         'Gold chest': countLabel('Gold Chest'),
         'Blue chest': countLabel('Blue Chest'),
         'Green chest': countLabel('Green Chest'),
@@ -2651,13 +2685,13 @@ async function fetchAlbionRoadsMapData(mapName) {
             const foundName = bodyText.toLowerCase().includes(queryName.toLowerCase());
             const tierMatch = bodyText.match(/\bT([468])\b/i);
             const counts = {
-                'Gold chest': extractAlbionRoadsNumberNearText(bodyText, ['Baú Dourado', 'Gold chest', 'Gold Chest']),
-                'Blue chest': extractAlbionRoadsNumberNearText(bodyText, ['Baú Azul', 'Blue chest', 'Blue Chest']),
-                'Green chest': extractAlbionRoadsNumberNearText(bodyText, ['Baú Verde', 'Green chest', 'Green Chest']),
-                'Group dungeon': extractAlbionRoadsNumberNearText(bodyText, ['Masmorra de Grupo', 'Group dungeon']),
-                'Solo dungeon': extractAlbionRoadsNumberNearText(bodyText, ['Masmorra Solo', 'Solo dungeon']),
-                Wood: extractAlbionRoadsNumberNearText(bodyText, ['Madeira', 'Wood']), Ore: extractAlbionRoadsNumberNearText(bodyText, ['Minério', 'Ore']),
-                Stone: extractAlbionRoadsNumberNearText(bodyText, ['Pedra', 'Stone']), Hide: extractAlbionRoadsNumberNearText(bodyText, ['Pelego / Couro', 'Couro', 'Hide']), Fiber: extractAlbionRoadsNumberNearText(bodyText, ['Algodão / Fibra', 'Fibra', 'Fiber'])
+                'Gold chest': extractAvaCountFromPageText(bodyText, ['Baú Dourado', 'Gold chest', 'Gold Chest']),
+                'Blue chest': extractAvaCountFromPageText(bodyText, ['Baú Azul', 'Blue chest', 'Blue Chest']),
+                'Green chest': extractAvaCountFromPageText(bodyText, ['Baú Verde', 'Green chest', 'Green Chest']),
+                'Group dungeon': extractAvaCountFromPageText(bodyText, ['Masmorra de Grupo', 'Group dungeon']),
+                'Solo dungeon': extractAvaCountFromPageText(bodyText, ['Masmorra Solo', 'Solo dungeon']),
+                Wood: extractAvaCountFromPageText(bodyText, ['Madeira', 'Wood']), Ore: extractAvaCountFromPageText(bodyText, ['Minério', 'Ore']),
+                Stone: extractAvaCountFromPageText(bodyText, ['Pedra', 'Stone']), Hide: extractAvaCountFromPageText(bodyText, ['Pelego / Couro', 'Couro', 'Hide']), Fiber: extractAvaCountFromPageText(bodyText, ['Algodão / Fibra', 'Fibra', 'Fiber'])
             };
             const mapImage = extractAlbionRoadsImage($, url, queryName);
             if (!foundName && !Object.values(counts).some(Boolean)) continue;
@@ -2755,9 +2789,10 @@ async function generateAvaRoadsCard(data, ocrText = '') {
         [item('Fiber', 'Fiber', c.Fiber)]
     ], '#65a30d');
     drawAvaStatBox(ctx, 635, 575, 520, 'DUNGEON', [
-        [item('GroupDungeon', 'Group Dungeon', c['Group dungeon'])]
+        [item('GroupDungeon', 'Group Dungeon', c['Group dungeon'])],
+        [{ icon: null, label: 'Solo Dungeon', value: c['Solo dungeon'] || 0 }]
     ], '#a855f7');
-    ctx.fillStyle = '#7f8b99'; ctx.font = '600 17px Arial, sans-serif'; ctx.fillText('OCR: ' + (ocrText || data.name), 44, 790); ctx.fillText('ข้อมูลแหล่งที่มา: ' + data.source, 760, 790);
+    ctx.fillStyle = '#7f8b99'; ctx.font = '600 17px Arial, sans-serif'; ctx.fillText('OCR: ' + (ocrText || data.name), 44, 790); ctx.fillText('นับจากข้อมูลจุดสำรวจรายชนิด: ' + data.source, 700, 790);
     return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: `ava-${data.name}.png` });
 }
 
