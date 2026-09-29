@@ -2803,9 +2803,11 @@ async function fetchAlbionRoadsMapData(mapName) {
 async function fetchAvaMapDataWithFallback(mapName) {
     const errors = [];
     const sources = [
-        ['Albion Roads', fetchAlbionRoadsMapData],
+        // Primary: this tracker has the actual Avalon map image plus POI/resource counts.
+        ['Avalon Roads Tracker', fetchAvalonTrackerMapData],
+        // Fallbacks if the tracker is temporarily unavailable.
         ['Albion Battle Hub', fetchBattleHubMapData],
-        ['Avalon Roads Tracker', fetchAvalonTrackerMapData]
+        ['Albion Roads', fetchAlbionRoadsMapData]
     ];
 
     for (const [sourceName, fetcher] of sources) {
