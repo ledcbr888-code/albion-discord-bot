@@ -2656,6 +2656,127 @@ async function fetchBattleHubMapData(mapName) {
     throw lastError || new Error(`ไม่พบข้อมูล ${mapName}`);
 }
 
+async function fetchAlbionOnlineBuildsAvaMapData(mapName) {
+    const correctedName = normalizeAvaOcrMapName(mapName);
+    const slug = normalizeMapNameText(correctedName).toLowerCase().replace(/\s+/g, '-');
+    const url = 'https://www.albiononlinebuilds.com/maps/avalon/' + encodeURIComponent(slug);
+
+    let html = '';
+    let lastError = null;
+    try {
+        html = String(await cloudscraper.get({
+            uri: url, timeout: 25000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36',
+                Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                Referer: 'https://www.albiononlinebuilds.com/maps/avalon'
+            }
+        }));
+    } catch (err) { lastError = err; }
+
+    if (!html) {
+        try {
+            const response = await axios.get(url, {
+                timeout: 25000,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36',
+                    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    Referer: 'https://www.albiononlinebuilds.com/maps/avalon'
+                },
+                validateStatus: status => status >= 200 && status < 400
+            });
+            html = String(response.data || '');
+        } catch (err) { lastError = err; }
+    }
+
+    if (!html) throw new Error('Albion Online Builds ไม่สามารถเปิดแมพ ' + correctedName + (lastError?.message ? ' (' + lastError.message + ')' : ''));
+
+    const $ = cheerio.load(html);
+    const bodyText = $('body').text().replace(/\s+/g, ' ').trim();
+    const sourceText = [bodyText, $('body').html() || '', ...$('script').map((_, el) => $(el).html() || '').get()].join(' ');
+    const title = $('h1').first().text().replace(/\s+/g, ' ').trim() || $('title').first().text().replace(/\s+/g, ' ').trim();
+    const nameMatch = title.match(/([A-Za-z0-9]{3,24}-[A-Za-z0-9]{3,24})/);
+    const name = nameMatch ? nameMatch[1] : correctedName;
+    const tierMatch = (title + ' ' + bodyText).match(/\bT\s*([468])\b/i);
+
+    const escapeRe = value => String(value).replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\async function fetchAvalonTrackerMapData(mapName) {');
+    const findCount = labels => {
+        for (const label of labels) {
+            const escaped = escapeRe(label);
+            const patterns = [
+                new RegExp('(?:Image\\s*:\\s*)?' + escaped + '\\s+' + escaped + '\\s*([0-9]{1,3})\\b', 'i'),
+                new RegExp('(?:Image\\s*:\\s*)?' + escaped + '\\s*[:x×-]?\\s*([0-9]{1,3})\\b', 'i'),
+                new RegExp('([0-9]{1,3})\\s+(?:Image\\s*:\\s*)?' + escaped + '\\b', 'i')
+            ];
+            for (const re of patterns) {
+                const m = bodyText.match(re);
+                if (m) return { value: Number(m[1]) || 0, found: true };
+            }
+        }
+        let result = { value: 0, found: false };
+        $('body *').each((_, el) => {
+            if (result.found) return;
+            const text = $(el).text().replace(/\s+/g, ' ').trim();
+            if (!text || text.length > 180) return;
+            for (const label of labels) {
+                const re = new RegExp('(?:Image\\s*:\\s*)?' + escapeRe(label) + '(?:\\s+' + escapeRe(label) + ')?\\s*([0-9]{1,3})\\b', 'i');
+                const m = text.match(re);
+                if (m) { result = { value: Number(m[1]) || 0, found: true }; return; }
+            }
+        });
+        return result;
+    };
+
+    const fields = {
+        'Gold chest': findCount(['Gold Chest']),
+        'Blue chest': findCount(['Blue Chest']),
+        'Green chest': findCount(['Green Chest']),
+        'Group dungeon': findCount(['Group Dungeon', 'Group dungeon', 'Avalonian Dungeon']),
+        'Solo dungeon': findCount(['Solo Dungeon', 'Solo dungeon']),
+        Wood: findCount(['Wood']),
+        Ore: findCount(['Ore']),
+        Stone: findCount(['Rock', 'Stone']),
+        Hide: findCount(['Hide']),
+        Fiber: findCount(['Fiber'])
+    };
+    const counts = Object.fromEntries(Object.entries(fields).map(([key, info]) => [key, Number(info.value) || 0]));
+    const countMeta = Object.fromEntries(Object.entries(fields).map(([key, info]) => [key, Boolean(info.found)]));
+
+    const imageCandidates = [];
+    const pushImage = value => { if (value) { const raw = String(value).trim().replace(/^['"]|['"]$/g, ''); if (raw) imageCandidates.push(raw); } };
+    $('meta[property="og:image"],meta[name="twitter:image"],meta[itemprop="image"]').each((_, el) => pushImage($(el).attr('content')));
+    $('img').each((_, el) => {
+        pushImage($(el).attr('src'));
+        pushImage($(el).attr('data-src'));
+        pushImage($(el).attr('data-lazy-src'));
+        const srcset = $(el).attr('srcset') || $(el).attr('data-srcset');
+        if (srcset) { const parts = srcset.split(',').map(x => x.trim()).filter(Boolean); if (parts.length) pushImage(parts[parts.length - 1].split(/\s+/)[0]); }
+    });
+    $('[style*="background-image"]').each((_, el) => {
+        const style = $(el).attr('style') || '';
+        const m = style.match(/url\((['"]?)(.*?)\1\)/i);
+        if (m) pushImage(m[2]);
+    });
+    const imageUrlRe = /https?:[^"'\s<>]+?\.(?:png|jpe?g|webp|gif)(?:\?[^"'\s<>]*)?/ig;
+    for (const m of sourceText.matchAll(imageUrlRe)) pushImage(m[0]);
+
+    let mapImage = '';
+    for (const raw of [...new Set(imageCandidates)]) {
+        try {
+            const absolute = new URL(raw, url).href;
+            if (/\.(?:png|jpe?g|webp|gif)(?:[?#].*)?$/i.test(absolute)) { mapImage = absolute; break; }
+        } catch (_) {}
+    }
+
+    if (!Object.values(counts).some(Boolean)) throw new Error('Albion Online Builds พบหน้า ' + correctedName + ' แต่ไม่พบข้อมูล POI');
+    return {
+        name, tier: tierMatch ? 'T' + tierMatch[1] : 'ไม่พบข้อมูล', layout: '', connection: '',
+        counts, countMeta, mapImage, sourceUrl: url, source: 'Albion Online Builds'
+    };
+}
+
 async function fetchAvalonTrackerMapData(mapName) {
     const correctedName = normalizeAvaOcrMapName(mapName);
     const slug = normalizeMapNameText(correctedName).toLowerCase().replace(/\s+/g, '-');
@@ -2871,114 +2992,33 @@ async function fetchAlbionRoadsMapData(mapName) {
 
 async function fetchAvaMapDataWithFallback(mapName) {
     const errors = [];
-    const sources = [
+    try {
+        const primary = normalizeAvaDataTotals(await fetchAlbionOnlineBuildsAvaMapData(mapName));
+        if (avaDataPointCount(primary) > 0) return primary;
+        errors.push('Albion Online Builds: พบหน้าแต่ไม่มีตัวเลข POI');
+    } catch (err) {
+        errors.push('Albion Online Builds: ' + err.message);
+        console.warn('⚠️ AVA Albion Online Builds unavailable for ' + mapName + ': ' + err.message);
+    }
+
+    const fallbackSources = [
         ['Avalon Roads Tracker', fetchAvalonTrackerMapData],
         ['Albion Battle Hub', fetchBattleHubMapData],
         ['Albion Roads', fetchAlbionRoadsMapData]
     ];
-
-    // Tracker is authoritative. Keep every field it actually found and only
-    // fill fields that are absent from the Tracker page with a fallback source.
-    try {
-        const primary = normalizeAvaDataTotals(await fetchAvalonTrackerMapData(mapName));
-        if (avaDataPointCount(primary) > 0) {
-            const missing = Object.keys(primary.counts || {}).filter(key => !primary.countMeta?.[key]);
-
-            for (const [sourceName, fetcher] of sources.slice(1)) {
-                if (!missing.some(key => !primary.countMeta?.[key])) break;
-                try {
-                    const fallback = normalizeAvaDataTotals(await fetcher(mapName));
-                    for (const key of missing) {
-                        if (primary.countMeta?.[key]) continue;
-                        const value = Number(fallback.counts?.[key]) || 0;
-                        if (value > 0) {
-                            primary.counts[key] = value;
-                            primary.countMeta[key] = true;
-                        }
-                    }
-                } catch (err) {
-                    errors.push(sourceName + ': ' + err.message);
-                    console.warn('⚠️ AVA ' + sourceName + ' fallback failed for ' + mapName + ': ' + err.message);
-                }
-            }
-
-            return normalizeAvaDataTotals(primary);
-        }
-        errors.push('Avalon Roads Tracker: พบหน้าแต่ยังไม่พบตัวเลข POI');
-    } catch (err) {
-        errors.push('Avalon Roads Tracker: ' + err.message);
-        console.warn('⚠️ AVA Avalon Roads Tracker unavailable for ' + mapName + ': ' + err.message);
-    }
-
-    // If the primary page is unavailable, use complete fallback sources.
-    for (const [sourceName, fetcher] of sources.slice(1)) {
+    for (const [sourceName, fetcher] of fallbackSources) {
         try {
             const data = normalizeAvaDataTotals(await fetcher(mapName));
             if (avaDataPointCount(data) > 0) return data;
             errors.push(sourceName + ': พบหน้าแต่ไม่มีตัวเลข');
         } catch (err) {
             errors.push(sourceName + ': ' + err.message);
-            console.warn('⚠️ AVA ' + sourceName + ' unavailable for ' + mapName + ': ' + err.message);
+            console.warn('⚠️ AVA ' + sourceName + ' fallback failed for ' + mapName + ': ' + err.message);
         }
     }
 
-    // Final static dataset fallback.
-    try {
-        const url = 'https://lucioreyli.github.io/ava-maps/';
-        const response = await axios.get(url, {
-            timeout: 20000,
-            headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'text/html,application/xhtml+xml' },
-            validateStatus: status => status >= 200 && status < 400
-        });
-        const $ = cheerio.load(String(response.data || ''));
-        const body = $('body').text().replace(/\s+/g, ' ').trim();
-        const target = normalizeAvaLookupName(normalizeAvaOcrMapName(mapName));
-        const titleRe = /[A-Za-z0-9]+-[A-Za-z0-9]+\s*\((?:IV|VI)\)/g;
-        const titles = [...body.matchAll(titleRe)];
-        const hit = titles.find(m => normalizeAvaLookupName(m[0].replace(/\s*\((?:IV|VI)\)/, '')) === target);
-        if (!hit) throw new Error('static source ไม่พบชื่อแมพ');
-
-        const next = titles.find(m => m.index > hit.index);
-        const section = body.slice(hit.index, next ? next.index : hit.index + 5000);
-        const countFor = key => {
-            const re = new RegExp('(\\d+)\\s*Image\\s*:?' + key + '\\b', 'i');
-            const m = section.match(re);
-            return m ? Number(m[1]) || 0 : 0;
-        };
-        const counts = {
-            'Gold chest': countFor('gold-chest'),
-            'Blue chest': countFor('blue-chest'),
-            'Green chest': countFor('green-chest'),
-            'Group dungeon': countFor('dg-group'),
-            'Solo dungeon': countFor('dg-solo'),
-            Wood: countFor('wood'),
-            Ore: countFor('ore'),
-            Stone: countFor('rock'),
-            Hide: countFor('hide'),
-            Fiber: countFor('fiber')
-        };
-        const tierMatch = hit[0].match(/\((IV|VI)\)/i);
-        const tunnelMatch = section.match(/\bTUNNEL_([A-Z_]+)\b/i);
-        const data = normalizeAvaDataTotals({
-            name: hit[0].replace(/\s*\((?:IV|VI)\)/, ''),
-            tier: tierMatch ? (tierMatch[1].toUpperCase() === 'VI' ? 'T6' : 'T4') : 'ไม่พบข้อมูล',
-            layout: '',
-            connection: tunnelMatch ? tunnelMatch[1].toUpperCase() : '',
-            counts,
-            mapImage: '',
-            sourceUrl: url,
-            source: 'Albion Avalon Maps (static)'
-        });
-        if (avaDataPointCount(data) > 0) return data;
-        errors.push('Albion Avalon Maps: พบแมพแต่ไม่มีตัวเลข');
-    } catch (err) {
-        errors.push('Albion Avalon Maps: ' + err.message);
-        console.warn('⚠️ AVA static source unavailable for ' + mapName + ': ' + err.message);
-    }
-
-    throw new Error('ไม่พบข้อมูล AVA สำหรับ ' + mapName + ' | ' + errors.join(' | '));
+    throw new Error('ไม่พบข้อมูล AVA สำหรับ "' + mapName + '"\\n' + errors.join('\\n'));
 }
-
 async function downloadImageForCanvas(url) {
     if (!url) return null;
     try { const response = await axios.get(url, { responseType: 'arraybuffer', timeout: 12000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'image/*,*/*;q=0.8' }, validateStatus: status => status >= 200 && status < 300 }); return await loadImage(Buffer.from(response.data)); } catch (_) { return null; }
