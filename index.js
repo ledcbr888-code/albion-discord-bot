@@ -2403,11 +2403,7 @@ async function detectAvaMapNameFromImage(imageBuffer) {
 }
 
 function extractAvaExactMarkerCount(text, labels) {
-    const normalized = String(text || '')
-        .replace(/\\u00d7/g, '×')
-        .replace(/\\s+/g, ' ')
-        .trim();
-
+    const normalized = String(text || '').replace(/\\s+/g, ' ').trim();
     for (const label of labels) {
         const escaped = String(label || '').replace(/[.*+?^$\\{\\}()|[\\]\\\\]/g, '\\\\$&');
         const patterns = [
@@ -2422,38 +2418,21 @@ function extractAvaExactMarkerCount(text, labels) {
     return 0;
 }
 
-function extractAlbionRoadsNumberNearText(text, labels) {');
-        // Prefer the explicit marker used by Avalon map pages: Label × 2 / Label x2.
-        const patterns = [
-            new RegExp('(?:^|[^A-Za-z0-9])' + escaped + '\\s*(?:×|x|X)\\s*(\\d+)\\b', 'i'),
-            new RegExp('(?:^|[^A-Za-z0-9])' + escaped + '[^0-9]{0,12}(\\d+)\\s*(?:×|x|X)', 'i')
-        ];
-        for (const re of patterns) {
-            const match = normalized.match(re);
-            if (match) return Number(match[1]) || 0;
-        }
+function extractAlbionRoadsNumberNearText(text, labels) {
+    const normalized = String(text || '').replace(/\\s+/g, ' ');
+    for (const label of labels) {
+        const escaped = label.replace(/[.*+?^$\\{\\}()|[\\]\\\\]/g, '\\\\$&');
+        const after = normalized.match(new RegExp(escaped + '[^0-9]{0,80}(\\\\d+)', 'i'));
+        if (after) return Number(after[1]) || 0;
+        const before = normalized.match(new RegExp('(\\\\d+)[^A-Za-z0-9]{0,20}' + escaped, 'i'));
+        if (before) return Number(before[1]) || 0;
     }
     return 0;
 }
 
 function extractAvaCountFromPageText(text, labels) {
-    // Exact per-marker counts must win over aggregate counts such as:
-    // "Chests 3", "Resources 3", "Dungeons 0".
     const exact = extractAvaExactMarkerCount(text, labels);
-    if (exact > 0) return exact;
-    return extractAlbionRoadsNumberNearText(text, labels);
-}
-
-function extractAlbionRoadsNumberNearText(text, labels) {
-    const normalized = String(text || '').replace(/\s+/g, ' ');
-    for (const label of labels) {
-        const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-        const after = normalized.match(new RegExp(`${escaped}[^0-9]{0,80}(\\d+)`, 'i'));
-        if (after) return Number(after[1]) || 0;
-        const before = normalized.match(new RegExp('(\\d+)[^A-Za-z0-9]{0,20}' + escaped, 'i'));
-        if (before) return Number(before[1]) || 0;
-    }
-    return 0;
+    return exact > 0 ? exact : extractAlbionRoadsNumberNearText(text, labels);
 }
 
 function extractAlbionRoadsImage($, baseUrl, mapName) {
