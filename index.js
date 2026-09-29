@@ -2634,8 +2634,12 @@ function parseBattleHubAvaData(html, url, requestedName) {
 }
 
 async function fetchBattleHubMapData(mapName) {
-    const resolved = await resolveAvaMapName(mapName);
-    const slug = resolved.name.toLowerCase().replace(/\s+/g, '-');
+    // Always normalize OCR aliases before building the Battle Hub URL.
+    // Example: OCR "Teros-Aulusum" -> real zone "Teros-Auiusum".
+    const normalizedInput = normalizeAvaOcrMapName(mapName);
+    const resolved = await resolveAvaMapName(normalizedInput);
+    const resolvedName = resolved.name || normalizedInput;
+    const slug = resolvedName.toLowerCase().replace(/\s+/g, '-');
     const urls = [
         `https://albionbattlehub.com/en/avalon-maps/${encodeURIComponent(slug)}`,
         `https://albionbattlehub.com/th/avalon-maps/${encodeURIComponent(slug)}`
@@ -2643,7 +2647,7 @@ async function fetchBattleHubMapData(mapName) {
     let lastError = null;
     for (const url of urls) {
         try {
-            const data = parseBattleHubAvaData(await requestBattleHubHtml(url), url, resolved.name);
+            const data = parseBattleHubAvaData(await requestBattleHubHtml(url), url, resolvedName);
             if (data.name && data.tier !== 'ไม่พบข้อมูล' || Object.values(data.counts).some(Boolean)) {
                 return { ...data, requestedName: mapName, resolvedScore: resolved.score };
             }
