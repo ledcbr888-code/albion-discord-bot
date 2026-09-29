@@ -2658,8 +2658,8 @@ async function fetchBattleHubMapData(mapName) {
 
 async function fetchAvalonTrackerMapData(mapName) {
     const correctedName = normalizeAvaOcrMapName(mapName);
-    const slug = normalizeMapNameText(correctedName).toLowerCase().replace(/\\s+/g, '-');
-    const url = `https://avalonroads-97617.web.app/mapas/${encodeURIComponent(slug)}.html`;
+    const slug = normalizeMapNameText(correctedName).toLowerCase().replace(/\s+/g, '-');
+    const url = \`https://avalonroads-97617.web.app/mapas/\${encodeURIComponent(slug)}.html\`;
 
     const response = await axios.get(url, {
         timeout: 20000,
@@ -2674,11 +2674,11 @@ async function fetchAvalonTrackerMapData(mapName) {
 
     const html = String(response.data || '');
     const $ = cheerio.load(html);
-    const bodyText = $('body').text().replace(/\\s+/g, ' ').trim();
+    const bodyText = $('body').text().replace(/\s+/g, ' ').trim();
 
     const findCount = (labels) => {
         for (const label of labels) {
-            const escaped = String(label).replace(/[.*+?^$\\{\\}()|[\\]\\\\]/g, '\\\\$&');
+            const escaped = String(label).replace(/[.*+?^$\\{}()|[\]\\]/g, '\\$&');
             const patterns = [
                 new RegExp(escaped + '\\s*(?:×|x|X|:|-)?\\s*(\\d{1,4})\\b', 'i'),
                 new RegExp('\\b(\\d{1,4})\\s*(?:×|x|X|:|-)?\\s*' + escaped + '\\b', 'i')
@@ -2689,15 +2689,15 @@ async function fetchAvalonTrackerMapData(mapName) {
             }
         }
 
-        // Some versions render the icon name and number in separate DOM nodes.
         let result = 0;
         $('body *').each((_, el) => {
             if (result) return;
-            const text = $(el).text().replace(/\\s+/g, ' ').trim();
+            const text = $(el).text().replace(/\s+/g, ' ').trim();
             if (!text || text.length > 160) return;
             for (const label of labels) {
-                if (!new RegExp(label.replace(/[.*+?^$\\{\\}()|[\\]\\\\]/g, '\\\\$&'), 'i').test(text)) continue;
-                const m = text.match(/(?:^|[^0-9])(\\d{1,4})(?:[^0-9]|$)/);
+                const escaped = String(label).replace(/[.*+?^$\\{}()|[\]\\]/g, '\\$&');
+                if (!new RegExp(escaped, 'i').test(text)) continue;
+                const m = text.match(/(?:^|[^0-9])(\d{1,4})(?:[^0-9]|$)/);
                 if (m) { result = Number(m[1]) || 0; return; }
             }
         });
@@ -2717,7 +2717,7 @@ async function fetchAvalonTrackerMapData(mapName) {
         Fiber: findCount(['Fiber', 'COTTON'])
     };
 
-    const tier = bodyText.match(/\\bT\\s*([468])\\b/i);
+    const tier = bodyText.match(/\bT\s*([468])\b/i);
     const title = $('h1').first().text().trim() || $('title').first().text().trim();
     const nameMatch = title.match(/([A-Za-z0-9]{3,18}-[A-Za-z0-9]{3,18})/);
     const name = nameMatch ? nameMatch[1] : correctedName;
@@ -2730,7 +2730,7 @@ async function fetchAvalonTrackerMapData(mapName) {
         const v = $(el).attr('src') || $(el).attr('data-src');
         if (v) imageCandidates.push(v);
         const ss = $(el).attr('srcset') || $(el).attr('data-srcset');
-        if (ss) imageCandidates.push(ss.split(',').pop().trim().split(/\\s+/)[0]);
+        if (ss) imageCandidates.push(ss.split(',').pop().trim().split(/\s+/)[0]);
     });
     $('a[href*="img_webp"],a[href$=".png"],a[href$=".jpg"],a[href$=".jpeg"],a[href$=".webp"]').each((_, el) => {
         const v = $(el).attr('href'); if (v) imageCandidates.push(v);
@@ -2740,7 +2740,7 @@ async function fetchAvalonTrackerMapData(mapName) {
     for (const raw of [...new Set(imageCandidates)]) {
         try {
             const absolute = new URL(raw, url).href;
-            if (/\\.(?:png|jpe?g|webp|gif)(?:[?#].*)?$/i.test(absolute) || /img_webp/i.test(absolute)) {
+            if (/\.(?:png|jpe?g|webp|gif)(?:[?#].*)?$/i.test(absolute) || /img_webp/i.test(absolute)) {
                 mapImage = absolute;
                 break;
             }
@@ -2750,7 +2750,7 @@ async function fetchAvalonTrackerMapData(mapName) {
     const tunnel = html.match(/TUNNEL(?:_BLACK)?_[A-Z_]+/i);
     return {
         name,
-        tier: tier ? `T${tier[1]}` : 'ไม่พบข้อมูล',
+        tier: tier ? \`T\${tier[1]}\` : 'ไม่พบข้อมูล',
         layout: '',
         connection: tunnel ? tunnel[0].toUpperCase() : '',
         counts,
