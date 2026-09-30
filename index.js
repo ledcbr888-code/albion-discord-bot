@@ -2538,10 +2538,42 @@ async function ocrWithTesseractJs(buffer) {
 async function detectAvaMapNameFromImage(imageBuffer) {
     const cacheKey = require('crypto').createHash('sha1').update(imageBuffer).digest('hex');
     if (avaOcrCache.has(cacheKey)) return avaOcrCache.get(cacheKey);
-    const crop = await renderAvaOcrCrop(imageBuffer);
-    let rawText = await ocrWithSystemTesseract(crop);
-    if (!rawText) rawText = await ocrWithTesseractJs(crop);
-    const result = { mapName: extractMapNameFromOcr(rawText || ''), rawText: rawText || '' };
+
+    const image = await loadImage(imageBuffer);
+    const crops = [];
+
+    // Map names are normally near the top of the AVA screenshot.
+    // Keep a full-ish crop as a fallback for alternate layouts.
+    const makeCrop = (sourceHeightRatio, scale) => {
+        const width = Math.max(1, Math.round(image.width * scale));
+        const height = Math.max(1, Math.round(Math.min(image.height * sourceHeightRatio, 1000) * scale));
+        const canvas = createCanvas(width, height);
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(image, 0, 0, width, Math.round(image.height * scale));
+        return canvas.toBuffer('image/png');
+    };
+
+    crops.push(makeCrop(0.40, 3));
+    crops.push(makeCrop(0.72, 3));
+
+    const texts = [];
+    for (const crop of crops) {
+        let text = await ocrWithSystemTesseract(crop);
+        if (!text) text = await ocrWithTesseractJs(crop);
+        if (text) texts.push(text);
+        const found = extractMapNameFromOcr(text || '');
+        if (found) {
+            const result = { mapName: found, rawText: texts.join('\n') };
+            avaOcrCache.set(cacheKey, result);
+            if (avaOcrCache.size > 100) avaOcrCache.delete(avaOcrCache.keys().next().value);
+            return result;
+        }
+    }
+
+    const combined = texts.join('\n');
+    const result = { mapName: extractMapNameFromOcr(combined), rawText: combined };
     avaOcrCache.set(cacheKey, result);
     if (avaOcrCache.size > 100) avaOcrCache.delete(avaOcrCache.keys().next().value);
     return result;
@@ -3112,18 +3144,21 @@ async function fetchAlbionRoadsMapData(mapName) {
 
 async function fetchAvaMapDataWithFallback(mapName) {
     const errors = [];
+
+    // Primary: Avalon Roads Tracker — dedicated Roads of Avalon map database.
     try {
-        const primary = normalizeAvaDataTotals(await fetchAlbionOnlineBuildsAvaMapData(mapName));
+        const primary = normalizeAvaDataTotals(await fetchAvalonTrackerMapData(mapName));
         if (avaDataPointCount(primary) > 0) return primary;
-        errors.push('Albion Online Builds: พบหน้าแต่ไม่มีตัวเลข POI');
+        errors.push('Avalon Roads Tracker: พบหน้าแต่ไม่มีตัวเลข POI');
     } catch (err) {
-        errors.push('Albion Online Builds: ' + err.message);
-        console.warn('⚠️ AVA Albion Online Builds unavailable for ' + mapName + ': ' + err.message);
+        errors.push('Avalon Roads Tracker: ' + err.message);
+        console.warn('⚠️ AVA Avalon Roads Tracker unavailable for ' + mapName + ': ' + err.message);
     }
 
+    // Fallbacks: other static Avalon map databases.
     const fallbackSources = [
-        ['Avalon Roads Tracker', fetchAvalonTrackerMapData],
         ['Albion Battle Hub', fetchBattleHubMapData],
+        ['Albion Online Builds', fetchAlbionOnlineBuildsAvaMapData],
         ['Albion Roads', fetchAlbionRoadsMapData]
     ];
     for (const [sourceName, fetcher] of fallbackSources) {
@@ -3137,7 +3172,7 @@ async function fetchAvaMapDataWithFallback(mapName) {
         }
     }
 
-    throw new Error('ไม่พบข้อมูล AVA สำหรับ "' + mapName + '"\\n' + errors.join('\\n'));
+    throw new Error('ไม่พบข้อมูล AVA สำหรับ "' + mapName + '"\n' + errors.join('\n'));
 }
 async function downloadImageForCanvas(url) {
     if (!url) return null;
@@ -3230,27 +3265,19 @@ async function processAvaImageMessage(message) {
         x?.guildId === message.guildId &&
         channelIds.has(x?.channelId)
     );
-    if (!config) return false;
-
-    // Discord can deliver an attachment-only message with incomplete attachment
-    // fields when the Message Content privileged intent is not available in the
-    // gateway payload. Fetch the message once from the Discord API before giving up.
-    let attachmentSource = message;
-    let attachments = [...message.attachments.values()];
-
-    if (!attachments.length && typeof message.fetch === 'function') {
-        try {
-            attachmentSource = await message.fetch(true);
-            attachments = [...attachmentSource.attachments.values()];
-            console.log('🗺️ AVA fetched message from Discord API: guild=' + message.guildId + ' channel=' + message.channel.id + ' attachments=' + attachments.length);
-        } catch (err) {
-            console.warn('⚠️ AVA message fetch failed for ' + message.id + ': ' + err.message);
+    if (!config) {
+        if (message.attachments?.size) {
+            console.log('ℹ️ AVA image ignored: no AVA config for guild/channel. guild=' +
+                message.guildId + ' channel=' + message.channel.id);
         }
+        return false;
     }
 
-    // Keep filename, MIME type, and CDN URL extension as fallbacks so renamed
-    // images and Discord CDN URLs are still accepted.
-    attachments = attachments.filter(a => {
+    // Discord can deliver an attachment with incomplete filename/MIME metadata.
+    // Refetch the message before deciding that there is no image.
+    let attachments = [...message.attachments.values()];
+
+    const filterImageAttachments = list => list.filter(a => {
         const name = String(a?.name || '');
         const url = String(a?.url || '');
         const type = String(a?.contentType || '');
@@ -3258,10 +3285,47 @@ async function processAvaImageMessage(message) {
             /^image\//i.test(type) ||
             /\.(?:png|jpe?g|webp|gif)(?:[?#]|$)/i.test(url);
     });
-    if (!attachments.length) {
-        console.log('ℹ️ AVA ignored message ' + message.id + ': no image attachment found after Discord API fetch.');
+
+    let imageAttachments = filterImageAttachments(attachments);
+
+    if (!imageAttachments.length && typeof message.fetch === 'function') {
+        try {
+            const fetchedMessage = await message.fetch(true);
+            attachments = [...fetchedMessage.attachments.values()];
+            imageAttachments = filterImageAttachments(attachments);
+            console.log('🗺️ AVA refreshed Discord message: guild=' + message.guildId +
+                ' channel=' + message.channel.id + ' attachments=' + attachments.length);
+        } catch (err) {
+            console.warn('⚠️ AVA message fetch failed for ' + message.id + ': ' + err.message);
+        }
+    }
+
+    // Last-resort attachment check: some CDN URLs omit the file extension.
+    // Try loading the bytes as an image instead of rejecting the attachment.
+    if (!imageAttachments.length && attachments.length) {
+        const candidate = attachments.find(a => a?.url);
+        if (candidate) {
+            try {
+                const probe = await axios.get(candidate.url, {
+                    responseType: 'arraybuffer',
+                    timeout: 15000,
+                    headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'image/*,*/*;q=0.8' },
+                    validateStatus: status => status >= 200 && status < 300
+                });
+                await loadImage(Buffer.from(probe.data));
+                imageAttachments = [candidate];
+                console.log('🗺️ AVA accepted extensionless attachment as image: guild=' + message.guildId +
+                    ' channel=' + message.channel.id);
+            } catch (_) {}
+        }
+    }
+
+    if (!imageAttachments.length) {
+        console.log('ℹ️ AVA ignored message ' + message.id + ': no image attachment found after metadata/refetch/probe.');
         return false;
     }
+
+    attachments = imageAttachments;
 
     console.log('🗺️ AVA image detected: guild=' + message.guildId + ' channel=' + message.channel.id + ' file=' + (attachments[0].name || 'unknown'));
 
@@ -3269,7 +3333,7 @@ async function processAvaImageMessage(message) {
 
     let status;
     try {
-        status = await message.reply('🗺️ กำลังอ่านชื่อแมพ AVA จากรูป → ค้นหาหน้า Albion Online Builds → ดึงรูปแมพขนาดใหญ่และข้อมูลมารายงาน...');
+        status = await message.reply('🗺️ กำลังอ่านชื่อแมพ AVA จากรูป → ค้นหาใน Avalon Roads Tracker → ดึงรูปแมพขนาดใหญ่และข้อมูลมารายงาน...');
     } catch (err) {
         console.error('❌ AVA reply failed:', err.message);
         return true;
@@ -3936,7 +4000,7 @@ client.on('interactionCreate', async interaction => {
             const config = { guildId: interaction.guildId, channelId: channel.id, enabled: true };
             if (existing >= 0) avaAutoConfigs[existing] = config; else avaAutoConfigs.push(config);
             saveData();
-            return interaction.reply(`✅ ตั้งค่าตรวจรูป AVA อัตโนมัติแล้ว\n📢 ห้อง: <#${channel.id}>\n\nวางรูปแผนที่ AVA ในห้องนี้ได้เลย บอทจะ OCR ชื่อแมพ → ค้นหน้าแมพตรงจาก **Albion Online Builds** → ดึงจำนวนหีบ/ทรัพยากร/ดันเจี้ยนและรูปแมพจากหน้าเว็บ → สร้างรายงานเป็นรูปให้อัตโนมัติ (มีแหล่งสำรองเมื่อหน้าเว็บหลักใช้ไม่ได้)`);
+            return interaction.reply(`✅ ตั้งค่าตรวจรูป AVA อัตโนมัติแล้ว\n📢 ห้อง: <#${channel.id}>\n\nวางรูปแผนที่ AVA ในห้องนี้ได้เลย บอทจะ OCR ชื่อแมพ → ค้นจาก **Avalon Roads Tracker** → ดึงจำนวนหีบ/ทรัพยากร/ดันเจี้ยนและรูปแมพ → สร้างรายงานเป็นรูปให้อัตโนมัติ (สำรอง: Albion Battle Hub → Albion Online Builds → Albion Roads)`);
         }
         if (sub === 'status') {
             const config = avaAutoConfigs.find(x => x.guildId === interaction.guildId);
