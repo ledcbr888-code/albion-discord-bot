@@ -54,7 +54,8 @@ const client = new Client({
     ]
 });
 
-const DATA_FILE = path.join(__dirname, 'tracking.json');
+const DATA_DIR = String(process.env.DATA_DIR || __dirname).trim();
+const DATA_FILE = String(process.env.TRACKING_FILE || path.join(DATA_DIR, 'tracking.json')).trim();
 let guildConfigs = {};
 let legacyMigration = null;
 let autoBattleCheckRunning = false;
@@ -151,9 +152,26 @@ async function migrateLegacyDataAfterReady() {
     console.log('🔄 Legacy tracking.json migrated to per-Discord-server settings.');
 }
 
+function ensureDataDirectory() {
+    try {
+        const dir = path.dirname(DATA_FILE);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        return true;
+    } catch (err) {
+        console.error('❌ tracking data directory error:', err.message);
+        return false;
+    }
+}
+
 function loadData() {
     try {
-        if (!fs.existsSync(DATA_FILE)) { guildConfigs = {}; saveData(); return; }
+        if (!ensureDataDirectory()) { guildConfigs = {}; legacyMigration = null; return; }
+        if (!fs.existsSync(DATA_FILE)) {
+            guildConfigs = {};
+            console.warn(`⚠️ tracking.json not found at ${DATA_FILE}. A new empty configuration will be created.`);
+            saveData();
+            return;
+        }
         const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
         if (data && data.version >= 3 && data.guilds && !Array.isArray(data.guilds)) {
             guildConfigs = Object.fromEntries(Object.entries(data.guilds).map(([id, cfg]) => [id, normalizeGuildConfig(cfg)]));
@@ -170,12 +188,21 @@ function loadData() {
 }
 function saveData() {
     try {
+        if (!ensureDataDirectory()) return false;
         guildConfigs = Object.fromEntries(Object.entries(guildConfigs).map(([id, cfg]) => [id, normalizeGuildConfig(cfg)]));
-        fs.writeFileSync(DATA_FILE, JSON.stringify({
+        const payload = JSON.stringify({
             version: 3, updatedAt: new Date().toISOString(),
             guilds: Object.fromEntries(Object.entries(guildConfigs).map(([id, cfg]) => [id, { ...cfg, processedBattles: Array.isArray(cfg.processedBattles) ? cfg.processedBattles.slice(-1000) : [], avaProcessedMessages: Array.isArray(cfg.avaProcessedMessages) ? cfg.avaProcessedMessages.slice(-500) : [] }]))
-        }, null, 2), 'utf8');
-    } catch (err) { console.error('❌ tracking.json save error:', err.message); }
+        }, null, 2);
+        const tempFile = `${DATA_FILE}.tmp`;
+        fs.writeFileSync(tempFile, payload, 'utf8');
+        fs.renameSync(tempFile, DATA_FILE);
+        return true;
+    } catch (err) {
+        try { if (fs.existsSync(`${DATA_FILE}.tmp`)) fs.unlinkSync(`${DATA_FILE}.tmp`); } catch (_) {}
+        console.error('❌ tracking.json save error:', err.message);
+        return false;
+    }
 }
 
 loadData();
