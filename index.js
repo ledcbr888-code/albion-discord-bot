@@ -3189,24 +3189,82 @@ async function generateAvaRoadsCard(data, ocrText = '') {
 }
 
 async function processAvaImageMessage(message) {
-    const config = avaAutoConfigs.find(x => x.guildId === message.guildId && x.channelId === message.channel.id && x.enabled !== false);
+    if (!message?.guildId || !message?.channel) return false;
+
+    // Read this server's AVA setting directly from guildConfigs. This avoids
+    // losing the setting if the async context is unavailable on a Discord
+    // message event. Also allow images posted inside a thread whose parent
+    // channel is the configured AVA channel.
+    const guildConfig = getGuildConfig(message.guildId, false);
+    const configured = Array.isArray(guildConfig?.avaAuto) ? guildConfig.avaAuto : [];
+    const channelIds = new Set([message.channel.id, message.channel.parentId].filter(Boolean));
+    const config = configured.find(x =>
+        x?.enabled !== false &&
+        x?.guildId === message.guildId &&
+        channelIds.has(x?.channelId)
+    );
     if (!config) return false;
-    const attachments = [...message.attachments.values()].filter(a => AVA_IMAGE_EXTENSIONS.test(a.name || '') || /^image\//i.test(a.contentType || ''));
+
+    // Discord normally supplies both filename and MIME type for attachments.
+    // Keep URL extension as a third fallback so renamed/CDN images are still accepted.
+    const attachments = [...message.attachments.values()].filter(a => {
+        const name = String(a?.name || '');
+        const url = String(a?.url || '');
+        const type = String(a?.contentType || '');
+        return AVA_IMAGE_EXTENSIONS.test(name) ||
+            /^image\//i.test(type) ||
+            /\.(?:png|jpe?g|webp|gif)(?:[?#]|$)/i.test(url);
+    });
     if (!attachments.length) return false;
+
+    console.log('🗺️ AVA image detected: guild=' + message.guildId + ' channel=' + message.channel.id + ' file=' + (attachments[0].name || 'unknown'));
+
     if (avaProcessedMessages.has(message.id)) return true;
-    avaProcessedMessages.add(message.id); if (avaProcessedMessages.size > 500) avaProcessedMessages.delete(avaProcessedMessages.values().next().value);
-    saveData();
-    const status = await message.reply('🗺️ กำลังอ่านชื่อแมพ AVA จากรูป → ค้นหาหน้า Albion Online Builds → ดึงรูปแมพขนาดใหญ่และข้อมูลมารายงาน...');
+
+    let status;
     try {
-        const imageResponse = await axios.get(attachments[0].url, { responseType: 'arraybuffer', timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'image/*,*/*;q=0.8' }, validateStatus: status => status >= 200 && status < 300 });
-        const ocr = await detectAvaMapNameFromImage(Buffer.from(imageResponse.data));
-        if (!ocr.mapName) throw new Error(`อ่านชื่อแมพจากรูปไม่สำเร็จ\nOCR: ${String(ocr.rawText || '').slice(0, 300)}`);
-        const data = await fetchAvaMapDataWithFallback(ocr.mapName); const card = await generateAvaRoadsCard(data, ocr.mapName);
-        await status.edit({ content: `✅ อ่านแมพได้: **${data.name}** • **${data.tier}**`, files: [card] });
+        status = await message.reply('🗺️ กำลังอ่านชื่อแมพ AVA จากรูป → ค้นหาหน้า Albion Online Builds → ดึงรูปแมพขนาดใหญ่และข้อมูลมารายงาน...');
     } catch (err) {
-        console.error('❌ AVA image auto-check error:', err.message);
-        await status.edit({ content: `❌ ตรวจภาพ AVA ไม่สำเร็จ: ${err.message}\n💡 หาก OCR อ่านชื่อผิด ให้ใช้ /ava check map:<ชื่อแมพ> เช่น \`/ava check map:Casitos-Alieam\`` });
+        console.error('❌ AVA reply failed:', err.message);
+        return true;
     }
+
+    // Mark as processed only after the bot successfully acknowledges the image.
+    avaProcessedMessages.add(message.id);
+    if (avaProcessedMessages.size > 500) {
+        avaProcessedMessages.delete(avaProcessedMessages.values().next().value);
+    }
+    saveData();
+
+    try {
+        const imageResponse = await axios.get(attachments[0].url, {
+            responseType: 'arraybuffer',
+            timeout: 30000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0',
+                Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
+            },
+            validateStatus: status => status >= 200 && status < 300
+        });
+
+        const ocr = await detectAvaMapNameFromImage(Buffer.from(imageResponse.data));
+        if (!ocr.mapName) {
+            throw new Error('อ่านชื่อแมพจากรูปไม่สำเร็จ\nOCR: ' + String(ocr.rawText || '').slice(0, 300));
+        }
+
+        const data = await fetchAvaMapDataWithFallback(ocr.mapName);
+        const card = await generateAvaRoadsCard(data, ocr.mapName);
+        await status.edit({
+            content: '✅ อ่านแมพได้: **' + data.name + '** • **' + data.tier + '**',
+            files: [card]
+        });
+    } catch (err) {
+        console.error('❌ AVA image auto-check error:', err);
+        await status.edit({
+            content: '❌ ตรวจภาพ AVA ไม่สำเร็จ: ' + err.message + '\n💡 หาก OCR อ่านชื่อผิด ให้ใช้ /ava check map:<ชื่อแมพ> เช่น ` /ava check map:Casitos-Alieam`'.replace('` /', '`/')
+        }).catch(editErr => console.error('❌ AVA error reply edit failed:', editErr.message));
+    }
+
     return true;
 }
 
