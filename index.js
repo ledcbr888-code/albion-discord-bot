@@ -3195,6 +3195,7 @@ async function processAvaImageMessage(message) {
     if (!attachments.length) return false;
     if (avaProcessedMessages.has(message.id)) return true;
     avaProcessedMessages.add(message.id); if (avaProcessedMessages.size > 500) avaProcessedMessages.delete(avaProcessedMessages.values().next().value);
+    saveData();
     const status = await message.reply('🗺️ กำลังอ่านชื่อแมพ AVA จากรูป → ค้นหาหน้า Albion Online Builds → ดึงรูปแมพขนาดใหญ่และข้อมูลมารายงาน...');
     try {
         const imageResponse = await axios.get(attachments[0].url, { responseType: 'arraybuffer', timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'image/*,*/*;q=0.8' }, validateStatus: status => status >= 200 && status < 300 });
@@ -3253,6 +3254,7 @@ async function checkAndSendDailyAutoReportsForGuild() {
                     files: [card]
                 });
                 lastDailyReportDate[reportKey] = signature || true;
+                saveData();
             } else {
                 // Do not mark the report as sent and do not publish yesterday's
                 // data. The next scheduler tick retries until today's snapshot
