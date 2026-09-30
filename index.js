@@ -54,97 +54,66 @@ const client = new Client({
 });
 
 const DATA_FILE = path.join(__dirname, 'tracking.json');
-let targetPlayers = [];
-let targetGuilds = []; 
-let autoBattleConfigs = []; 
-let dailyAutoConfigs = []; // เก็บตั้งค่ารายงาน daily อัตโนมัติ [{ guildId, channelId, serverChoice }]
-let dailyPlayerConfirmations = []; // ข้อมูลที่ผู้เล่น Asia ยืนยันจากในเกม
-let dailySourceStatus = {};
-let banditAutoConfigs = []; // [{ guildId, channelId, server, lastMessageId }]
-let avaAutoConfigs = []; // [{ guildId, channelId, enabled }]
-let avaProcessedMessages = new Set();
-let processedBattles = new Set();
+let guildConfigs = {};
+let legacyMigration = null;
 let autoBattleCheckRunning = false;
-let lastDailyReportDate = {}; // ป้องกันการส่งซ้ำ แยกตาม guild และ server
-let lastBanditAlertKey = {};
 
-// Helper Safe RoundRect for Canvas
-function drawRoundRect(ctx, x, y, width, height, radius) {
-    if (typeof ctx.roundRect === 'function') {
-        ctx.beginPath();
-        ctx.roundRect(x, y, width, height, radius);
-        return;
-    }
-    let r = radius;
-    if (typeof r === 'number') {
-        r = { tl: r, tr: r, br: r, bl: r };
-    }
-    ctx.beginPath();
-    ctx.moveTo(x + r.tl, y);
-    ctx.lineTo(x + width - r.tr, y);
-    ctx.quadraticCurveTo(x + width, y, x + width, y + r.tr);
-    ctx.lineTo(x + width, y + height - r.br);
-    ctx.quadraticCurveTo(x + width, y + height, x + width - r.br, y + height);
-    ctx.lineTo(x + r.bl, y + height);
-    ctx.quadraticCurveTo(x, y + height, x, y + height - r.bl);
-    ctx.lineTo(x, y + r.tl);
-    ctx.quadraticCurveTo(x, y, x + r.tl, y);
-    ctx.closePath();
+function createDefaultGuildConfig() {
+    return { players: [], guilds: [], autoBattles: [], dailyAuto: [], dailyConfirmations: [], dailySourceStatus: {}, banditAuto: [], avaAuto: [], avaProcessedMessages: [], processedBattles: [], lastDailyReportDate: {}, lastBanditAlertKey: {} };
+}
+function normalizeGuildConfig(raw = {}) {
+    const cfg = raw && typeof raw === 'object' ? raw : {};
+    return {
+        ...createDefaultGuildConfig(), ...cfg,
+        players: Array.isArray(cfg.players) ? cfg.players.map(String).filter(Boolean) : [],
+        guilds: Array.isArray(cfg.guilds) ? cfg.guilds : [],
+        autoBattles: Array.isArray(cfg.autoBattles) ? cfg.autoBattles : [],
+        dailyAuto: Array.isArray(cfg.dailyAuto) ? cfg.dailyAuto : [],
+        dailyConfirmations: Array.isArray(cfg.dailyConfirmations) ? cfg.dailyConfirmations : [],
+        dailySourceStatus: cfg.dailySourceStatus && typeof cfg.dailySourceStatus === 'object' ? cfg.dailySourceStatus : {},
+        banditAuto: Array.isArray(cfg.banditAuto) ? cfg.banditAuto : [],
+        avaAuto: Array.isArray(cfg.avaAuto) ? cfg.avaAuto : [],
+        avaProcessedMessages: Array.isArray(cfg.avaProcessedMessages) ? cfg.avaProcessedMessages.map(String).slice(-500) : [],
+        processedBattles: Array.isArray(cfg.processedBattles) ? cfg.processedBattles.map(String).slice(-1000) : [],
+        lastDailyReportDate: cfg.lastDailyReportDate && typeof cfg.lastDailyReportDate === 'object' ? cfg.lastDailyReportDate : {},
+        lastBanditAlertKey: cfg.lastBanditAlertKey && typeof cfg.lastBanditAlertKey === 'object' ? cfg.lastBanditAlertKey : {}
+    };
+}
+function getGuildConfig(guildId, create = true) {
+    const id = String(guildId || '').trim();
+    if (!id) return create ? createDefaultGuildConfig() : null;
+    if (!guildConfigs[id] && create) guildConfigs[id] = createDefaultGuildConfig();
+    return guildConfigs[id] || null;
+}
+function getAllGuildConfigs() {
+    return Object.entries(guildConfigs).map(([guildId, config]) => ({ guildId, config }));
 }
 
 function loadData() {
     try {
-        if (!fs.existsSync(DATA_FILE)) {
-            saveData();
+        if (!fs.existsSync(DATA_FILE)) { guildConfigs = {}; saveData(); return; }
+        const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+        if (data && data.version >= 3 && data.guilds && !Array.isArray(data.guilds)) {
+            guildConfigs = Object.fromEntries(Object.entries(data.guilds).map(([id, cfg]) => [id, normalizeGuildConfig(cfg)]));
+            console.log('📁 Tracking v3: ' + Object.keys(guildConfigs).length + ' Discord server configuration(s) loaded.');
             return;
         }
-        const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
-        targetPlayers = Array.isArray(data.players) ? data.players : [];
-        
-        targetGuilds = Array.isArray(data.guilds) ? data.guilds.map(g => {
-            if (typeof g === 'string') return { name: g, channelId: null };
-            return g;
-        }) : [];
-
-        autoBattleConfigs = Array.isArray(data.autoBattles) ? data.autoBattles : [];
-        dailyAutoConfigs = Array.isArray(data.dailyAuto) ? data.dailyAuto : [];
-        dailyPlayerConfirmations = Array.isArray(data.dailyConfirmations) ? data.dailyConfirmations : [];
-        dailySourceStatus = data.dailySourceStatus && typeof data.dailySourceStatus === 'object' ? data.dailySourceStatus : {};
-        banditAutoConfigs = Array.isArray(data.banditAuto) ? data.banditAuto : [];
-        avaAutoConfigs = Array.isArray(data.avaAuto) ? data.avaAuto : [];
-        processedBattles = new Set(
-            Array.isArray(data.processedBattles) ? data.processedBattles.map(String) : []
-        );
-
-        console.log(`📁 Tracking: ${targetGuilds.length} guilds, ${targetPlayers.length} players, ${autoBattleConfigs.length} auto-battle configs, ${dailyAutoConfigs.length} daily auto configs, ${banditAutoConfigs.length} bandit configs`);
+        legacyMigration = data || {};
+        guildConfigs = {};
+        console.log('📁 Legacy tracking format detected. Migration will run after Discord is ready.');
     } catch (err) {
         console.error('❌ tracking.json load error:', err.message);
-        targetPlayers = [];
-        targetGuilds = [];
-        autoBattleConfigs = [];
-        dailyAutoConfigs = [];
-        dailyPlayerConfirmations = [];
-        dailySourceStatus = {};
-        banditAutoConfigs = [];
+        guildConfigs = {}; legacyMigration = null;
     }
 }
-
 function saveData() {
     try {
+        guildConfigs = Object.fromEntries(Object.entries(guildConfigs).map(([id, cfg]) => [id, normalizeGuildConfig(cfg)]));
         fs.writeFileSync(DATA_FILE, JSON.stringify({
-            players: targetPlayers,
-            guilds: targetGuilds,
-            autoBattles: autoBattleConfigs,
-            dailyAuto: dailyAutoConfigs,
-            dailyConfirmations: dailyPlayerConfirmations,
-            dailySourceStatus,
-            banditAuto: banditAutoConfigs,
-            avaAuto: avaAutoConfigs,
-            processedBattles: [...processedBattles].slice(-1000)
+            version: 3, updatedAt: new Date().toISOString(),
+            guilds: Object.fromEntries(Object.entries(guildConfigs).map(([id, cfg]) => [id, { ...cfg, processedBattles: cfg.processedBattles.slice(-1000), avaProcessedMessages: cfg.avaProcessedMessages.slice(-500) }]))
         }, null, 2), 'utf8');
-    } catch (err) {
-        console.error('❌ tracking.json save error:', err.message);
-    }
+    } catch (err) { console.error('❌ tracking.json save error:', err.message); }
 }
 
 loadData();
