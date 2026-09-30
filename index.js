@@ -22,6 +22,7 @@ const { execFile } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const express = require('express');
+const { AsyncLocalStorage } = require('node:async_hooks');
 
 const BANDIT_SERIF_FONT = '/usr/share/fonts/truetype/noto/NotoSerifDisplay-Black.ttf';
 const BANDIT_DISPLAY_FONT = '/usr/share/fonts/truetype/noto/NotoSansDisplay-CondensedExtraBold.ttf';
@@ -73,8 +74,8 @@ function normalizeGuildConfig(raw = {}) {
         dailySourceStatus: cfg.dailySourceStatus && typeof cfg.dailySourceStatus === 'object' ? cfg.dailySourceStatus : {},
         banditAuto: Array.isArray(cfg.banditAuto) ? cfg.banditAuto : [],
         avaAuto: Array.isArray(cfg.avaAuto) ? cfg.avaAuto : [],
-        avaProcessedMessages: Array.isArray(cfg.avaProcessedMessages) ? cfg.avaProcessedMessages.map(String).slice(-500) : [],
-        processedBattles: Array.isArray(cfg.processedBattles) ? cfg.processedBattles.map(String).slice(-1000) : [],
+        avaProcessedMessages: cfg.avaProcessedMessages instanceof Set ? [...cfg.avaProcessedMessages].map(String).slice(-500) : (Array.isArray(cfg.avaProcessedMessages) ? cfg.avaProcessedMessages.map(String).slice(-500) : []),
+        processedBattles: cfg.processedBattles instanceof Set ? [...cfg.processedBattles].map(String).slice(-1000) : (Array.isArray(cfg.processedBattles) ? cfg.processedBattles.map(String).slice(-1000) : []),
         lastDailyReportDate: cfg.lastDailyReportDate && typeof cfg.lastDailyReportDate === 'object' ? cfg.lastDailyReportDate : {},
         lastBanditAlertKey: cfg.lastBanditAlertKey && typeof cfg.lastBanditAlertKey === 'object' ? cfg.lastBanditAlertKey : {}
     };
@@ -87,6 +88,67 @@ function getGuildConfig(guildId, create = true) {
 }
 function getAllGuildConfigs() {
     return Object.entries(guildConfigs).map(([guildId, config]) => ({ guildId, config }));
+}
+
+const guildContext = new AsyncLocalStorage();
+function currentGuildId() { return guildContext.getStore()?.guildId || null; }
+function currentGuildConfig() { return getGuildConfig(currentGuildId(), false); }
+function scopedArray(field) { return currentGuildConfig()?.[field] || []; }
+function scopedObject(field) { return currentGuildConfig()?.[field] || {}; }
+function scopedSet(field) {
+    const cfg = currentGuildConfig();
+    if (!cfg) return new Set();
+    return new Proxy(new Set(Array.isArray(cfg[field]) ? cfg[field] : []), {
+        get(target, prop) {
+            if (prop === 'add') return value => { target.add(String(value)); cfg[field] = [...target]; return proxy; };
+            if (prop === 'delete') return value => { const changed = target.delete(String(value)); cfg[field] = [...target]; return changed; };
+            if (prop === 'clear') return () => { target.clear(); cfg[field] = []; };
+            return Reflect.get(target, prop, target);
+        }
+    });
+}
+const scopedNames = {
+    targetPlayers: ['players','array'], targetGuilds: ['guilds','array'],
+    autoBattleConfigs: ['autoBattles','array'], dailyAutoConfigs: ['dailyAuto','array'],
+    dailyPlayerConfirmations: ['dailyConfirmations','array'], dailySourceStatus: ['dailySourceStatus','object'],
+    banditAutoConfigs: ['banditAuto','array'], avaAutoConfigs: ['avaAuto','array'],
+    avaProcessedMessages: ['avaProcessedMessages','set'], processedBattles: ['processedBattles','set'],
+    lastDailyReportDate: ['lastDailyReportDate','object'], lastBanditAlertKey: ['lastBanditAlertKey','object']
+};
+for (const [name, [field, type]] of Object.entries(scopedNames)) {
+    Object.defineProperty(globalThis, name, { configurable: true, get() { return type === 'set' ? scopedSet(field) : type === 'object' ? scopedObject(field) : scopedArray(field); }, set(value) { const cfg = currentGuildConfig(); if (!cfg) return; cfg[field] = type === 'set' ? [...(value || [])].map(String) : value; } });
+}
+
+async function migrateLegacyDataAfterReady() {
+    if (!legacyMigration) return;
+    const legacy = legacyMigration; legacyMigration = null;
+    const inferred = new Map();
+    for (const item of (Array.isArray(legacy.guilds) ? legacy.guilds : [])) {
+        const entry = typeof item === 'string' ? { name: item, channelId: null } : item;
+        let gid = null;
+        if (entry?.channelId) { const ch = await client.channels.fetch(entry.channelId).catch(() => null); gid = ch?.guildId || null; }
+        if (!gid && client.guilds.cache.size === 1) gid = client.guilds.cache.first().id;
+        if (!gid) continue;
+        const cfg = getGuildConfig(gid);
+        if (entry.name && !cfg.guilds.some(x => String(x.name).toLowerCase() === String(entry.name).toLowerCase())) cfg.guilds.push({ name: entry.name, channelId: entry.channelId || null });
+        inferred.set(gid, (inferred.get(gid) || 0) + 1);
+    }
+    for (const field of ['autoBattles','dailyAuto','banditAuto','avaAuto']) for (const item of (Array.isArray(legacy[field === 'autoBattles' ? 'autoBattles' : field]) ? legacy[field === 'autoBattles' ? 'autoBattles' : field] : [])) {
+        if (!item?.guildId) continue;
+        const cfg = getGuildConfig(item.guildId);
+        if (!cfg[field].some(x => JSON.stringify(x) === JSON.stringify(item))) cfg[field].push(item);
+    }
+    const known = [...new Set([...inferred.keys(), ...(legacy.autoBattles || []).map(x => x?.guildId).filter(Boolean), ...(legacy.dailyAuto || []).map(x => x?.guildId).filter(Boolean)])];
+    const target = inferred.size === 1 ? [...inferred.keys()][0] : (known.length === 1 ? known[0] : (client.guilds.cache.size === 1 ? client.guilds.cache.first().id : null));
+    if (target) {
+        const cfg = getGuildConfig(target);
+        for (const p of (legacy.players || [])) if (!cfg.players.some(x => x.toLowerCase() === String(p).toLowerCase())) cfg.players.push(String(p));
+        cfg.dailyConfirmations = Array.isArray(legacy.dailyConfirmations) ? legacy.dailyConfirmations : cfg.dailyConfirmations;
+        cfg.dailySourceStatus = legacy.dailySourceStatus || cfg.dailySourceStatus;
+        cfg.processedBattles = Array.isArray(legacy.processedBattles) ? legacy.processedBattles.slice(-1000) : cfg.processedBattles;
+    }
+    saveData();
+    console.log('🔄 Legacy tracking.json migrated to per-Discord-server settings.');
 }
 
 function loadData() {
@@ -111,7 +173,7 @@ function saveData() {
         guildConfigs = Object.fromEntries(Object.entries(guildConfigs).map(([id, cfg]) => [id, normalizeGuildConfig(cfg)]));
         fs.writeFileSync(DATA_FILE, JSON.stringify({
             version: 3, updatedAt: new Date().toISOString(),
-            guilds: Object.fromEntries(Object.entries(guildConfigs).map(([id, cfg]) => [id, { ...cfg, processedBattles: cfg.processedBattles.slice(-1000), avaProcessedMessages: cfg.avaProcessedMessages.slice(-500) }]))
+            guilds: Object.fromEntries(Object.entries(guildConfigs).map(([id, cfg]) => [id, { ...cfg, processedBattles: Array.isArray(cfg.processedBattles) ? cfg.processedBattles.slice(-1000) : [], avaProcessedMessages: Array.isArray(cfg.avaProcessedMessages) ? cfg.avaProcessedMessages.slice(-500) : [] }]))
         }, null, 2), 'utf8');
     } catch (err) { console.error('❌ tracking.json save error:', err.message); }
 }
@@ -1226,7 +1288,7 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
 async function processBattleReport(input, targetContext, isMessage = false) {
     try {
         const matchId = extractMatchId(input);
-        const { payload } = await buildBattleReportPayload(matchId, targetGuilds);
+        const { payload } = await buildBattleReportPayload(matchId, targetGuilds, { guildId: currentGuildId() });
         const files = Array.isArray(payload.files) ? payload.files : [];
 
         if (files.length > 1) {
@@ -1587,13 +1649,15 @@ function saveDailyCache(serverKey, data) {
 }
 
 function setDailySourceStatus(serverKey, patch) {
-    dailySourceStatus[serverKey] = { ...(dailySourceStatus[serverKey] || {}), ...patch, checkedAt: new Date().toISOString() };
+    const cfg = currentGuildConfig();
+    if (!cfg) return;
+    cfg.dailySourceStatus[serverKey] = { ...(cfg.dailySourceStatus[serverKey] || {}), ...patch, checkedAt: new Date().toISOString() };
     saveData();
 }
 
 function getCommunityDailyData(serverKey) {
     const today = getExpectedDailyDate();
-    const rows = dailyPlayerConfirmations.filter(x => x.server === serverKey && x.date === today);
+    const rows = currentGuildConfig()?.dailyConfirmations?.filter(x => x.server === serverKey && x.date === today) || [];
     if (!rows.length) return null;
     const entries = rows.filter((item, index, all) => all.findIndex(x => x.category === item.category) === index)
         .map(x => ({ category: x.category, city: x.city, baseBonus: Number(x.baseBonus) || 15, dailyBonus: Number(x.dailyBonus) || 10 }))
@@ -1832,7 +1896,7 @@ async function fetchDailyBonus(serverKey) {
 
 async function generateDailyBonusEmbed(serverChoice) {
     const serverDisplayName = SERVER_NAMES[serverChoice] || 'Albion Server';
-    const dailyData = await fetchDailyBonus(serverChoice);
+    const dailyData = await fetchDailyBonus(serverChoice, currentGuildId());
 
     if (!dailyData) return null;
 
@@ -3461,6 +3525,7 @@ const commands = [
 
 client.once('clientReady', async () => {
     console.log(`✅ Logged in as ${client.user.tag}`);
+    await migrateLegacyDataAfterReady();
     const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
     try {
         await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
@@ -3479,6 +3544,8 @@ client.once('clientReady', async () => {
 });
 
 client.on('interactionCreate', async interaction => {
+    const contextGuildId = interaction.guildId || (interaction.isButton() ? interaction.customId.split(':')[1] : null);
+    return guildContext.run({ guildId: contextGuildId }, async () => {
     if (interaction.isButton()) {
         const [action, guildId] = interaction.customId.split(':');
         if (action === 'bandit_toggle') {
@@ -3792,9 +3859,11 @@ client.on('interactionCreate', async interaction => {
             return interaction.reply('🗑️ ยกเลิกการแจ้งเตือน Bandit Assault เรียบร้อยแล้ว');
         }
     }
+    });
 });
 
 client.on('messageCreate', async message => {
+    return guildContext.run({ guildId: message.guildId }, async () => {
     if (message.author.bot) return;
     try {
         const handledAva = await processAvaImageMessage(message);
@@ -3814,6 +3883,7 @@ client.on('messageCreate', async message => {
         const status = await message.reply('⏳ กำลังดึงสถิติและสร้างรายงานจาก Official Albion API...');
         await processBattleReport(match[0], status, true);
     } catch (err) { console.error('❌ messageCreate error:', err); }
+    });
 });
 
 client.on('error', err => console.error('❌ Discord client error:', err));
