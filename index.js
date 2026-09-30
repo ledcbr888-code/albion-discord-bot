@@ -3232,9 +3232,25 @@ async function processAvaImageMessage(message) {
     );
     if (!config) return false;
 
-    // Discord normally supplies both filename and MIME type for attachments.
-    // Keep URL extension as a third fallback so renamed/CDN images are still accepted.
-    const attachments = [...message.attachments.values()].filter(a => {
+    // Discord can deliver an attachment-only message with incomplete attachment
+    // fields when the Message Content privileged intent is not available in the
+    // gateway payload. Fetch the message once from the Discord API before giving up.
+    let attachmentSource = message;
+    let attachments = [...message.attachments.values()];
+
+    if (!attachments.length && typeof message.fetch === 'function') {
+        try {
+            attachmentSource = await message.fetch(true);
+            attachments = [...attachmentSource.attachments.values()];
+            console.log('🗺️ AVA fetched message from Discord API: guild=' + message.guildId + ' channel=' + message.channel.id + ' attachments=' + attachments.length);
+        } catch (err) {
+            console.warn('⚠️ AVA message fetch failed for ' + message.id + ': ' + err.message);
+        }
+    }
+
+    // Keep filename, MIME type, and CDN URL extension as fallbacks so renamed
+    // images and Discord CDN URLs are still accepted.
+    attachments = attachments.filter(a => {
         const name = String(a?.name || '');
         const url = String(a?.url || '');
         const type = String(a?.contentType || '');
@@ -3242,7 +3258,10 @@ async function processAvaImageMessage(message) {
             /^image\//i.test(type) ||
             /\.(?:png|jpe?g|webp|gif)(?:[?#]|$)/i.test(url);
     });
-    if (!attachments.length) return false;
+    if (!attachments.length) {
+        console.log('ℹ️ AVA ignored message ' + message.id + ': no image attachment found after Discord API fetch.');
+        return false;
+    }
 
     console.log('🗺️ AVA image detected: guild=' + message.guildId + ' channel=' + message.channel.id + ' file=' + (attachments[0].name || 'unknown'));
 
