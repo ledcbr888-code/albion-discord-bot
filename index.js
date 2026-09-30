@@ -1320,7 +1320,7 @@ async function processBattleReport(input, targetContext, isMessage = false) {
 
 async function fetchGuildRecentBattles(guildName) {
     try {
-        const searchUrl = `https://east.albionbb.com/?search=${encodeURIComponent(guildName)}`;
+        const searchUrl = `https://east.albionbb.com/?search=${encodeURIComponent(guildName)}&minPlayers=1`;
         const searchRes = await cloudscraper.get(searchUrl).catch(() => null);
         if (!searchRes) return [];
 
