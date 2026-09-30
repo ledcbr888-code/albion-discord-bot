@@ -112,6 +112,9 @@ function loadData() {
         dailySourceStatus = data.dailySourceStatus && typeof data.dailySourceStatus === 'object' ? data.dailySourceStatus : {};
         banditAutoConfigs = Array.isArray(data.banditAuto) ? data.banditAuto : [];
         avaAutoConfigs = Array.isArray(data.avaAuto) ? data.avaAuto : [];
+        processedBattles = new Set(
+            Array.isArray(data.processedBattles) ? data.processedBattles.map(String) : []
+        );
 
         console.log(`📁 Tracking: ${targetGuilds.length} guilds, ${targetPlayers.length} players, ${autoBattleConfigs.length} auto-battle configs, ${dailyAutoConfigs.length} daily auto configs, ${banditAutoConfigs.length} bandit configs`);
     } catch (err) {
@@ -136,7 +139,8 @@ function saveData() {
             dailyConfirmations: dailyPlayerConfirmations,
             dailySourceStatus,
             banditAuto: banditAutoConfigs,
-            avaAuto: avaAutoConfigs
+            avaAuto: avaAutoConfigs,
+            processedBattles: [...processedBattles].slice(-1000)
         }, null, 2), 'utf8');
     } catch (err) {
         console.error('❌ tracking.json save error:', err.message);
@@ -1306,6 +1310,34 @@ async function fetchGuildRecentBattles(guildName) {
     }
 }
 
+async function primeAutoBattleHistory(configs = autoBattleConfigs) {
+    // IMPORTANT: the recent-battles page contains historical fights. When a
+    // tracker is created for the first time (or after an upgrade with no saved
+    // history), mark everything currently visible as already seen. Only fights
+    // that appear after this baseline are eligible for an alert.
+    let added = 0;
+    for (const config of configs) {
+        try {
+            const recentMatches = await fetchGuildRecentBattles(config.targetGuild);
+            for (const id of recentMatches) {
+                const key = String(id);
+                if (!processedBattles.has(key)) {
+                    processedBattles.add(key);
+                    added++;
+                }
+            }
+        } catch (err) {
+            console.warn(`⚠️ Auto-Battle baseline failed for ${config.targetGuild}: ${err.message}`);
+        }
+    }
+
+    if (processedBattles.size > 1000) {
+        processedBattles = new Set([...processedBattles].slice(-1000));
+    }
+    if (added > 0) saveData();
+    return added;
+}
+
 async function checkAutoBattles() {
     if (!autoBattleConfigs.length) return;
     if (autoBattleCheckRunning) return;
@@ -1371,7 +1403,8 @@ async function checkAutoBattles() {
                     }
                 }
                 
-                processedBattles.add(latestMatchId);
+                processedBattles.add(String(latestMatchId));
+                saveData();
                 } catch (e) {
                     console.error(`❌ Auto-Battle Error on Match ID ${latestMatchId} for guild ${config.targetGuild}:`, e.message);
                 }
@@ -3466,13 +3499,8 @@ client.once('clientReady', async () => {
     } catch (err) { console.error('❌ Slash command registration error:', err); }
 
     setTimeout(async () => {
-        for (const config of autoBattleConfigs) {
-            const matches = await fetchGuildRecentBattles(config.targetGuild);
-            if (matches.length > 0) {
-                processedBattles.add(matches[0]);
-            }
-        }
-        console.log('🛡️ Auto-Battle initialized and synced latest matches.');
+        const seeded = await primeAutoBattleHistory(autoBattleConfigs);
+        console.log(`🛡️ Auto-Battle initialized: marked ${seeded} existing battle(s) as already seen. No historical backlog will be reported.`);
     }, 5000);
 
     setInterval(checkAutoBattles, 5 * 60 * 1000);
@@ -3583,6 +3611,8 @@ client.on('interactionCreate', async interaction => {
             } else {
                 autoBattleConfigs.push(configData);
             }
+            const baselineMatches = await fetchGuildRecentBattles(guildName);
+            baselineMatches.forEach(id => processedBattles.add(String(id)));
             saveData();
 
             return interaction.editReply(`✅ ตั้งค่า **Auto-Battle Tracker** สำเร็จเรียบร้อย!\n- 🌐 เซิร์ฟเวอร์: **EAST (ตายตัว)**\n- 📢 ห้องแจ้งเตือน: <#${channel.id}>\n- 🛡️ กิลด์ที่ติดตาม: **${guildName}**\n- ⚔️ ขั้นต่ำ: **${minFrames.toLocaleString()}**\n\n📌 *ระบบจะคอยตรวจสอบไฟต์การต่อสู้ใหม่ๆ ของกิลด์นี้ให้อัตโนมัติทุกๆ 5 นาทีครับ*`);
