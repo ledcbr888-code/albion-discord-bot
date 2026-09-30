@@ -3676,7 +3676,8 @@ client.on('interactionCreate', async interaction => {
                 guildId: interaction.guildId,
                 channelId: channel.id,
                 targetGuild: guildName,
-                minFrames: minFrames
+                minFrames: minFrames,
+                createdAt: new Date().toISOString()
             };
 
             if (duplicateIndex >= 0) {
