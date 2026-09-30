@@ -1341,7 +1341,16 @@ async function fetchGuildRecentBattles(guildName) {
     }
 }
 
-async function primeAutoBattleHistory(configs = autoBattleConfigs) {
+async function primeAutoBattleHistory() {
+    const guilds = getAllGuildConfigs();
+    for (const { guildId } of guilds) {
+        await guildContext.run({ guildId }, async () => {
+            await primeAutoBattleHistoryForGuild();
+        });
+    }
+}
+
+async function primeAutoBattleHistoryForGuild(configs = autoBattleConfigs) {
     // IMPORTANT: the recent-battles page contains historical fights. When a
     // tracker is created for the first time (or after an upgrade with no saved
     // history), mark everything currently visible as already seen. Only fights
@@ -1370,6 +1379,15 @@ async function primeAutoBattleHistory(configs = autoBattleConfigs) {
 }
 
 async function checkAutoBattles() {
+    const guilds = getAllGuildConfigs();
+    for (const { guildId } of guilds) {
+        await guildContext.run({ guildId }, async () => {
+            await checkAutoBattlesForGuild();
+        });
+    }
+}
+
+async function checkAutoBattlesForGuild() {
     if (!autoBattleConfigs.length) return;
     if (autoBattleCheckRunning) return;
 
@@ -3195,6 +3213,15 @@ async function processAvaImageMessage(message) {
 // AUTOMATED DAILY REPORT SCHEDULER
 // ----------------------------------------
 async function checkAndSendDailyAutoReports() {
+    const guilds = getAllGuildConfigs();
+    for (const { guildId } of guilds) {
+        await guildContext.run({ guildId }, async () => {
+            await checkAndSendDailyAutoReportsForGuild();
+        });
+    }
+}
+
+async function checkAndSendDailyAutoReportsForGuild() {
     if (!dailyAutoConfigs.length) return;
 
     const now = new Date();
@@ -3425,6 +3452,15 @@ function banditAlertComponents(guildId) {
 }
 
 async function checkAndSendBanditAlerts() {
+    const guilds = getAllGuildConfigs();
+    for (const { guildId } of guilds) {
+        await guildContext.run({ guildId }, async () => {
+            await checkAndSendBanditAlertsForGuild();
+        });
+    }
+}
+
+async function checkAndSendBanditAlertsForGuild() {
     if (!banditAutoConfigs.length) return;
     const now = new Date();
     const event = getNextBanditAssault(now);
@@ -3533,7 +3569,7 @@ client.once('clientReady', async () => {
     } catch (err) { console.error('❌ Slash command registration error:', err); }
 
     setTimeout(async () => {
-        const seeded = await primeAutoBattleHistory(autoBattleConfigs);
+        const seeded = await primeAutoBattleHistory();
         console.log(`🛡️ Auto-Battle initialized: marked ${seeded} existing battle(s) as already seen. No historical backlog will be reported.`);
     }, 5000);
 
