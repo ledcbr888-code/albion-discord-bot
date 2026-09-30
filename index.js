@@ -3261,7 +3261,7 @@ async function processAvaImageMessage(message) {
     } catch (err) {
         console.error('❌ AVA image auto-check error:', err);
         await status.edit({
-            content: '❌ ตรวจภาพ AVA ไม่สำเร็จ: ' + err.message + '\n💡 หาก OCR อ่านชื่อผิด ให้ใช้ /ava check map:<ชื่อแมพ> เช่น ` /ava check map:Casitos-Alieam`'.replace('` /', '`/')
+            content: '❌ ตรวจภาพ AVA ไม่สำเร็จ: ' + err.message + '\n💡 หาก OCR อ่านชื่อผิด ให้ใช้ /ava check map:<ชื่อแมพ> เช่น /ava check map:Casitos-Alieam'
         }).catch(editErr => console.error('❌ AVA error reply edit failed:', editErr.message));
     }
 
