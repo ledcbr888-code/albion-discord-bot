@@ -2832,7 +2832,7 @@ async function fetchBattleHubMapData(lookupName) {
             }
         } catch (err) { lastError = err; }
     }
-    throw lastError || new Error(`ไม่พบข้อมูล ${mapName}`);
+    throw lastError || new Error(`ไม่พบข้อมูล ${lookupName}`);
 }
 
 async function fetchAlbionOnlineBuildsAvaMapData(lookupName) {
@@ -2880,7 +2880,7 @@ async function fetchAlbionOnlineBuildsAvaMapData(lookupName) {
     const name = nameMatch ? nameMatch[1] : correctedName;
     const tierMatch = (title + ' ' + bodyText).match(/\bT\s*([468])\b/i);
 
-    const escapeRe = value => String(value).replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\async function fetchAvalonTrackerMapData(lookupName) {');
+    const escapeRe = value => String(value).replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\const escapeRe = value => String(value).replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\async function fetchAvalonTrackerMapData(lookupName) {');');
     const findCount = labels => {
         for (const label of labels) {
             const escaped = escapeRe(label);
@@ -3130,8 +3130,8 @@ async function fetchAvalonTrackerMapData(lookupName) {
 }
 
 async function fetchAlbionRoadsMapData(lookupName) {
-    const resolved = await resolveAvaMapName(mapName);
-    const queryName = resolved.name || mapName;
+    const resolved = await resolveAvaMapName(lookupName);
+    const queryName = resolved.name || lookupName;
     const queryUrl = `${ALBION_ROADS_SOURCE}?search=${encodeURIComponent(queryName)}`;
     let lastError = null;
     const urls = [queryUrl, ALBION_ROADS_SOURCE];
