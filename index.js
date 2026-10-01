@@ -3253,93 +3253,106 @@ async function generateAvaRoadsCard(data, ocrText = '') {
 async function processAvaImageMessage(message) {
     if (!message?.guildId || !message?.channel) return false;
 
-    // Read this server's AVA setting directly from guildConfigs. This avoids
-    // losing the setting if the async context is unavailable on a Discord
-    // message event. Also allow images posted inside a thread whose parent
-    // channel is the configured AVA channel.
     const guildConfig = getGuildConfig(message.guildId, false);
     const configured = Array.isArray(guildConfig?.avaAuto) ? guildConfig.avaAuto : [];
-    const channelIds = new Set([message.channel.id, message.channel.parentId].filter(Boolean));
+    const channelIds = new Set([
+        String(message.channel.id),
+        message.channel.parentId ? String(message.channel.parentId) : null
+    ].filter(Boolean));
+
     const config = configured.find(x =>
         x?.enabled !== false &&
-        x?.guildId === message.guildId &&
-        channelIds.has(x?.channelId)
+        String(x?.guildId || message.guildId) === String(message.guildId) &&
+        channelIds.has(String(x?.channelId || ''))
     );
-    if (!config) {
-        if (message.attachments?.size) {
-            console.log('ℹ️ AVA image ignored: no AVA config for guild/channel. guild=' +
-                message.guildId + ' channel=' + message.channel.id);
+
+    if (!config) return false;
+
+    // IMPORTANT: Message Content Intent must also be enabled in Discord Developer Portal.
+    // The REST fetch below is a second line of defense when Gateway attachment metadata
+    // is incomplete or missing.
+    let sourceMessage = message;
+    let attachments = [...(message.attachments?.values?.() || [])];
+
+    if (!attachments.length && typeof message.fetch === 'function') {
+        try {
+            sourceMessage = await message.fetch(true);
+            attachments = [...(sourceMessage.attachments?.values?.() || [])];
+            console.log('🗺️ AVA message refetched: guild=' + message.guildId +
+                ' channel=' + message.channel.id + ' attachments=' + attachments.length);
+        } catch (err) {
+            console.warn('⚠️ AVA message refetch failed: ' + err.message);
         }
-        return false;
     }
 
-    // Discord can deliver an attachment with incomplete filename/MIME metadata.
-    // Refetch the message before deciding that there is no image.
-    let attachments = [...message.attachments.values()];
-
-    const filterImageAttachments = list => list.filter(a => {
+    const isImageAttachment = a => {
         const name = String(a?.name || '');
         const url = String(a?.url || '');
         const type = String(a?.contentType || '');
-        return AVA_IMAGE_EXTENSIONS.test(name) ||
-            /^image\//i.test(type) ||
+        return /^image\//i.test(type) ||
+            /\.(?:png|jpe?g|webp|gif)(?:[?#]|$)/i.test(name) ||
             /\.(?:png|jpe?g|webp|gif)(?:[?#]|$)/i.test(url);
-    });
+    };
 
-    let imageAttachments = filterImageAttachments(attachments);
+    let imageAttachments = attachments.filter(isImageAttachment);
 
-    if (!imageAttachments.length && typeof message.fetch === 'function') {
-        try {
-            const fetchedMessage = await message.fetch(true);
-            attachments = [...fetchedMessage.attachments.values()];
-            imageAttachments = filterImageAttachments(attachments);
-            console.log('🗺️ AVA refreshed Discord message: guild=' + message.guildId +
-                ' channel=' + message.channel.id + ' attachments=' + attachments.length);
-        } catch (err) {
-            console.warn('⚠️ AVA message fetch failed for ' + message.id + ': ' + err.message);
-        }
-    }
-
-    // Last-resort attachment check: some CDN URLs omit the file extension.
-    // Try loading the bytes as an image instead of rejecting the attachment.
-    if (!imageAttachments.length && attachments.length) {
-        const candidate = attachments.find(a => a?.url);
-        if (candidate) {
+    // Some Discord CDN attachments may have missing MIME/extension metadata.
+    // Probe every attachment URL until one can actually be decoded as an image.
+    if (!imageAttachments.length) {
+        for (const candidate of attachments) {
+            if (!candidate?.url) continue;
             try {
                 const probe = await axios.get(candidate.url, {
                     responseType: 'arraybuffer',
                     timeout: 15000,
-                    headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'image/*,*/*;q=0.8' },
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0',
+                        Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
+                    },
                     validateStatus: status => status >= 200 && status < 300
                 });
                 await loadImage(Buffer.from(probe.data));
                 imageAttachments = [candidate];
-                console.log('🗺️ AVA accepted extensionless attachment as image: guild=' + message.guildId +
+                console.log('🗺️ AVA decoded extensionless attachment: guild=' + message.guildId +
                     ' channel=' + message.channel.id);
+                break;
             } catch (_) {}
         }
     }
 
+    // Also support images represented as Discord embeds/link previews.
     if (!imageAttachments.length) {
-        console.log('ℹ️ AVA ignored message ' + message.id + ': no image attachment found after metadata/refetch/probe.');
+        const embedImage = (sourceMessage.embeds || []).map(e => e?.image?.url || e?.thumbnail?.url).find(Boolean);
+        if (embedImage) {
+            imageAttachments = [{ url: embedImage, name: 'discord-embed-image.png', contentType: 'image/png' }];
+            console.log('🗺️ AVA detected image from embed: guild=' + message.guildId +
+                ' channel=' + message.channel.id);
+        }
+    }
+
+    if (!imageAttachments.length) {
+        console.log('ℹ️ AVA ignored message ' + message.id +
+            ': configured channel but no readable image attachment. ' +
+            'gatewayAttachments=' + (message.attachments?.size || 0) +
+            ' fetchedAttachments=' + attachments.length);
         return false;
     }
 
-    attachments = imageAttachments;
-
-    console.log('🗺️ AVA image detected: guild=' + message.guildId + ' channel=' + message.channel.id + ' file=' + (attachments[0].name || 'unknown'));
+    console.log('🗺️ AVA image detected: guild=' + message.guildId +
+        ' channel=' + message.channel.id + ' file=' + (imageAttachments[0].name || 'unknown'));
 
     if (avaProcessedMessages.has(message.id)) return true;
 
     let status;
     try {
-        status = await message.reply('🗺️ กำลังอ่านชื่อแมพ AVA จากรูป → ค้นหาใน Avalon Roads Tracker → ดึงรูปแมพขนาดใหญ่และข้อมูลมารายงาน...');
+        status = await message.reply(
+            '🗺️ กำลังอ่านชื่อแมพ AVA จากรูป → ค้นหาใน Avalon Roads Tracker → ดึงรูปแมพขนาดใหญ่และข้อมูลมารายงาน...'
+        );
     } catch (err) {
         console.error('❌ AVA reply failed:', err.message);
         return true;
     }
 
-    // Mark as processed only after the bot successfully acknowledges the image.
     avaProcessedMessages.add(message.id);
     if (avaProcessedMessages.size > 500) {
         avaProcessedMessages.delete(avaProcessedMessages.values().next().value);
@@ -3347,7 +3360,7 @@ async function processAvaImageMessage(message) {
     saveData();
 
     try {
-        const imageResponse = await axios.get(attachments[0].url, {
+        const imageResponse = await axios.get(imageAttachments[0].url, {
             responseType: 'arraybuffer',
             timeout: 30000,
             headers: {
@@ -3358,6 +3371,11 @@ async function processAvaImageMessage(message) {
         });
 
         const ocr = await detectAvaMapNameFromImage(Buffer.from(imageResponse.data));
+        console.log('🗺️ AVA OCR result: ' + JSON.stringify({
+            mapName: ocr?.mapName || '',
+            rawText: String(ocr?.rawText || '').slice(0, 300)
+        }));
+
         if (!ocr.mapName) {
             throw new Error('อ่านชื่อแมพจากรูปไม่สำเร็จ\nOCR: ' + String(ocr.rawText || '').slice(0, 300));
         }
@@ -3371,7 +3389,8 @@ async function processAvaImageMessage(message) {
     } catch (err) {
         console.error('❌ AVA image auto-check error:', err);
         await status.edit({
-            content: '❌ ตรวจภาพ AVA ไม่สำเร็จ: ' + err.message + '\n💡 หาก OCR อ่านชื่อผิด ให้ใช้ /ava check map:<ชื่อแมพ> เช่น /ava check map:Casitos-Alieam'
+            content: '❌ ตรวจภาพ AVA ไม่สำเร็จ: ' + err.message +
+                '\n💡 หาก OCR อ่านชื่อผิด ให้ใช้ /ava check map:<ชื่อแมพ> เช่น /ava check map:Casitos-Alieam'
         }).catch(editErr => console.error('❌ AVA error reply edit failed:', editErr.message));
     }
 
