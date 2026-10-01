@@ -2478,6 +2478,7 @@ async function generateAvaCheckResponse(input) {
 // AVA IMAGE OCR + ALBION ROADS AUTO CHECK
 // ----------------------------------------
 const ALBION_ROADS_SOURCE = 'https://albionroads.com/';
+// AVA: canonical map names are resolved before source lookup.
 const AVA_IMAGE_EXTENSIONS = /\.(?:png|jpe?g|webp|gif)$/i;
 const avaOcrCache = new Map();
 
