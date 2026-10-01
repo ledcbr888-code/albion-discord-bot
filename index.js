@@ -2485,15 +2485,26 @@ function normalizeMapNameText(value) {
     return String(value || '').replace(/[|_]+/g, '-').replace(/\s*[-–—]\s*/g, '-').replace(/[^A-Za-z0-9\-\s]/g, ' ').replace(/\s+/g, ' ').trim();
 }
 
-function extractMapNameFromOcr(text) {
+function extractMapNamesFromOcr(text) {
     const raw = normalizeMapNameText(text);
-    const lines = String(text || '').split(/\r?\n/).map(x => normalizeMapNameText(x)).filter(Boolean);
-    for (const line of lines) {
-        const m = line.match(/\b([A-Za-z]{3,18})\s*-\s*([A-Za-z]{3,18})\b/);
-        if (m) return `${m[1]}-${m[2]}`;
+    const blacklist = /^(Albion|Assistant|Production|Bonus|Road|Avalon|Connection|Chests|Resources|Green|Gold|Blue|Stone|Wood|Ore|Hide|Fiber|Tier)-/i;
+    const found = [];
+    const add = value => {
+        const name = normalizeMapNameText(value).replace(/\s+/g, '');
+        if (!name || blacklist.test(name)) return;
+        if (!/^[A-Za-z]{3,18}-[A-Za-z]{3,18}$/.test(name)) return;
+        if (!found.some(x => normalizeAvaLookupName(x) === normalizeAvaLookupName(name))) found.push(name);
+    };
+    for (const line of String(text || '').split(/\r?\n/)) {
+        const normalizedLine = normalizeMapNameText(line);
+        for (const m of normalizedLine.matchAll(/\b([A-Za-z]{3,18})\s*-\s*([A-Za-z]{3,18})\b/g)) add(`${m[1]}-${m[2]}`);
     }
-    const candidates = [...raw.matchAll(/\b([A-Za-z]{3,18})\s*-\s*([A-Za-z]{3,18})\b/g)].map(m => `${m[1]}-${m[2]}`);
-    return candidates.find(x => !/^(Albion|Assistant|Production|Bonus|Road|Avalon|Connection|Chests|Resources|Green|Gold|Blue|Stone|Wood|Ore|Hide|Fiber|Tier)-/i.test(x)) || null;
+    for (const m of raw.matchAll(/\b([A-Za-z]{3,18})\s*-\s*([A-Za-z]{3,18})\b/g)) add(`${m[1]}-${m[2]}`);
+    return found;
+}
+
+function extractMapNameFromOcr(text) {
+    return extractMapNamesFromOcr(text)[0] || null;
 }
 
 async function renderAvaOcrCrop(imageBuffer) {
@@ -2555,25 +2566,41 @@ async function detectAvaMapNameFromImage(imageBuffer) {
         return canvas.toBuffer('image/png');
     };
 
-    crops.push(makeCrop(0.40, 3));
+    crops.push(makeCrop(0.30, 4));
+    crops.push(makeCrop(0.45, 4));
     crops.push(makeCrop(0.72, 3));
+    crops.push(makeCrop(1.00, 3));
 
     const texts = [];
+    const candidates = [];
+    const addCandidate = value => {
+        const name = normalizeMapNameText(value).replace(/\s+/g, '');
+        if (!name) return;
+        if (!candidates.some(x => normalizeAvaLookupName(x) === normalizeAvaLookupName(name))) candidates.push(name);
+    };
+
     for (const crop of crops) {
-        let text = await ocrWithSystemTesseract(crop);
-        if (!text) text = await ocrWithTesseractJs(crop);
-        if (text) texts.push(text);
-        const found = extractMapNameFromOcr(text || '');
-        if (found) {
-            const result = { mapName: found, rawText: texts.join('\n') };
-            avaOcrCache.set(cacheKey, result);
-            if (avaOcrCache.size > 100) avaOcrCache.delete(avaOcrCache.keys().next().value);
-            return result;
+        for (const psm of [7, 6, 11]) {
+            const text = await ocrWithSystemTesseract(crop, psm);
+            if (text) {
+                texts.push(text);
+                for (const name of extractMapNamesFromOcr(text)) addCandidate(name);
+            }
+        }
+        const jsText = await ocrWithTesseractJs(crop);
+        if (jsText) {
+            texts.push(jsText);
+            for (const name of extractMapNamesFromOcr(jsText)) addCandidate(name);
         }
     }
 
     const combined = texts.join('\n');
-    const result = { mapName: extractMapNameFromOcr(combined), rawText: combined };
+    for (const name of extractMapNamesFromOcr(combined)) addCandidate(name);
+    const result = {
+        mapName: candidates[0] || null,
+        candidates: candidates.slice(0, 12),
+        rawText: combined
+    };
     avaOcrCache.set(cacheKey, result);
     if (avaOcrCache.size > 100) avaOcrCache.delete(avaOcrCache.keys().next().value);
     return result;
@@ -2785,7 +2812,7 @@ function parseBattleHubAvaData(html, url, requestedName) {
     };
 }
 
-async function fetchBattleHubMapData(mapName) {
+async function fetchBattleHubMapData(lookupName) {
     // Always normalize OCR aliases before building the Battle Hub URL.
     // Example: OCR "Teros-Aulusum" -> real zone "Teros-Auiusum".
     const normalizedInput = normalizeAvaOcrMapName(mapName);
@@ -2808,7 +2835,7 @@ async function fetchBattleHubMapData(mapName) {
     throw lastError || new Error(`ไม่พบข้อมูล ${mapName}`);
 }
 
-async function fetchAlbionOnlineBuildsAvaMapData(mapName) {
+async function fetchAlbionOnlineBuildsAvaMapData(lookupName) {
     const correctedName = normalizeAvaOcrMapName(mapName);
     const slug = normalizeMapNameText(correctedName).toLowerCase().replace(/\s+/g, '-');
     const url = 'https://www.albiononlinebuilds.com/maps/avalon/' + encodeURIComponent(slug);
@@ -2853,7 +2880,7 @@ async function fetchAlbionOnlineBuildsAvaMapData(mapName) {
     const name = nameMatch ? nameMatch[1] : correctedName;
     const tierMatch = (title + ' ' + bodyText).match(/\bT\s*([468])\b/i);
 
-    const escapeRe = value => String(value).replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\async function fetchAvalonTrackerMapData(mapName) {');
+    const escapeRe = value => String(value).replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\async function fetchAvalonTrackerMapData(lookupName) {');
     const findCount = labels => {
         for (const label of labels) {
             const escaped = escapeRe(label);
@@ -2929,7 +2956,7 @@ async function fetchAlbionOnlineBuildsAvaMapData(mapName) {
     };
 }
 
-async function fetchAvalonTrackerMapData(mapName) {
+async function fetchAvalonTrackerMapData(lookupName) {
     const correctedName = normalizeAvaOcrMapName(mapName);
     const slug = normalizeMapNameText(correctedName).toLowerCase().replace(/\s+/g, '-');
     const url = 'https://avalonroads-97617.web.app/mapas/' + encodeURIComponent(slug) + '.html';
@@ -3102,7 +3129,7 @@ async function fetchAvalonTrackerMapData(mapName) {
     };
 }
 
-async function fetchAlbionRoadsMapData(mapName) {
+async function fetchAlbionRoadsMapData(lookupName) {
     const resolved = await resolveAvaMapName(mapName);
     const queryName = resolved.name || mapName;
     const queryUrl = `${ALBION_ROADS_SOURCE}?search=${encodeURIComponent(queryName)}`;
@@ -3142,12 +3169,33 @@ async function fetchAlbionRoadsMapData(mapName) {
     throw new Error(`Albion Roads ไม่สามารถตอบข้อมูลได้${lastError ? ` (${lastError.message})` : ''}`);
 }
 
-async function fetchAvaMapDataWithFallback(mapName) {
+async function fetchAvaMapDataWithFallback(mapName, ocrCandidates = []) {
     const errors = [];
+
+    // Resolve OCR text against canonical Avalon map names before querying sources.
+    let lookupName = mapName;
+    try {
+        const inputs = [mapName, ...ocrCandidates].filter(Boolean);
+        const ranked = [];
+        for (const input of inputs) {
+            const resolved = await resolveAvaMapName(input);
+            if (resolved?.name) ranked.push({ input, ...resolved });
+        }
+        ranked.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+        if (ranked[0] && Number(ranked[0].score || 0) >= 0.62) {
+            lookupName = ranked[0].name;
+            console.log('🗺️ AVA fuzzy map match: OCR=' + mapName +
+                ' candidates=' + JSON.stringify(ocrCandidates.slice(0, 8)) +
+                ' -> canonical=' + lookupName +
+                ' score=' + Number(ranked[0].score || 0).toFixed(3));
+        }
+    } catch (err) {
+        console.warn('⚠️ AVA fuzzy name resolver failed: ' + err.message);
+    }
 
     // Primary: Avalon Roads Tracker — dedicated Roads of Avalon map database.
     try {
-        const primary = normalizeAvaDataTotals(await fetchAvalonTrackerMapData(mapName));
+        const primary = normalizeAvaDataTotals(await fetchAvalonTrackerMapData(lookupName));
         if (avaDataPointCount(primary) > 0) return primary;
         errors.push('Avalon Roads Tracker: พบหน้าแต่ไม่มีตัวเลข POI');
     } catch (err) {
@@ -3402,7 +3450,7 @@ async function processAvaImageMessage(message) {
             throw new Error('อ่านชื่อแมพจากรูปไม่สำเร็จ\nOCR: ' + String(ocr.rawText || '').slice(0, 300));
         }
 
-        const data = await fetchAvaMapDataWithFallback(ocr.mapName);
+        const data = await fetchAvaMapDataWithFallback(ocr.mapName, ocr.candidates || []);
         const card = await generateAvaRoadsCard(data, ocr.mapName);
         await status.edit({
             content: '✅ อ่านแมพได้: **' + data.name + '** • **' + data.tier + '**',
