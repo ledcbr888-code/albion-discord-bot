@@ -4113,6 +4113,38 @@ client.on('interactionCreate', async interaction => {
     });
 });
 
+
+// AVA fallback listener: inspect raw MESSAGE_CREATE payloads as well.
+// This keeps image detection working even when discord.js does not hydrate
+// Message.attachments/content from the gateway payload as expected.
+client.on('raw', async packet => {
+    if (packet?.t !== 'MESSAGE_CREATE') return;
+    const data = packet.d || {};
+    const guildId = String(data.guild_id || '');
+    const channelId = String(data.channel_id || '');
+    const messageId = String(data.id || '');
+    if (!guildId || !channelId || !messageId || !Array.isArray(data.attachments) || !data.attachments.length) return;
+
+    const cfg = guildConfigs[guildId];
+    const avaConfig = Array.isArray(cfg?.avaAuto)
+        ? cfg.avaAuto.find(x => x?.enabled !== false && String(x?.channelId || '') === channelId)
+        : null;
+    if (!avaConfig) return;
+
+    console.log('🗺️ AVA raw MESSAGE_CREATE detected: guild=' + guildId +
+        ' channel=' + channelId + ' message=' + messageId +
+        ' attachments=' + data.attachments.length);
+
+    try {
+        const channel = await client.channels.fetch(channelId);
+        if (!channel?.messages?.fetch) return;
+        const fetchedMessage = await channel.messages.fetch(messageId, { force: true });
+        await processAvaImageMessage(fetchedMessage);
+    } catch (err) {
+        console.error('❌ AVA raw message fetch/process error:', err.message);
+    }
+});
+
 client.on('messageCreate', async message => {
     return guildContext.run({ guildId: message.guildId }, async () => {
     if (message.author.bot) return;
