@@ -2815,7 +2815,7 @@ function parseBattleHubAvaData(html, url, requestedName) {
 async function fetchBattleHubMapData(lookupName) {
     // Always normalize OCR aliases before building the Battle Hub URL.
     // Example: OCR "Teros-Aulusum" -> real zone "Teros-Auiusum".
-    const normalizedInput = normalizeAvaOcrMapName(mapName);
+    const normalizedInput = normalizeAvaOcrMapName(lookupName);
     const resolved = await resolveAvaMapName(normalizedInput);
     const resolvedName = resolved.name || normalizedInput;
     const slug = resolvedName.toLowerCase().replace(/\s+/g, '-');
@@ -2828,7 +2828,7 @@ async function fetchBattleHubMapData(lookupName) {
         try {
             const data = parseBattleHubAvaData(await requestBattleHubHtml(url), url, resolvedName);
             if (data.name && data.tier !== 'ไม่พบข้อมูล' || Object.values(data.counts).some(Boolean)) {
-                return { ...data, requestedName: mapName, resolvedScore: resolved.score };
+                return { ...data, requestedName: lookupName, resolvedScore: resolved.score };
             }
         } catch (err) { lastError = err; }
     }
@@ -2836,7 +2836,7 @@ async function fetchBattleHubMapData(lookupName) {
 }
 
 async function fetchAlbionOnlineBuildsAvaMapData(lookupName) {
-    const correctedName = normalizeAvaOcrMapName(mapName);
+    const correctedName = normalizeAvaOcrMapName(lookupName);
     const slug = normalizeMapNameText(correctedName).toLowerCase().replace(/\s+/g, '-');
     const url = 'https://www.albiononlinebuilds.com/maps/avalon/' + encodeURIComponent(slug);
 
@@ -2957,7 +2957,7 @@ async function fetchAlbionOnlineBuildsAvaMapData(lookupName) {
 }
 
 async function fetchAvalonTrackerMapData(lookupName) {
-    const correctedName = normalizeAvaOcrMapName(mapName);
+    const correctedName = normalizeAvaOcrMapName(lookupName);
     const slug = normalizeMapNameText(correctedName).toLowerCase().replace(/\s+/g, '-');
     const url = 'https://avalonroads-97617.web.app/mapas/' + encodeURIComponent(slug) + '.html';
 
@@ -3211,7 +3211,7 @@ async function fetchAvaMapDataWithFallback(mapName, ocrCandidates = []) {
     ];
     for (const [sourceName, fetcher] of fallbackSources) {
         try {
-            const data = normalizeAvaDataTotals(await fetcher(mapName));
+            const data = normalizeAvaDataTotals(await fetcher(lookupName));
             if (avaDataPointCount(data) > 0) return data;
             errors.push(sourceName + ': พบหน้าแต่ไม่มีตัวเลข');
         } catch (err) {
