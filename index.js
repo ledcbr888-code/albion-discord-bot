@@ -3488,9 +3488,7 @@ async function processAvaImageMessage(message) {
 
     let status;
     try {
-        status = await message.reply(
-            '🗺️ กำลังอ่านชื่อแมพ AVA จากรูป → ค้นหาใน Avalon Roads Tracker → ดึงรูปแมพขนาดใหญ่และข้อมูลมารายงาน...'
-        );
+        status = await message.reply('🗺️ กำลังอ่านชื่อแมพ AVA จากรูป...');
     } catch (err) {
         console.error('❌ AVA reply failed:', err.message);
         return true;
@@ -3513,9 +3511,11 @@ async function processAvaImageMessage(message) {
             validateStatus: status => status >= 200 && status < 300
         });
 
-        const ocr = await detectAvaMapNameFromImage(Buffer.from(imageResponse.data));
+        const imageBuffer = Buffer.from(imageResponse.data);
+        const ocr = await detectAvaMapNameFromImage(imageBuffer);
         console.log('🗺️ AVA OCR result: ' + JSON.stringify({
             mapName: ocr?.mapName || '',
+            candidates: ocr?.candidates || [],
             rawText: String(ocr?.rawText || '').slice(0, 300)
         }));
 
@@ -3523,17 +3523,62 @@ async function processAvaImageMessage(message) {
             throw new Error('อ่านชื่อแมพจากรูปไม่สำเร็จ\nOCR: ' + String(ocr.rawText || '').slice(0, 300));
         }
 
-        const data = await fetchAvaMapDataWithFallback(ocr.mapName, ocr.candidates || []);
-        const card = await generateAvaRoadsCard(data, ocr.mapName);
-        await status.edit({
-            content: '✅ อ่านแมพได้: **' + data.name + '** • **' + data.tier + '**',
-            files: [card]
+        const ocrCandidates = [ocr.mapName, ...(ocr.candidates || [])].filter(Boolean);
+        const suggestions = await getAvaMapSuggestions(ocrCandidates, 5);
+        const top = suggestions[0];
+
+        // ถ้าความมั่นใจสูงมาก ให้ทำต่ออัตโนมัติ ไม่ต้องถามผู้ใช้
+        if (top && Number(top.score || 0) >= 0.94) {
+            const data = await fetchAvaMapDataWithFallback(top.name, [top.name, ...ocrCandidates]);
+            const card = await generateAvaRoadsCard(data, ocr.mapName);
+            await status.edit({
+                content: '✅ อ่านแมพได้: **' + data.name + '** • **' + data.tier + '**',
+                components: [],
+                files: [card]
+            });
+            return true;
+        }
+
+        if (!suggestions.length) {
+            throw new Error('ไม่พบชื่อแมพที่ใกล้เคียงจากฐานข้อมูล Avalon');
+        }
+
+        const token = Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-6);
+        avaPendingSelections.set(token, {
+            guildId: String(messageGuildId),
+            channelId: String(messageChannelId),
+            userId: String(message.author?.id || ''),
+            messageId: String(message.id),
+            statusMessage: status,
+            imageBuffer,
+            ocrName: ocr.mapName,
+            ocrCandidates,
+            suggestions,
+            createdAt: Date.now()
         });
+
+        await status.edit({
+            content:
+                '🗺️ **ตรวจพบภาพ AVA**\n' +
+                'OCR อ่านได้: \`' + String(ocr.mapName) + '\`\n\n' +
+                '⚠️ ชื่อแมพยังไม่มั่นใจ 100%\n' +
+                '**เลือกชื่อแมพที่ใกล้เคียงกับในรูป:**',
+            components: avaSelectionComponents(messageGuildId, token, suggestions)
+        });
+
+        setTimeout(() => {
+            const pending = avaPendingSelections.get(token);
+            if (!pending) return;
+            avaPendingSelections.delete(token);
+            pending.statusMessage.edit({
+                content: '⏰ หมดเวลาการเลือกชื่อแมพ AVA แล้ว กรุณาส่งรูปอีกครั้ง',
+                components: []
+            }).catch(() => {});
+        }, 120000);
     } catch (err) {
         console.error('❌ AVA image auto-check error:', err);
         await status.edit({
-            content: '❌ ตรวจภาพ AVA ไม่สำเร็จ: ' + err.message +
-                '\n💡 หาก OCR อ่านชื่อผิด ให้ใช้ /ava check map:<ชื่อแมพ> เช่น /ava check map:Casitos-Alieam'
+            content: '❌ ตรวจภาพ AVA ไม่สำเร็จ: ' + err.message
         }).catch(editErr => console.error('❌ AVA error reply edit failed:', editErr.message));
     }
 
