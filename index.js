@@ -3957,8 +3957,104 @@ client.once('clientReady', async () => {
 });
 
 client.on('interactionCreate', async interaction => {
-    const contextGuildId = interaction.guildId || (interaction.isButton() ? interaction.customId.split(':')[1] : null);
+    const contextGuildId = interaction.guildId ||
+        ((interaction.isButton() || interaction.isStringSelectMenu()) ? interaction.customId.split(':')[1] : null);
     return guildContext.run({ guildId: contextGuildId }, async () => {
+    if (interaction.isStringSelectMenu() || interaction.isButton()) {
+        const parts = String(interaction.customId || '').split(':');
+        const action = parts[0];
+        if (['ava_select', 'ava_retry', 'ava_cancel'].includes(action)) {
+            const guildId = parts[1];
+            const token = parts[2];
+            const pending = avaPendingSelections.get(token);
+
+            if (!pending || String(pending.guildId) !== String(guildId)) {
+                return interaction.reply({ content: '⏰ รายการเลือกแมพนี้หมดอายุแล้ว กรุณาส่งรูป AVA ใหม่อีกครั้ง', ephemeral: true });
+            }
+
+            if (String(pending.userId || '') && String(interaction.user.id) !== String(pending.userId)) {
+                return interaction.reply({ content: '🔒 รายการเลือกแมพนี้เป็นของผู้ส่งรูปเท่านั้น', ephemeral: true });
+            }
+
+            if (action === 'ava_cancel') {
+                await interaction.update({
+                    content: '❌ ยกเลิกการเลือกชื่อแมพ AVA แล้ว',
+                    components: []
+                });
+                avaPendingSelections.delete(token);
+                return;
+            }
+
+            if (action === 'ava_retry') {
+                await interaction.deferUpdate();
+                try {
+                    const ocr = await detectAvaMapNameFromImage(pending.imageBuffer);
+                    const ocrCandidates = [ocr?.mapName, ...(ocr?.candidates || [])].filter(Boolean);
+                    const suggestions = await getAvaMapSuggestions(ocrCandidates, 5);
+
+                    pending.ocrName = ocr?.mapName || pending.ocrName;
+                    pending.ocrCandidates = ocrCandidates;
+                    pending.suggestions = suggestions;
+
+                    if (!suggestions.length) {
+                        return interaction.editReply({
+                            content: '❌ อ่านรูปใหม่แล้ว แต่ยังหาชื่อแมพที่ใกล้เคียงไม่พบ',
+                            components: []
+                        });
+                    }
+
+                    await interaction.editReply({
+                        content:
+                            '🔄 **อ่านรูป AVA ใหม่แล้ว**\n' +
+                            'OCR อ่านได้: \`' + String(pending.ocrName || 'ไม่พบ') + '\`\n\n' +
+                            'เลือกชื่อแมพที่ใกล้เคียงกับในรูป:',
+                        components: avaSelectionComponents(guildId, token, suggestions)
+                    });
+                } catch (err) {
+                    await interaction.editReply({
+                        content: '❌ อ่านรูป AVA ใหม่ไม่สำเร็จ: ' + err.message,
+                        components: []
+                    });
+                }
+                return;
+            }
+
+            if (action === 'ava_select') {
+                const selectedName = String(interaction.values?.[0] || '').trim();
+                const allowed = pending.suggestions.some(x => String(x.name) === selectedName);
+                if (!selectedName || !allowed) {
+                    return interaction.reply({ content: '❌ ตัวเลือกแมพไม่ถูกต้องหรือหมดอายุแล้ว', ephemeral: true });
+                }
+
+                await interaction.deferUpdate();
+                avaPendingSelections.delete(token);
+
+                try {
+                    await interaction.editReply({
+                        content: '🔎 เลือก **' + selectedName + '** แล้ว กำลังค้นหาข้อมูลแมพ...',
+                        components: []
+                    });
+
+                    const data = await fetchAvaMapDataWithFallback(selectedName, [selectedName, ...pending.ocrCandidates]);
+                    const card = await generateAvaRoadsCard(data, pending.ocrName);
+
+                    await interaction.editReply({
+                        content: '✅ เลือกแมพได้: **' + data.name + '** • **' + data.tier + '**',
+                        components: [],
+                        files: [card]
+                    });
+                } catch (err) {
+                    console.error('❌ AVA selected map lookup error:', err);
+                    await interaction.editReply({
+                        content: '❌ ค้นหาแมพ **' + selectedName + '** ไม่สำเร็จ: ' + err.message,
+                        components: []
+                    });
+                }
+                return;
+            }
+        }
+    }
+
     if (interaction.isButton()) {
         const [action, guildId] = interaction.customId.split(':');
         if (action === 'bandit_toggle') {
