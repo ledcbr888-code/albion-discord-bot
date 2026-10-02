@@ -2747,8 +2747,8 @@ async function fetchBattleHubMapIndex() {
             // Battle Hub may render only the first page of links in the DOM while
             // the same page still contains the complete 400-zone list as text.
             // Parse that canonical list too so OCR fuzzy matching can see every zone.
-            const bodyText = $('body').text().replace(/\\s+/g, ' ');
-            const bodyNameRe = /\\b([A-Za-z0-9]+(?:-[A-Za-z0-9]+)+)\\s*T(?:4|6|8)\\b/g;
+            const bodyText = $('body').text().replace(/\s+/g, ' ');
+            const bodyNameRe = /\b([A-Za-z0-9]+(?:-[A-Za-z0-9]+)+)\s*T(?:4|6|8)\b/g;
             for (const match of bodyText.matchAll(bodyNameRe)) {
                 maps.push(match[1]);
             }
