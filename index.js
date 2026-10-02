@@ -2690,7 +2690,11 @@ function avaNameSimilarity(a, b) {
 // แก้เฉพาะ typo ที่ยืนยันจากฐานข้อมูลจริงก่อน เพื่อไม่ให้เดาไปเป็นแมพอื่น.
 const AVA_OCR_NAME_ALIASES = new Map([
     ['teros-aulusum', 'Teros-Auiusum'],
-    ['teros-auiusum', 'Teros-Auiusum']
+    ['teros-auiusum', 'Teros-Auiusum'],
+
+    // Confirmed OCR confusions seen in real AVA screenshots.
+    ['tynos-atatios', 'Tynos-Atatlos'],
+    ['ollent-odesas', 'Qiient-Odesas']
 ]);
 
 function normalizeAvaOcrMapName(value) {
