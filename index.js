@@ -2483,6 +2483,7 @@ const ALBION_ROADS_SOURCE = 'https://albionroads.com/';
 const AVA_IMAGE_EXTENSIONS = /\.(?:png|jpe?g|webp|gif)$/i;
 const avaOcrCache = new Map();
 const avaPendingSelections = new Map();
+const avaProcessingMessages = new Set();
 const avaCanonicalMapCache = { names: [], expiresAt: 0 };
 
 function normalizeMapNameText(value) {
@@ -3484,7 +3485,8 @@ async function processAvaImageMessage(message) {
     console.log('🗺️ AVA image detected: guild=' + messageGuildId +
         ' channel=' + messageChannelId + ' file=' + (imageAttachments[0].name || 'unknown'));
 
-    if (avaProcessedMessages.has(message.id)) return true;
+    if (avaProcessedMessages.has(message.id) || avaProcessingMessages.has(String(message.id))) return true;
+    avaProcessingMessages.add(String(message.id));
 
     let status;
     try {
@@ -3580,6 +3582,8 @@ async function processAvaImageMessage(message) {
         await status.edit({
             content: '❌ ตรวจภาพ AVA ไม่สำเร็จ: ' + err.message
         }).catch(editErr => console.error('❌ AVA error reply edit failed:', editErr.message));
+    } finally {
+        avaProcessingMessages.delete(String(message.id));
     }
 
     return true;
