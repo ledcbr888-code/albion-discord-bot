@@ -11,6 +11,7 @@ const {
     ActionRowBuilder,
     ButtonBuilder,
     ButtonStyle,
+    StringSelectMenuBuilder,
     PermissionsBitField
 } = require('discord.js');
 
@@ -2481,6 +2482,8 @@ const ALBION_ROADS_SOURCE = 'https://albionroads.com/';
 // AVA: canonical map names are resolved before source lookup.
 const AVA_IMAGE_EXTENSIONS = /\.(?:png|jpe?g|webp|gif)$/i;
 const avaOcrCache = new Map();
+const avaPendingSelections = new Map();
+const avaCanonicalMapCache = { names: [], expiresAt: 0 };
 
 function normalizeMapNameText(value) {
     return String(value || '').replace(/[|_]+/g, '-').replace(/\s*[-–—]\s*/g, '-').replace(/[^A-Za-z0-9\-\s]/g, ' ').replace(/\s+/g, ' ').trim();
@@ -2522,7 +2525,7 @@ async function renderAvaOcrCrop(imageBuffer) {
     return canvas.toBuffer('image/png');
 }
 
-async function ocrWithSystemTesseract(buffer) {
+async function ocrWithSystemTesseract(buffer, psm = 6) {
     const command = String(process.env.TESSERACT_CMD || '/usr/bin/tesseract');
     if (!fs.existsSync(command)) return null;
     const tempDir = path.join(__dirname, '.ava-ocr'); fs.mkdirSync(tempDir, { recursive: true });
@@ -2530,7 +2533,7 @@ async function ocrWithSystemTesseract(buffer) {
     const inputPath = path.join(tempDir, `${id}.png`), outputBase = path.join(tempDir, id), outputPath = `${outputBase}.txt`;
     try {
         fs.writeFileSync(inputPath, buffer);
-        await new Promise((resolve, reject) => execFile(command, [inputPath, outputBase, '--psm', '6', '-l', 'eng', '-c', 'tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz- '], { timeout: 25000 }, err => err ? reject(err) : resolve()));
+        await new Promise((resolve, reject) => execFile(command, [inputPath, outputBase, '--psm', String(psm), '-l', 'eng', '-c', 'tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz- '], { timeout: 25000 }, err => err ? reject(err) : resolve()));
         return fs.existsSync(outputPath) ? fs.readFileSync(outputPath, 'utf8') : '';
     } catch (err) { console.warn('⚠️ System Tesseract OCR failed:', err.message); return null; }
     finally { for (const file of [inputPath, outputPath]) { try { if (fs.existsSync(file)) fs.unlinkSync(file); } catch (_) {} } }
@@ -2731,6 +2734,7 @@ async function requestBattleHubHtml(url, timeoutMs = 15000) {
 }
 
 async function fetchBattleHubMapIndex() {
+    if (avaCanonicalMapCache.names.length && avaCanonicalMapCache.expiresAt > Date.now()) return avaCanonicalMapCache.names;
     const urls = [
         'https://albionbattlehub.com/en/avalon-maps',
         'https://albionbattlehub.com/th/avalon-maps',
@@ -2771,13 +2775,47 @@ async function fetchBattleHubMapIndex() {
             if (unique.length) {
                 console.log('🗺️ Battle Hub canonical Avalon map index loaded: ' + unique.length + ' names from ' + url);
                 // Prefer a complete-looking index. The known Avalon dataset has 400 zones.
-                if (unique.length >= 300 || /sitemap/i.test(url)) return unique;
+                if (unique.length >= 300 || /sitemap/i.test(url)) {
+                    avaCanonicalMapCache.names = unique;
+                    avaCanonicalMapCache.expiresAt = Date.now() + (30 * 60 * 1000);
+                    return unique;
+                }
             }
         } catch (err) {
             console.warn('⚠️ Battle Hub map index request failed (' + url + '): ' + err.message);
         }
     }
     return [];
+}
+
+async function getAvaMapSuggestions(ocrCandidates = [], limit = 5) {
+    const inputs = [...new Set(ocrCandidates.filter(Boolean).map(value => normalizeMapNameText(value).replace(/\\s+/g, '')).filter(Boolean))];
+    const canonicalNames = await fetchBattleHubMapIndex();
+    if (!canonicalNames.length) return inputs.slice(0, limit).map(name => ({ name, score: 0 }));
+    return canonicalNames.map(name => ({
+        name,
+        score: inputs.reduce((best, input) => Math.max(best, avaNameSimilarity(input, name)), 0)
+    })).sort((a, b) => b.score - a.score || a.name.localeCompare(b.name)).slice(0, limit);
+}
+
+function avaSelectionComponents(guildId, token, suggestions) {
+    const select = new StringSelectMenuBuilder()
+        .setCustomId('ava_select:' + guildId + ':' + token)
+        .setPlaceholder('เลือกชื่อแมพที่ตรงกับรูป')
+        .setMinValues(1)
+        .setMaxValues(1)
+        .addOptions(...suggestions.map((item, index) => ({
+            label: String(item.name).slice(0, 100),
+            value: String(item.name).slice(0, 100),
+            description: ('ความใกล้เคียง ' + Math.round(Number(item.score || 0) * 100) + '% • ตัวเลือกที่ ' + (index + 1)).slice(0, 100)
+        })));
+    return [
+        new ActionRowBuilder().addComponents(select),
+        new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('ava_retry:' + guildId + ':' + token).setLabel('🔄 อ่านรูปใหม่').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('ava_cancel:' + guildId + ':' + token).setLabel('❌ ยกเลิก').setStyle(ButtonStyle.Danger)
+        )
+    ];
 }
 
 async function resolveAvaMapName(input) {
@@ -4222,7 +4260,7 @@ client.on('raw', async packet => {
         const channel = await client.channels.fetch(channelId);
         if (!channel?.messages?.fetch) return;
         const fetchedMessage = await channel.messages.fetch(messageId, { force: true });
-        await processAvaImageMessage(fetchedMessage);
+        await guildContext.run({ guildId }, async () => processAvaImageMessage(fetchedMessage));
     } catch (err) {
         console.error('❌ AVA raw message fetch/process error:', err.message);
     }
