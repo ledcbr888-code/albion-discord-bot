@@ -3380,7 +3380,7 @@ async function processAvaImageMessage(message) {
 
     // AVA message handling must be isolated by guild, but must not depend on
     // AsyncLocalStorage. messageCreate can run outside the interaction scope.
-    const guildConfig = guildConfigs[String(messageGuildId)] || null;
+    const guildConfig = getGuildConfig(String(messageGuildId));
     const configured = Array.isArray(guildConfig?.avaAuto) ? guildConfig.avaAuto : [];
     const channelIds = new Set([
         String(messageChannelId),
@@ -4389,7 +4389,7 @@ client.on('raw', async packet => {
     const guildId = String(data.guild_id || '');
     const channelId = String(data.channel_id || '');
     const messageId = String(data.id || '');
-    if (!guildId || !channelId || !messageId || !Array.isArray(data.attachments) || !data.attachments.length) return;
+    if (!guildId || !channelId || !messageId) return;
 
     const cfg = guildConfigs[guildId];
     const avaConfig = Array.isArray(cfg?.avaAuto)
@@ -4399,7 +4399,7 @@ client.on('raw', async packet => {
 
     console.log('🗺️ AVA raw MESSAGE_CREATE detected: guild=' + guildId +
         ' channel=' + channelId + ' message=' + messageId +
-        ' attachments=' + data.attachments.length);
+        ' attachments=' + (Array.isArray(data.attachments) ? data.attachments.length : 0));
 
     try {
         const channel = await client.channels.fetch(channelId);
@@ -4414,6 +4414,10 @@ client.on('raw', async packet => {
 client.on('messageCreate', async message => {
     return guildContext.run({ guildId: message.guildId }, async () => {
     if (message.author.bot) return;
+    console.log('📨 Discord messageCreate: guild=' + (message.guildId || 'DM') +
+        ' channel=' + (message.channelId || message.channel?.id || 'unknown') +
+        ' message=' + (message.id || 'unknown') +
+        ' attachments=' + (message.attachments?.size || 0));
     if (message.attachments?.size) {
         console.log('📎 Discord image/message attachment received: guild=' +
             (message.guildId || 'DM') + ' channel=' +
