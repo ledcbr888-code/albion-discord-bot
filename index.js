@@ -2733,15 +2733,37 @@ async function fetchBattleHubMapIndex() {
     ];
     for (const url of urls) {
         try {
-            const $ = cheerio.load(await requestBattleHubHtml(url));
+            const html = await requestBattleHubHtml(url);
+            const $ = cheerio.load(html);
             const maps = [];
+
+            // Read canonical names from hrefs. Support hideout names with multiple
+            // hyphen-separated parts, e.g. Qiient-Qi-Odesas.
             $('a[href]').each((_, el) => {
                 const name = parseAvaNameFromHref($(el).attr('href'));
-                if (name && /^[A-Za-z0-9]+-[A-Za-z0-9]+$/.test(name)) maps.push(name);
+                if (name && /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/.test(name)) maps.push(name);
             });
-            const unique = [...new Map(maps.map(x => [normalizeAvaLookupName(x), x])).values()];
-            if (unique.length) return unique;
-        } catch (_) {}
+
+            // Battle Hub may render only the first page of links in the DOM while
+            // the same page still contains the complete 400-zone list as text.
+            // Parse that canonical list too so OCR fuzzy matching can see every zone.
+            const bodyText = $('body').text().replace(/\\s+/g, ' ');
+            const bodyNameRe = /\\b([A-Za-z0-9]+(?:-[A-Za-z0-9]+)+)\\s*T(?:4|6|8)\\b/g;
+            for (const match of bodyText.matchAll(bodyNameRe)) {
+                maps.push(match[1]);
+            }
+
+            const unique = [...new Map(
+                maps.map(x => [normalizeAvaLookupName(x), x])
+            ).values()];
+
+            if (unique.length) {
+                console.log('🗺️ Battle Hub canonical Avalon map index loaded: ' + unique.length + ' names');
+                return unique;
+            }
+        } catch (err) {
+            console.warn('⚠️ Battle Hub map index request failed: ' + err.message);
+        }
     }
     return [];
 }
