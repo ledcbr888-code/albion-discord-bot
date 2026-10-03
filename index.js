@@ -3373,7 +3373,7 @@ async function generateAvaRoadsCard(data, ocrText = '') {
     return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: `ava-map-${data.name}.png` });
 }
 
-async function processAvaImageMessage(message) {
+async function processAvaImageMessage(message, fallbackAttachments = []) {
     const messageGuildId = message?.guildId || message?.guild?.id;
     if (!messageGuildId) return false;
     const messageChannelId = message.channelId || message.channel?.id;
@@ -3414,6 +3414,11 @@ async function processAvaImageMessage(message) {
         return [];
     };
     let attachments = getAttachmentList(message);
+
+    if (!attachments.length && Array.isArray(fallbackAttachments) && fallbackAttachments.length) {
+        attachments = fallbackAttachments;
+        console.log('🗺️ AVA using raw MESSAGE_CREATE attachments: ' + attachments.length);
+    }
 
     if (!attachments.length && typeof message.fetch === 'function') {
         try {
@@ -3956,37 +3961,29 @@ async function pollAvaConfiguredChannels() {
                 const channel = await client.channels.fetch(channelId);
                 if (!channel?.messages?.fetch) continue;
 
-                const fetched = await channel.messages.fetch({ limit: 10 });
+                const fetched = await channel.messages.fetch({ limit: 10, cache: false });
                 const messages = [...fetched.values()].sort((a, b) => {
                     try { return Number(BigInt(String(a.id)) - BigInt(String(b.id))); }
                     catch (_) { return String(a.id).localeCompare(String(b.id)); }
                 });
-
                 if (!messages.length) continue;
-
                 const latestId = String(messages[messages.length - 1].id);
                 const previousId = avaPollState.get(stateKey);
-
-                // First poll after startup/setup establishes a baseline so old
-                // images are not replayed. Later polls process only new messages.
                 if (!previousId) {
                     avaPollState.set(stateKey, latestId);
-                    console.log('🗺️ AVA poll baseline: guild=' + guildId +
-                        ' channel=' + channelId + ' latest=' + latestId);
+                    console.log('🗺️ AVA poll baseline: guild=' + guildId + ' channel=' + channelId + ' latest=' + latestId);
                     continue;
                 }
-
                 const newer = messages.filter(message => {
                     try { return BigInt(String(message.id)) > BigInt(previousId); }
                     catch (_) { return String(message.id) !== String(previousId); }
                 });
-
                 if (newer.length) {
                     avaPollState.set(stateKey, latestId);
                     for (const message of newer) {
                         if (message.author?.bot) continue;
                         try {
-                            await guildContext.run({ guildId }, async () => processAvaImageMessage(message));
+                            await guildContext.run({ guildId }, async () => { await processAvaImageMessage(message); });
                         } catch (err) {
                             console.error('❌ AVA poll message error:', err.message);
                         }
@@ -4021,7 +4018,7 @@ client.once('clientReady', async () => {
 
     setInterval(checkAutoBattles, 5 * 60 * 1000);
     setTimeout(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA initial poll error:', err)), 3000);
-    setInterval(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA poll error:', err)), 8000);
+    setInterval(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA poll error:', err)), 5000);
     scheduleDailyAutoCheck();
     setInterval(checkAndSendBanditAlerts, 60 * 1000);
     preloadDailyIcons().catch(err => console.warn('⚠️ Daily icon preload failed:', err.message));
@@ -4370,17 +4367,46 @@ client.on('interactionCreate', async interaction => {
         }
         if (sub === 'setup') {
             const channel = interaction.options.getChannel('channel');
+            if (!channel?.isTextBased?.()) return interaction.reply({ content: '❌ ห้องที่เลือกไม่ใช่ห้องข้อความ', flags: 64 });
+            const me = interaction.guild?.members?.me || await interaction.guild?.members?.fetchMe?.().catch(() => null);
+            const permissions = channel.permissionsFor(me || client.user);
+            const requiredPermissions = [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.ReadMessageHistory, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.AttachFiles];
+            const missing = permissions ? permissions.missing(requiredPermissions) : requiredPermissions.map(String);
+            if (missing.length) return interaction.reply({ content: '❌ บอทไม่มีสิทธิ์ครบสำหรับ AVA Auto\nห้อง: <#' + channel.id + '>\nขาด: **' + missing.join(', ') + '**\n\nให้สิทธิ์ View Channel + Read Message History + Send Messages + Attach Files แล้วลองตั้งค่าใหม่', flags: 64 });
             const setupGuildConfig = getGuildConfig(interaction.guildId);
-            const existing = setupGuildConfig.avaAuto.findIndex(x => x.guildId === interaction.guildId);
+            const existing = setupGuildConfig.avaAuto.findIndex(x => String(x.guildId) === String(interaction.guildId));
             const config = { guildId: interaction.guildId, channelId: channel.id, enabled: true };
             if (existing >= 0) setupGuildConfig.avaAuto[existing] = config;
             else setupGuildConfig.avaAuto.push(config);
+            avaPollState.delete(String(interaction.guildId) + ':' + String(channel.id));
             saveData();
-            return interaction.reply(`✅ ตั้งค่าตรวจรูป AVA อัตโนมัติแล้ว\n📢 ห้อง: <#${channel.id}>\n\nวางรูปแผนที่ AVA ในห้องนี้ได้เลย บอทจะ OCR ชื่อแมพ → ค้นจาก **Avalon Roads Tracker** → ดึงจำนวนหีบ/ทรัพยากร/ดันเจี้ยนและรูปแมพ → สร้างรายงานเป็นรูปให้อัตโนมัติ (สำรอง: Albion Battle Hub → Albion Online Builds → Albion Roads)`);
+            setTimeout(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA setup poll error:', err)), 500);
+            return interaction.reply(
+                '✅ ตั้งค่าตรวจรูป AVA อัตโนมัติแล้ว\n' +
+                '📢 ห้อง: <#' + channel.id + '>\n' +
+                '🟢 ระบบตรวจจับ: เปิด\n' +
+                '🔎 OCR: Tesseract System + Tesseract.js\n\n' +
+                'วางรูปแผนที่ AVA ในห้องนี้ได้เลย บอทจะอ่านชื่อแมพ → ค้นจาก Avalon Roads Tracker → สร้างรายงานเป็นรูปอัตโนมัติ\n\n' +
+                '⚠️ สำคัญ: ต้องเปิด Message Content Intent ใน Discord Developer Portal > Bot > Privileged Gateway Intents'
+            );
         }
         if (sub === 'status') {
-            const config = getGuildConfig(interaction.guildId, false)?.avaAuto?.find(x => x.guildId === interaction.guildId);
-            return interaction.reply({ ephemeral: true, content: config ? `🗺️ **AVA AUTO CHECK**\n📢 ห้อง: <#${config.channelId}>\n🟢 สถานะ: ${config.enabled === false ? 'ปิด' : 'เปิด'}` : '❌ ยังไม่ได้ตั้งค่าห้องตรวจรูป AVA อัตโนมัติ' });
+            const config = getGuildConfig(interaction.guildId, false)?.avaAuto?.find(x => String(x.guildId) === String(interaction.guildId));
+            if (!config) return interaction.reply({ ephemeral: true, content: '❌ ยังไม่ได้ตั้งค่าห้องตรวจรูป AVA อัตโนมัติ' });
+            const channel = await client.channels.fetch(String(config.channelId)).catch(() => null);
+            const me = interaction.guild?.members?.me || await interaction.guild?.members?.fetchMe?.().catch(() => null);
+            const permissions = channel?.permissionsFor?.(me || client.user);
+            const requiredPermissions = [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.ReadMessageHistory, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.AttachFiles];
+            const missing = permissions ? permissions.missing(requiredPermissions) : requiredPermissions.map(String);
+            const intentEnabledInCode = client.options.intents?.has?.(GatewayIntentBits.MessageContent) ? 'เปิด' : 'ปิด';
+            return interaction.reply({ ephemeral: true, content:
+                '🗺️ AVA AUTO CHECK\n' +
+                '📢 ห้อง: <#' + config.channelId + '>\n' +
+                '🟢 สถานะ: ' + (config.enabled === false ? 'ปิด' : 'เปิด') + '\n' +
+                '🔐 สิทธิ์ห้อง: ' + (missing.length ? '❌ ขาด ' + missing.join(', ') : '✅ ครบ') + '\n' +
+                '🧩 Message Content Intent ในโค้ด: ' + intentEnabledInCode + '\n' +
+                '⚠️ Developer Portal: ต้องเปิด Message Content Intent ที่ Bot > Privileged Gateway Intents\n' +
+                '⏱️ Polling fallback: ทุก 5 วินาที' });
         }
         if (sub === 'remove') {
             const removeGuildConfig = getGuildConfig(interaction.guildId, false);
@@ -4471,8 +4497,15 @@ client.on('raw', async packet => {
     try {
         const channel = await client.channels.fetch(channelId);
         if (!channel?.messages?.fetch) return;
-        const fetchedMessage = await channel.messages.fetch(messageId, { force: true });
-        await guildContext.run({ guildId }, async () => processAvaImageMessage(fetchedMessage));
+        const rawAttachments = Array.isArray(data.attachments)
+            ? data.attachments.map(a => ({ id: a?.id, name: a?.filename || a?.name || 'discord-image', url: a?.url || '', proxyURL: a?.proxy_url || a?.proxyURL || '', contentType: a?.content_type || a?.contentType || '' })).filter(a => a.url)
+            : [];
+        const fetchedMessage = await channel.messages.fetch(messageId, { force: true }).catch(() => null);
+        if (!fetchedMessage) {
+            console.warn('⚠️ AVA raw message fetch failed for ' + messageId + '. Check View Channel + Read Message History.');
+            return;
+        }
+        await guildContext.run({ guildId }, async () => processAvaImageMessage(fetchedMessage, rawAttachments));
     } catch (err) {
         console.error('❌ AVA raw message fetch/process error:', err.message);
     }
