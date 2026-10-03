@@ -2484,6 +2484,7 @@ const AVA_IMAGE_EXTENSIONS = /\.(?:png|jpe?g|webp|gif)$/i;
 const avaOcrCache = new Map();
 const avaPendingSelections = new Map();
 const avaProcessingMessages = new Set();
+const avaPollState = new Map();
 const avaCanonicalMapCache = { names: [], expiresAt: 0 };
 
 function normalizeMapNameText(value) {
@@ -3940,6 +3941,70 @@ const commands = [
         .addSubcommand(s => s.setName('remove').setDescription('ยกเลิกการแจ้งเตือน Bandit Assault'))
 ].map(c => c.toJSON());
 
+
+async function pollAvaConfiguredChannels() {
+    const seenChannels = new Set();
+
+    for (const [guildId, cfg] of Object.entries(guildConfigs || {})) {
+        const avaConfigs = Array.isArray(cfg?.avaAuto) ? cfg.avaAuto.filter(x => x?.enabled !== false && x?.channelId) : [];
+        for (const avaConfig of avaConfigs) {
+            const channelId = String(avaConfig.channelId);
+            const stateKey = String(guildId) + ':' + channelId;
+            seenChannels.add(stateKey);
+
+            try {
+                const channel = await client.channels.fetch(channelId);
+                if (!channel?.messages?.fetch) continue;
+
+                const fetched = await channel.messages.fetch({ limit: 10 });
+                const messages = [...fetched.values()].sort((a, b) => {
+                    try { return Number(BigInt(String(a.id)) - BigInt(String(b.id))); }
+                    catch (_) { return String(a.id).localeCompare(String(b.id)); }
+                });
+
+                if (!messages.length) continue;
+
+                const latestId = String(messages[messages.length - 1].id);
+                const previousId = avaPollState.get(stateKey);
+
+                // First poll after startup/setup establishes a baseline so old
+                // images are not replayed. Later polls process only new messages.
+                if (!previousId) {
+                    avaPollState.set(stateKey, latestId);
+                    console.log('🗺️ AVA poll baseline: guild=' + guildId +
+                        ' channel=' + channelId + ' latest=' + latestId);
+                    continue;
+                }
+
+                const newer = messages.filter(message => {
+                    try { return BigInt(String(message.id)) > BigInt(previousId); }
+                    catch (_) { return String(message.id) !== String(previousId); }
+                });
+
+                if (newer.length) {
+                    avaPollState.set(stateKey, latestId);
+                    for (const message of newer) {
+                        if (message.author?.bot) continue;
+                        try {
+                            await guildContext.run({ guildId }, async () => processAvaImageMessage(message));
+                        } catch (err) {
+                            console.error('❌ AVA poll message error:', err.message);
+                        }
+                    }
+                } else {
+                    avaPollState.set(stateKey, latestId);
+                }
+            } catch (err) {
+                console.warn('⚠️ AVA poll failed for channel ' + channelId + ': ' + err.message);
+            }
+        }
+    }
+
+    for (const key of avaPollState.keys()) {
+        if (!seenChannels.has(key)) avaPollState.delete(key);
+    }
+}
+
 client.once('clientReady', async () => {
     console.log(`✅ Logged in as ${client.user.tag}`);
     await migrateLegacyDataAfterReady();
@@ -3955,6 +4020,8 @@ client.once('clientReady', async () => {
     }, 5000);
 
     setInterval(checkAutoBattles, 5 * 60 * 1000);
+    setTimeout(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA initial poll error:', err)), 3000);
+    setInterval(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA poll error:', err)), 8000);
     scheduleDailyAutoCheck();
     setInterval(checkAndSendBanditAlerts, 60 * 1000);
     preloadDailyIcons().catch(err => console.warn('⚠️ Daily icon preload failed:', err.message));
@@ -4391,7 +4458,7 @@ client.on('raw', async packet => {
     const messageId = String(data.id || '');
     if (!guildId || !channelId || !messageId) return;
 
-    const cfg = guildConfigs[guildId];
+    const cfg = getGuildConfig(guildId);
     const avaConfig = Array.isArray(cfg?.avaAuto)
         ? cfg.avaAuto.find(x => x?.enabled !== false && String(x?.channelId || '') === channelId)
         : null;
