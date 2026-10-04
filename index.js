@@ -2769,6 +2769,8 @@ const AVA_OCR_NAME_ALIASES = new Map([
 
     // Confirmed OCR confusions seen in real AVA screenshots.
     ['tynos-atatios', 'Tynos-Atatlos'],
+    ['ceros-aedyium', 'Ceros-Aeaylum'],
+    ['xoultos-eyoztum', 'Xuros-Eyoztum'],
     ['ollent-odesas', 'Qiient-Odesas'],
     ['olient-odesas', 'Qiient-Odesas'],
     ['qient-odesas', 'Qiient-Odesas'],
@@ -3776,7 +3778,28 @@ async function processAvaImageMessage(message, fallbackAttachments = []) {
         }
 
         if (!suggestions.length) {
-            throw new Error('ไม่พบชื่อแมพที่ใกล้เคียงจากฐานข้อมูล Avalon');
+            // The suggestion index is only a helper for OCR disambiguation. It
+            // must never block a valid map from being processed when the remote
+            // Avalon index is unavailable. Try the real data-source fallback
+            // pipeline directly with the OCR name/candidates.
+            console.warn('⚠️ AVA suggestion index returned no match; trying direct data-source fallback for OCR=' + ocr.mapName);
+            try {
+                const data = await fetchAvaMapDataWithFallback(ocr.mapName, ocrCandidates);
+                const card = await generateAvaRoadsCard(data, ocr.mapName);
+                await status.edit({
+                    content: '✅ อ่านแมพได้: **' + data.name + '** • **' + data.tier + '**',
+                    components: [],
+                    files: [card]
+                });
+                return true;
+            } catch (fallbackErr) {
+                console.warn('⚠️ AVA direct fallback after empty suggestions failed: ' + fallbackErr.message);
+                throw new Error(
+                    'ไม่พบชื่อแมพที่ใกล้เคียงจากฐานข้อมูล Avalon\n' +
+                    'OCR: ' + String(ocr.mapName || '') + '\n' +
+                    'Fallback: ' + String(fallbackErr.message || '')
+                );
+            }
         }
 
         const token = Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-6);
