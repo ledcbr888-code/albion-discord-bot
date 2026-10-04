@@ -3405,10 +3405,13 @@ async function fetchAvaMapDataWithFallback(mapName, ocrCandidates = []) {
     // another remote map lookup and was adding a large delay before the card.
     let lookupName = mapName;
     const normalizedMap = normalizeAvaLookupName(mapName);
-    const candidateMatchesMap = ocrCandidates.some(candidate =>
-        normalizeAvaLookupName(candidate) === normalizedMap ||
-        normalizeAvaLookupName(normalizeAvaOcrMapName(candidate)) === normalizedMap
-    );
+    const normalizedCorrection = normalizeAvaLookupName(normalizeAvaOcrMapName(mapName));
+    const candidateMatchesMap =
+        normalizedCorrection === normalizedMap &&
+        ocrCandidates.some(candidate =>
+            normalizeAvaLookupName(candidate) === normalizedMap ||
+            normalizeAvaLookupName(normalizeAvaOcrMapName(candidate)) === normalizedMap
+        );
 
     if (!candidateMatchesMap || !ocrCandidates.length) {
         try {
