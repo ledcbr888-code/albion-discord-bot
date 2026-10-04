@@ -2866,6 +2866,60 @@ async function fetchBattleHubMapIndex() {
     return avaCanonicalMapCache.loading;
 }
 
+async function fetchAlternativeAvaMapIndex() {
+    const urls = [
+        'https://guildmanifesto.github.io/albionmaps/',
+        'https://lucioreyli.github.io/ava-maps/'
+    ];
+
+    for (const url of urls) {
+        try {
+            const response = await axios.get(url, {
+                timeout: 8000,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0',
+                    Accept: 'text/html,application/xhtml+xml'
+                },
+                validateStatus: status => status >= 200 && status < 400
+            });
+            const html = String(response.data || '');
+            const textContent = cheerio.load(html)('body').text().replace(/\s+/g, ' ');
+            const source = html + ' ' + textContent;
+            const names = [];
+
+            // Both static Avalon indexes expose names followed by their tier.
+            // Keep only real-looking Avalon zone names, not UI text.
+            for (const match of source.matchAll(/\b([A-Za-z]{3,18}-[A-Za-z]{3,18})\s*(?:\(|<[^>]*>)?\s*T?([468]|IV|VI|VIII)\b/gi)) {
+                const name = normalizeMapNameText(match[1]).replace(/\s+/g, '');
+                if (!/^[A-Za-z]{3,18}-[A-Za-z]{3,18}$/.test(name)) continue;
+                if (!names.some(x => normalizeAvaLookupName(x) === normalizeAvaLookupName(name))) {
+                    names.push(name);
+                }
+            }
+
+            // Fallback pattern for the simple GitHub Pages table where names
+            // appear before "T4/T6/T8" with arbitrary whitespace.
+            if (!names.length) {
+                for (const match of source.matchAll(/\b([A-Za-z]{3,18}-[A-Za-z]{3,18})\b/g)) {
+                    const name = normalizeMapNameText(match[1]).replace(/\s+/g, '');
+                    if (!/^[A-Za-z]{3,18}-[A-Za-z]{3,18}$/.test(name)) continue;
+                    const around = source.slice(Math.max(0, match.index - 20), Math.min(source.length, match.index + 80));
+                    if (!/\b(?:T4|T6|T8|IV|VI|VIII)\b/i.test(around)) continue;
+                    if (!names.some(x => normalizeAvaLookupName(x) === normalizeAvaLookupName(name))) names.push(name);
+                }
+            }
+
+            if (names.length) {
+                console.log('🗺️ Alternative Avalon map index loaded: ' + names.length + ' names from ' + url);
+                return names;
+            }
+        } catch (err) {
+            console.warn('⚠️ Alternative Avalon map index failed (' + url + '): ' + err.message);
+        }
+    }
+    return [];
+}
+
 async function getAvaMapSuggestions(ocrCandidates = [], limit = 5) {
     const rawInputs = [...new Set(ocrCandidates.filter(Boolean).map(String).filter(Boolean))];
     const normalizedInputs = rawInputs
@@ -2902,7 +2956,16 @@ async function getAvaMapSuggestions(ocrCandidates = [], limit = 5) {
         }
     }
 
-    const canonicalNames = await fetchBattleHubMapIndex();
+    let canonicalNames = await fetchBattleHubMapIndex();
+
+    // Battle Hub can return 403 from some hosting providers even though the
+    // public map itself exists. Use a static Avalon index as the suggestion
+    // database in that case, so OCR mistakes such as i/l can still be offered
+    // as selectable real map names.
+    if (!canonicalNames.length) {
+        canonicalNames = await fetchAlternativeAvaMapIndex();
+    }
+
     if (canonicalNames.length) {
         const ranked = canonicalNames.map(name => ({
             name,
