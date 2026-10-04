@@ -1,0 +1,4631 @@
+// AUTO-BATTLE FIX V3 (STABLE CANVAS) + DAILY BONUS COMMAND & AUTOMATION
+const {
+    Client,
+    GatewayIntentBits,
+    SlashCommandBuilder,
+    REST,
+    Routes,
+    EmbedBuilder,
+    AttachmentBuilder,
+    ChannelType,
+    ActionRowBuilder,
+    ButtonBuilder,
+    ButtonStyle,
+    StringSelectMenuBuilder,
+    PermissionsBitField
+} = require('discord.js');
+
+const cloudscraper = require('cloudscraper');
+const axios = require('axios');
+const cheerio = require('cheerio');
+const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
+const { execFile } = require('child_process');
+const fs = require('fs');
+const path = require('path');
+const express = require('express');
+const { AsyncLocalStorage } = require('node:async_hooks');
+
+const BANDIT_SERIF_FONT = '/usr/share/fonts/truetype/noto/NotoSerifDisplay-Black.ttf';
+const BANDIT_DISPLAY_FONT = '/usr/share/fonts/truetype/noto/NotoSansDisplay-CondensedExtraBold.ttf';
+if (fs.existsSync(BANDIT_SERIF_FONT)) GlobalFonts.registerFromPath(BANDIT_SERIF_FONT, 'Bandit Serif');
+if (fs.existsSync(BANDIT_DISPLAY_FONT)) GlobalFonts.registerFromPath(BANDIT_DISPLAY_FONT, 'Bandit Display');
+
+const app = express();
+const PORT = Number(process.env.PORT) || 3000;
+
+app.get('/', (_, res) => res.status(200).send('Albion Discord Bot is running.'));
+
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`🌐 Web server listening on port ${PORT}`);
+});
+
+const BOT_TOKEN = String(process.env.BOT_TOKEN || '').trim();
+const OWNER_ID = String(process.env.OWNER_ID || '').trim();
+
+if (!BOT_TOKEN) {
+    console.error('❌ BOT_TOKEN is missing. Set it in your hosting provider Environment Variables.');
+    process.exit(1);
+}
+
+const client = new Client({
+    intents: [
+        GatewayIntentBits.Guilds,
+        GatewayIntentBits.GuildMessages,
+        GatewayIntentBits.MessageContent
+    ]
+});
+
+const DATA_DIR = String(process.env.DATA_DIR || __dirname).trim();
+const DATA_FILE = String(process.env.TRACKING_FILE || path.join(DATA_DIR, 'tracking.json')).trim();
+let guildConfigs = {};
+let legacyMigration = null;
+let autoBattleCheckRunning = false;
+
+function createDefaultGuildConfig() {
+    return { players: [], guilds: [], autoBattles: [], dailyAuto: [], dailyConfirmations: [], dailySourceStatus: {}, banditAuto: [], avaAuto: [], avaProcessedMessages: [], processedBattles: [], lastDailyReportDate: {}, lastBanditAlertKey: {} };
+}
+function normalizeGuildConfig(raw = {}) {
+    const cfg = raw && typeof raw === 'object' ? raw : {};
+    return {
+        ...createDefaultGuildConfig(), ...cfg,
+        players: Array.isArray(cfg.players) ? cfg.players.map(String).filter(Boolean) : [],
+        guilds: Array.isArray(cfg.guilds) ? cfg.guilds : [],
+        autoBattles: Array.isArray(cfg.autoBattles) ? cfg.autoBattles : [],
+        dailyAuto: Array.isArray(cfg.dailyAuto) ? cfg.dailyAuto : [],
+        dailyConfirmations: Array.isArray(cfg.dailyConfirmations) ? cfg.dailyConfirmations : [],
+        dailySourceStatus: cfg.dailySourceStatus && typeof cfg.dailySourceStatus === 'object' ? cfg.dailySourceStatus : {},
+        banditAuto: Array.isArray(cfg.banditAuto) ? cfg.banditAuto : [],
+        avaAuto: Array.isArray(cfg.avaAuto) ? cfg.avaAuto : [],
+        avaProcessedMessages: cfg.avaProcessedMessages instanceof Set ? [...cfg.avaProcessedMessages].map(String).slice(-500) : (Array.isArray(cfg.avaProcessedMessages) ? cfg.avaProcessedMessages.map(String).slice(-500) : []),
+        processedBattles: cfg.processedBattles instanceof Set ? [...cfg.processedBattles].map(String).slice(-1000) : (Array.isArray(cfg.processedBattles) ? cfg.processedBattles.map(String).slice(-1000) : []),
+        lastDailyReportDate: cfg.lastDailyReportDate && typeof cfg.lastDailyReportDate === 'object' ? cfg.lastDailyReportDate : {},
+        lastBanditAlertKey: cfg.lastBanditAlertKey && typeof cfg.lastBanditAlertKey === 'object' ? cfg.lastBanditAlertKey : {}
+    };
+}
+function getGuildConfig(guildId, create = true) {
+    const id = String(guildId || '').trim();
+    if (!id) return create ? createDefaultGuildConfig() : null;
+    if (!guildConfigs[id] && create) guildConfigs[id] = createDefaultGuildConfig();
+    return guildConfigs[id] || null;
+}
+function getAllGuildConfigs() {
+    return Object.entries(guildConfigs).map(([guildId, config]) => ({ guildId, config }));
+}
+
+const guildContext = new AsyncLocalStorage();
+function currentGuildId() { return guildContext.getStore()?.guildId || null; }
+function currentGuildConfig() { return getGuildConfig(currentGuildId(), false); }
+function scopedArray(field) { return currentGuildConfig()?.[field] || []; }
+function scopedObject(field) { return currentGuildConfig()?.[field] || {}; }
+function scopedSet(field) {
+    const cfg = currentGuildConfig();
+    if (!cfg) return new Set();
+    const proxy = new Proxy(new Set(Array.isArray(cfg[field]) ? cfg[field] : []), {
+        get(target, prop) {
+            if (prop === 'add') return value => { target.add(String(value)); cfg[field] = [...target]; return proxy; };
+            if (prop === 'delete') return value => { const changed = target.delete(String(value)); cfg[field] = [...target]; return changed; };
+            if (prop === 'clear') return () => { target.clear(); cfg[field] = []; };
+            const value = Reflect.get(target, prop, target);
+            return typeof value === 'function' ? value.bind(target) : value;
+        }
+    });
+    return proxy;
+}
+const scopedNames = {
+    targetPlayers: ['players','array'], targetGuilds: ['guilds','array'],
+    autoBattleConfigs: ['autoBattles','array'], dailyAutoConfigs: ['dailyAuto','array'],
+    dailyPlayerConfirmations: ['dailyConfirmations','array'], dailySourceStatus: ['dailySourceStatus','object'],
+    banditAutoConfigs: ['banditAuto','array'], avaAutoConfigs: ['avaAuto','array'],
+    avaProcessedMessages: ['avaProcessedMessages','set'], processedBattles: ['processedBattles','set'],
+    lastDailyReportDate: ['lastDailyReportDate','object'], lastBanditAlertKey: ['lastBanditAlertKey','object']
+};
+for (const [name, [field, type]] of Object.entries(scopedNames)) {
+    Object.defineProperty(globalThis, name, { configurable: true, get() { return type === 'set' ? scopedSet(field) : type === 'object' ? scopedObject(field) : scopedArray(field); }, set(value) { const cfg = currentGuildConfig(); if (!cfg) return; cfg[field] = type === 'set' ? [...(value || [])].map(String) : value; } });
+}
+
+async function migrateLegacyDataAfterReady() {
+    if (!legacyMigration) return;
+    const legacy = legacyMigration; legacyMigration = null;
+    const inferred = new Map();
+    for (const item of (Array.isArray(legacy.guilds) ? legacy.guilds : [])) {
+        const entry = typeof item === 'string' ? { name: item, channelId: null } : item;
+        let gid = null;
+        if (entry?.channelId) { const ch = await client.channels.fetch(entry.channelId).catch(() => null); gid = ch?.guildId || null; }
+        if (!gid && client.guilds.cache.size === 1) gid = client.guilds.cache.first().id;
+        if (!gid) continue;
+        const cfg = getGuildConfig(gid);
+        if (entry.name && !cfg.guilds.some(x => String(x.name).toLowerCase() === String(entry.name).toLowerCase())) cfg.guilds.push({ name: entry.name, channelId: entry.channelId || null });
+        inferred.set(gid, (inferred.get(gid) || 0) + 1);
+    }
+    for (const field of ['autoBattles','dailyAuto','banditAuto','avaAuto']) for (const item of (Array.isArray(legacy[field === 'autoBattles' ? 'autoBattles' : field]) ? legacy[field === 'autoBattles' ? 'autoBattles' : field] : [])) {
+        if (!item?.guildId) continue;
+        const cfg = getGuildConfig(item.guildId);
+        if (!cfg[field].some(x => JSON.stringify(x) === JSON.stringify(item))) cfg[field].push(item);
+    }
+    const known = [...new Set([...inferred.keys(), ...(legacy.autoBattles || []).map(x => x?.guildId).filter(Boolean), ...(legacy.dailyAuto || []).map(x => x?.guildId).filter(Boolean)])];
+    const target = inferred.size === 1 ? [...inferred.keys()][0] : (known.length === 1 ? known[0] : (client.guilds.cache.size === 1 ? client.guilds.cache.first().id : null));
+    if (target) {
+        const cfg = getGuildConfig(target);
+        for (const p of (legacy.players || [])) if (!cfg.players.some(x => x.toLowerCase() === String(p).toLowerCase())) cfg.players.push(String(p));
+        cfg.dailyConfirmations = Array.isArray(legacy.dailyConfirmations) ? legacy.dailyConfirmations : cfg.dailyConfirmations;
+        cfg.dailySourceStatus = legacy.dailySourceStatus || cfg.dailySourceStatus;
+        cfg.processedBattles = Array.isArray(legacy.processedBattles) ? legacy.processedBattles.slice(-1000) : cfg.processedBattles;
+    }
+    saveData();
+    console.log('🔄 Legacy tracking.json migrated to per-Discord-server settings.');
+}
+
+function ensureDataDirectory() {
+    try {
+        const dir = path.dirname(DATA_FILE);
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        return true;
+    } catch (err) {
+        console.error('❌ tracking data directory error:', err.message);
+        return false;
+    }
+}
+
+function loadData() {
+    try {
+        if (!ensureDataDirectory()) { guildConfigs = {}; legacyMigration = null; return; }
+        if (!fs.existsSync(DATA_FILE)) {
+            guildConfigs = {};
+            console.warn(`⚠️ tracking.json not found at ${DATA_FILE}. A new empty configuration will be created.`);
+            saveData();
+            return;
+        }
+        const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+        if (data && data.version >= 3 && data.guilds && !Array.isArray(data.guilds)) {
+            guildConfigs = Object.fromEntries(Object.entries(data.guilds).map(([id, cfg]) => [id, normalizeGuildConfig(cfg)]));
+            console.log('📁 Tracking v3: ' + Object.keys(guildConfigs).length + ' Discord server configuration(s) loaded.');
+            return;
+        }
+        legacyMigration = data || {};
+        guildConfigs = {};
+        console.log('📁 Legacy tracking format detected. Migration will run after Discord is ready.');
+    } catch (err) {
+        console.error('❌ tracking.json load error:', err.message);
+        guildConfigs = {}; legacyMigration = null;
+    }
+}
+function saveData() {
+    try {
+        if (!ensureDataDirectory()) return false;
+        guildConfigs = Object.fromEntries(Object.entries(guildConfigs).map(([id, cfg]) => [id, normalizeGuildConfig(cfg)]));
+        const payload = JSON.stringify({
+            version: 3, updatedAt: new Date().toISOString(),
+            guilds: Object.fromEntries(Object.entries(guildConfigs).map(([id, cfg]) => [id, { ...cfg, processedBattles: Array.isArray(cfg.processedBattles) ? cfg.processedBattles.slice(-1000) : [], avaProcessedMessages: Array.isArray(cfg.avaProcessedMessages) ? cfg.avaProcessedMessages.slice(-500) : [] }]))
+        }, null, 2);
+        const tempFile = `${DATA_FILE}.tmp`;
+        fs.writeFileSync(tempFile, payload, 'utf8');
+        fs.renameSync(tempFile, DATA_FILE);
+        return true;
+    } catch (err) {
+        try { if (fs.existsSync(`${DATA_FILE}.tmp`)) fs.unlinkSync(`${DATA_FILE}.tmp`); } catch (_) {}
+        console.error('❌ tracking.json save error:', err.message);
+        return false;
+    }
+}
+
+loadData();
+
+function parseFameValue(value) {
+    if (typeof value === 'number') return value;
+    let str = String(value || '').trim().toUpperCase();
+    if (!str) return 0;
+    let multiplier = 1;
+    if (str.endsWith('B')) { multiplier = 1e9; str = str.slice(0, -1); }
+    else if (str.endsWith('M')) { multiplier = 1e6; str = str.slice(0, -1); }
+    else if (str.endsWith('K')) { multiplier = 1e3; str = str.slice(0, -1); }
+    const num = parseFloat(str.replace(/,/g, ''));
+    return Number.isNaN(num) ? 0 : Math.round(num * multiplier);
+}
+
+function formatFame(num) {
+    num = Number(num) || 0;
+    if (num >= 1e9) return `${(num / 1e9).toFixed(1)}B`;
+    if (num >= 1e6) return `${(num / 1e6).toFixed(1)}M`;
+    if (num >= 1e3) return `${(num / 1e3).toFixed(1)}K`;
+    return num.toLocaleString();
+}
+
+function centerString(value, width) {
+    const str = String(value);
+    if (str.length >= width) return str.slice(0, width);
+    const pad = width - str.length;
+    return ' '.repeat(Math.floor(pad / 2)) + str + ' '.repeat(Math.ceil(pad / 2));
+}
+
+function formatUTCTime(input) {
+    if (!input) return 'N/A';
+    let date;
+    if (typeof input === 'number' || (!Number.isNaN(Number(input)) && String(input).trim() !== '')) {
+        let n = Number(input);
+        if (n < 1e10) n *= 1000;
+        date = new Date(n);
+    } else date = new Date(input);
+    if (Number.isNaN(date.getTime())) return 'N/A';
+    const formatted = new Intl.DateTimeFormat('en-GB', {
+        timeZone: 'Asia/Bangkok', day: '2-digit', month: '2-digit', year: 'numeric',
+        hour: '2-digit', minute: '2-digit', hour12: false
+    }).format(date);
+    return `${formatted.replace(',', '')} UTC+7`;
+}
+
+function normalizeAlbionItemId(raw) {
+    if (!raw) return '';
+    let value = '';
+    if (typeof raw === 'object') {
+        value = raw.itemId ?? raw.ItemId ?? raw.itemID ?? raw.ItemID ??
+            raw.type ?? raw.Type ?? raw.id ?? raw.Id ?? raw.itemType ?? raw.ItemType ??
+            raw.uniqueName ?? raw.UniqueName ?? raw.name ?? raw.Name ?? '';
+    } else value = String(raw);
+    value = String(value).trim();
+    if (!value) return '';
+    const urlMatch = value.match(/\/items\/([^/?#]+)/i) || value.match(/\/v1\/item\/([^/?#]+)/i);
+    if (urlMatch) {
+        try { value = decodeURIComponent(urlMatch[1]); } catch (_) {}
+    }
+    return value.replace(/\s+/g, '_').replace(/\.png(?:\?.*)?$/i, '').replace(/@(\d+)Q\d+/i, '@$1').trim();
+}
+
+function isOffhandItemId(id) {
+    const s = normalizeAlbionItemId(id).toUpperCase();
+    return !s || s.includes('OFF_') || s.includes('_OFFHAND') || s.includes('OFFHAND') ||
+        s.includes('SHIELD') || s.includes('TORCH') || s.includes('TOME') || s.includes('BOOK') ||
+        s.includes('ORB') || s.includes('HORN');
+}
+
+function isWeaponItemId(id) {
+    const s = normalizeAlbionItemId(id).toUpperCase();
+    if (!s || isOffhandItemId(s)) return false;
+    return s.includes('MAIN_') || s.includes('_2H_') || s.startsWith('2H_') ||
+        s.includes('CROSSBOW') || s.includes('BOW') || s.includes('STAFF') || s.includes('SWORD') ||
+        s.includes('MACE') || s.includes('AXE') || s.includes('HAMMER') || s.includes('SPEAR') ||
+        s.includes('DAGGER') || s.includes('ARCANE') || s.includes('HOLY') || s.includes('NATURE') ||
+        s.includes('FIRE') || s.includes('FROST') || s.includes('CURSED') || s.includes('GLAIVE') ||
+        s.includes('SCYTHE') || s.includes('QUARTERSTAFF') || s.includes('WAR_GLOVE') ||
+        s.includes('FIST') || s.includes('REAVER');
+}
+
+function isBadEquipmentItem(id) {
+    const s = normalizeAlbionItemId(id).toUpperCase();
+    if (!s) return true;
+    return s.includes('BAG') || s.includes('CAPE') || s.includes('HEAD') || s.includes('ARMOR') ||
+        s.includes('SHOES') || s.includes('FOOD') || s.includes('POTION') || s.includes('MOUNT') || isOffhandItemId(s);
+}
+
+function getApiUrls(matchId) {
+    return [
+        `https://gameinfo.albiononline.com/api/gameinfo/battles/${encodeURIComponent(matchId)}`,
+        `https://gameinfo-sgp.albiononline.com/api/gameinfo/battles/${encodeURIComponent(matchId)}`
+    ];
+}
+
+function extractMainHandInfo(obj) {
+    if (!obj || typeof obj !== 'object') return null;
+
+    const candidates = [];
+    const pushCandidate = (value) => {
+        if (value !== undefined && value !== null) candidates.push(value);
+    };
+
+    pushCandidate(obj.MainHand);
+    pushCandidate(obj.mainHand);
+    pushCandidate(obj.MAINHAND);
+    pushCandidate(obj.mainhand);
+    pushCandidate(obj.Mainhand);
+    pushCandidate(obj.Equipment?.MainHand);
+    pushCandidate(obj.equipment?.MainHand);
+    pushCandidate(obj.Equipment?.mainHand);
+    pushCandidate(obj.equipment?.mainHand);
+    pushCandidate(obj.Equipment?.mainhand);
+    pushCandidate(obj.equipment?.mainhand);
+    pushCandidate(obj.weapon);
+    pushCandidate(obj.Weapon);
+    pushCandidate(obj.weaponId);
+    pushCandidate(obj.WeaponId);
+
+    const equipment = obj.Equipment || obj.equipment;
+    if (equipment && typeof equipment === 'object') {
+        for (const [key, value] of Object.entries(equipment)) {
+            if (/main.?hand|weapon/i.test(key)) pushCandidate(value);
+        }
+    }
+
+    for (const candidate of candidates) {
+        const id = normalizeAlbionItemId(candidate);
+        if (!id || isBadEquipmentItem(id)) continue;
+
+        const quality = Number(
+            candidate?.Quality ?? candidate?.quality ??
+            candidate?.ItemQuality ?? candidate?.itemQuality ?? 1
+        ) || 1;
+        return { id, quality: Math.max(1, Math.min(5, quality)) };
+    }
+    return null;
+}
+
+async function fetchAlbionBBWeaponMap(matchId) {
+    const urls = [
+        `https://api.albionbb.com/asia/battles/kills?ids=${encodeURIComponent(matchId)}`,
+        `https://api.albionbb.com/asia/battles/kills?ids%5B%5D=${encodeURIComponent(matchId)}`
+    ];
+
+    for (const url of urls) {
+        try {
+            const response = await axios.get(url, {
+                timeout: 15000,
+                headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' }
+            });
+            const data = response.data;
+            const events = Array.isArray(data) ? data :
+                Array.isArray(data?.events) ? data.events :
+                Array.isArray(data?.kills) ? data.kills : [];
+            if (!events.length) continue;
+
+            const map = new Map();
+            const addEntity = (entity) => {
+                if (!entity || typeof entity !== 'object') return;
+                const name = String(entity.Name ?? entity.name ?? '').trim();
+                if (!name) return;
+                const info = extractMainHandInfo(entity);
+                if (info) map.set(name.toLowerCase(), info);
+            };
+
+            for (const event of events) {
+                addEntity(event.Killer || event.killer);
+                addEntity(event.Victim || event.victim);
+                const groups = [
+                    ...(Array.isArray(event.Participants) ? event.Participants : []),
+                    ...(Array.isArray(event.GroupMembers) ? event.GroupMembers : [])
+                ];
+                groups.forEach(addEntity);
+            }
+            if (map.size) return map;
+        } catch (err) {
+            console.error('⚠️ AlbionBB weapon fallback failed:', err.message);
+        }
+    }
+    return new Map();
+}
+
+async function fetchOfficialBattleWeaponMap(matchId) {
+    const baseUrls = getApiUrls(matchId).map(url => url.replace(/\/battles\//i, '/events/battle/'));
+    const map = new Map();
+    const maxPages = 12;
+
+    for (const baseUrl of baseUrls) {
+        try {
+            for (let page = 0; page < maxPages; page++) {
+                const offset = page * 51;
+                const url = `${baseUrl}?limit=51&offset=${offset}`;
+                const response = await axios.get(url, {
+                    timeout: 20000,
+                    headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' }
+                });
+
+                const data = response.data;
+                const events = Array.isArray(data) ? data :
+                    Array.isArray(data?.events) ? data.events :
+                    Array.isArray(data?.kills) ? data.kills : [];
+
+                if (!events.length) break;
+
+                const addEntity = (entity) => {
+                    if (!entity || typeof entity !== 'object') return;
+                    const name = String(entity.Name ?? entity.name ?? '').trim();
+                    if (!name) return;
+
+                    const info = extractMainHandInfo(entity);
+                    if (!info) return;
+
+                    const key = name.toLowerCase();
+                    if (!map.has(key)) map.set(key, info);
+                };
+
+                for (const event of events) {
+                    addEntity(event.Killer || event.killer);
+                    addEntity(event.Victim || event.victim);
+
+                    const groups = [
+                        ...(Array.isArray(event.Participants) ? event.Participants : []),
+                        ...(Array.isArray(event.GroupMembers) ? event.GroupMembers : [])
+                    ];
+                    groups.forEach(addEntity);
+                }
+
+                if (events.length < 51) break;
+            }
+
+            if (map.size) break;
+        } catch (err) {
+            console.warn(`⚠️ Official battle-event weapon fallback failed: ${err.message}`);
+        }
+    }
+
+    return map;
+}
+
+async function fetchOfficialBattle(matchId) {
+    const urls = getApiUrls(matchId);
+    for (const url of urls) {
+        try {
+            const response = await axios.get(url, { timeout: 30000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' } });
+            if (response.data) return response.data;
+        } catch (err) {}
+    }
+    return null;
+}
+
+function objectToPlayer(obj) {
+    if (!obj || typeof obj !== 'object') return null;
+    const name = obj.name ?? obj.Name ?? obj.playerName ?? obj.PlayerName;
+    if (!name || typeof name !== 'string') return null;
+    const guild = obj.guildName ?? obj.GuildName ?? obj.guild ?? obj.Guild ?? '';
+    const weaponInfo = extractMainHandInfo(obj);
+    return {
+        name: String(name), guild: typeof guild === 'string' ? guild : '',
+        kills: Number(obj.kills ?? obj.Kills ?? obj.kill ?? obj.Kill ?? 0) || 0,
+        deaths: Number(obj.deaths ?? obj.Deaths ?? obj.death ?? obj.Death ?? 0) || 0,
+        fame: parseFameValue(obj.killFame ?? obj.killfame ?? obj.fame ?? obj.Fame ?? obj.KillFame ?? 0),
+        damage: parseFameValue(obj.damage ?? obj.Damage ?? obj.totalDamage ?? obj.TotalDamage ?? 0),
+        healing: parseFameValue(obj.healing ?? obj.Healing ?? obj.totalHealing ?? obj.TotalHealing ?? 0),
+        weapon: weaponInfo?.id || '',
+        weaponQuality: weaponInfo?.quality || 1
+    };
+}
+
+function getApiPlayers(apiData) {
+    if (!apiData?.players) return [];
+    const list = Array.isArray(apiData.players) ? apiData.players : Object.values(apiData.players);
+    return list.map(objectToPlayer).filter(Boolean);
+}
+
+function getWeaponRenderUrls(weapon, quality = 1) {
+    const id = normalizeAlbionItemId(weapon);
+    if (!id) return [];
+    const baseId = id.replace(/@\d+$/, '');
+    const q = Math.max(1, Math.min(5, Number(quality) || 1));
+    const encoded = encodeURIComponent(id);
+    const encodedBase = encodeURIComponent(baseId);
+    return [
+        `https://render.albiononline.com/v1/item/${encoded}.png?quality=${q}&size=64`,
+        `https://render.albiononline.com/v1/item/${encodedBase}.png?quality=${q}&size=64`,
+        `https://render.albiononline.com/v1/item/${encoded}`,
+        `https://gameinfo.albiononline.com/api/gameinfo/items/${encoded}`
+    ];
+}
+
+async function loadAlbionWeaponIcon(weapon, quality = 1) {
+    const urls = getWeaponRenderUrls(weapon, quality);
+    for (const url of urls) {
+        try {
+            const response = await axios.get(url, {
+                responseType: 'arraybuffer',
+                timeout: 8000,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0',
+                    'Accept': 'image/png,image/webp,image/*,*/*;q=0.8'
+                },
+                validateStatus: status => status >= 200 && status < 300
+            });
+            const buffer = Buffer.from(response.data);
+            if (buffer.length > 100) return await loadImage(buffer);
+        } catch (_) {}
+    }
+    return null;
+}
+
+async function loadFameIcon() {
+    try {
+        const fameIconUrl = 'https://render.albiononline.com/v1/spell/T6_GVGSEASONREWARD_FAMEBUFF_SPELL.png';
+        const response = await axios.get(fameIconUrl, { responseType: 'arraybuffer', timeout: 5000 });
+        return await loadImage(Buffer.from(response.data));
+    } catch (err) {
+        console.error('Failed to load Fame icon:', err.message);
+        return null;
+    }
+}
+
+async function generateGuildSummaryImage(guildsData) {
+    if (!guildsData || !guildsData.length) return null;
+    
+    const topGuilds = [...guildsData];
+
+    const width = 760;
+    const rowHeight = 56;
+    const headerHeight = 64;
+    const padding = 20;
+    const height = padding * 2 + headerHeight + (topGuilds.length * rowHeight);
+
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext('2d');
+
+    ctx.fillStyle = '#18191c';
+    drawRoundRect(ctx, 0, 0, width, height, 16);
+    ctx.fill();
+
+    ctx.fillStyle = '#949ba4';
+    ctx.font = 'bold 16px sans-serif';
+    ctx.fillText('NAME', padding + 10, padding + 38);
+    ctx.fillText('PLAYERS', 340, padding + 38);
+    ctx.fillText('KILLS', 460, padding + 38);
+    ctx.fillText('DEATHS', 560, padding + 38);
+    ctx.fillText('FAME', 660, padding + 38);
+
+    ctx.strokeStyle = '#2b2d31';
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(padding, padding + headerHeight);
+    ctx.lineTo(width - padding, padding + headerHeight);
+    ctx.stroke();
+
+    topGuilds.forEach((g, i) => {
+        const y = padding + headerHeight + (i * rowHeight);
+
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 20px sans-serif';
+        const gName = g.name.length > 20 ? g.name.slice(0, 18) + '..' : g.name;
+        ctx.fillText(gName, padding + 10, y + 36);
+
+        ctx.fillStyle = '#3399ff';
+        ctx.fillText(String(g.playersCount || 0), 340, y + 36);
+
+        ctx.fillStyle = '#ff5555';
+        ctx.fillText(String(g.kills || 0), 460, y + 36);
+
+        ctx.fillStyle = '#ff66cc';
+        ctx.fillText(String(g.deaths || 0), 560, y + 36);
+
+        ctx.fillStyle = '#ffcc00';
+        ctx.fillText(formatFame(g.killFame || 0), 660, y + 36);
+    });
+
+    return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: 'guild-summary.png' });
+}
+
+async function generatePlayerWeaponReportImage(players, battleInfo = {}) {
+    if (!players || !players.length) return null;
+
+    const fameImg = await loadFameIcon();
+    const sortedPlayers = [...players].sort((a, b) =>
+        (Number(b.fame) || 0) - (Number(a.fame) || 0) ||
+        (Number(b.kills) || 0) - (Number(a.kills) || 0)
+    );
+
+    let totalKills = 0, totalDeaths = 0, totalFame = 0;
+    let topKiller = { name: 'N/A', kills: 0 };
+    let mvp = { name: 'N/A', fame: 0 };
+
+    sortedPlayers.forEach(p => {
+        const k = Number(p.kills) || 0;
+        const d = Number(p.deaths) || 0;
+        const f = Number(p.fame) || 0;
+        totalKills += k;
+        totalDeaths += d;
+        totalFame += f;
+        if (k > topKiller.kills) topKiller = { name: p.displayName || p.name, kills: k };
+        if (f > mvp.fame) mvp = { name: p.displayName || p.name, fame: f };
+    });
+
+    const playersPerRow = 7;
+    const cardWidth = 210;
+    const cardHeight = 214;
+    const gapX = 14, gapY = 14, padding = 30;
+    const headerHeight = 96, statsHeight = 92;
+    const gridOffsetY = padding + headerHeight + statsHeight + 20;
+    const columns = Math.min(playersPerRow, sortedPlayers.length);
+    const rows = Math.ceil(sortedPlayers.length / playersPerRow);
+    const width = Math.max(1600, padding * 2 + columns * cardWidth + (columns - 1) * gapX);
+    const footerHeight = 58;
+    const height = gridOffsetY + rows * cardHeight + (rows - 1) * gapY + footerHeight + padding;
+
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext('2d');
+    ctx.antialias = 'subpixel';
+
+    const qualityMeta = {
+        1: { label: 'NORMAL', color: '#94a3b8' },
+        2: { label: 'GOOD', color: '#60a5fa' },
+        3: { label: 'OUTSTANDING', color: '#a78bfa' },
+        4: { label: 'EXCELLENT', color: '#f59e0b' },
+        5: { label: 'MASTERPIECE', color: '#fbbf24' }
+    };
+
+    function rounded(x, y, w, h, r, fill, stroke = null, line = 1) {
+        drawRoundRect(ctx, x, y, w, h, r);
+        if (fill) { ctx.fillStyle = fill; ctx.fill(); }
+        if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = line; ctx.stroke(); }
+    }
+
+    function textFit(text, maxWidth, startSize, weight = 'bold') {
+        let size = startSize;
+        while (size > 8) {
+            ctx.font = `${weight} ${size}px Arial, sans-serif`;
+            if (ctx.measureText(text).width <= maxWidth) return size;
+            size -= 1;
+        }
+        return size;
+    }
+
+    function centerText(text, cx, y, size, color, weight = 'bold', maxWidth = Infinity) {
+        const fs = maxWidth < Infinity ? textFit(text, maxWidth, size, weight) : size;
+        ctx.save();
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'alphabetic';
+        ctx.font = `${weight} ${fs}px Arial, sans-serif`;
+        ctx.fillStyle = color;
+        ctx.fillText(text, cx, y);
+        ctx.restore();
+    }
+
+    function drawSwordIcon(cx, cy, scale, color) {
+        ctx.save();
+        ctx.translate(cx, cy);
+        ctx.rotate(-Math.PI / 4);
+        ctx.lineCap = 'round';
+        ctx.lineJoin = 'round';
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 8 * scale;
+        ctx.fillStyle = color;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2 * scale;
+
+        for (const off of [-5, 5]) {
+            ctx.save();
+            ctx.translate(off * scale, 0);
+            ctx.beginPath();
+            ctx.moveTo(0, -17 * scale);
+            ctx.lineTo(3 * scale, 10 * scale);
+            ctx.lineTo(-3 * scale, 10 * scale);
+            ctx.closePath();
+            ctx.fill();
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(-8 * scale, 8 * scale);
+            ctx.lineTo(8 * scale, 8 * scale);
+            ctx.stroke();
+            ctx.fillRect(-2 * scale, 9 * scale, 4 * scale, 8 * scale);
+            ctx.restore();
+        }
+        ctx.restore();
+    }
+
+    function drawSkullIcon(cx, cy, scale, color) {
+        ctx.save();
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 9 * scale;
+        ctx.strokeStyle = color;
+        ctx.fillStyle = color;
+        ctx.lineWidth = 2 * scale;
+        ctx.beginPath();
+        ctx.arc(cx, cy - 3 * scale, 11 * scale, Math.PI, 0);
+        ctx.lineTo(cx + 9 * scale, cy + 7 * scale);
+        ctx.lineTo(cx + 5 * scale, cy + 12 * scale);
+        ctx.lineTo(cx - 5 * scale, cy + 12 * scale);
+        ctx.lineTo(cx - 9 * scale, cy + 7 * scale);
+        ctx.closePath();
+        ctx.stroke();
+        ctx.fillRect(cx - 6 * scale, cy + 10 * scale, 12 * scale, 4 * scale);
+        ctx.fillStyle = '#070d17';
+        ctx.beginPath(); ctx.arc(cx - 4 * scale, cy - 3 * scale, 2.2 * scale, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(cx + 4 * scale, cy - 3 * scale, 2.2 * scale, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.moveTo(cx, cy + 1 * scale); ctx.lineTo(cx - 2 * scale, cy + 6 * scale); ctx.lineTo(cx + 2 * scale, cy + 6 * scale); ctx.closePath(); ctx.fill();
+        ctx.restore();
+    }
+
+    function drawGemIcon(cx, cy, scale, color) {
+        ctx.save();
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 12 * scale;
+        ctx.strokeStyle = color;
+        ctx.fillStyle = color;
+        ctx.lineWidth = 2 * scale;
+        ctx.beginPath();
+        ctx.moveTo(cx, cy - 15 * scale);
+        ctx.lineTo(cx + 12 * scale, cy - 6 * scale);
+        ctx.lineTo(cx + 8 * scale, cy + 11 * scale);
+        ctx.lineTo(cx, cy + 16 * scale);
+        ctx.lineTo(cx - 8 * scale, cy + 11 * scale);
+        ctx.lineTo(cx - 12 * scale, cy - 6 * scale);
+        ctx.closePath();
+        ctx.stroke();
+        ctx.globalAlpha = .18;
+        ctx.fill();
+        ctx.globalAlpha = 1;
+        ctx.beginPath(); ctx.moveTo(cx, cy - 14 * scale); ctx.lineTo(cx, cy + 14 * scale); ctx.moveTo(cx - 11 * scale, cy - 5 * scale); ctx.lineTo(cx + 11 * scale, cy - 5 * scale); ctx.stroke();
+        ctx.restore();
+    }
+
+    function drawCrownIcon(cx, cy, scale, color) {
+        ctx.save();
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 12 * scale;
+        ctx.strokeStyle = color;
+        ctx.fillStyle = color;
+        ctx.lineWidth = 2 * scale;
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        ctx.moveTo(cx - 15 * scale, cy - 8 * scale);
+        ctx.lineTo(cx - 7 * scale, cy - 1 * scale);
+        ctx.lineTo(cx, cy - 13 * scale);
+        ctx.lineTo(cx + 7 * scale, cy - 1 * scale);
+        ctx.lineTo(cx + 15 * scale, cy - 8 * scale);
+        ctx.lineTo(cx + 11 * scale, cy + 10 * scale);
+        ctx.lineTo(cx - 11 * scale, cy + 10 * scale);
+        ctx.closePath();
+        ctx.stroke();
+        ctx.globalAlpha = .20; ctx.fill(); ctx.globalAlpha = 1;
+        ctx.fillRect(cx - 12 * scale, cy + 10 * scale, 24 * scale, 4 * scale);
+        ctx.restore();
+    }
+
+    function drawMedalIcon(cx, cy, scale, color) {
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.fillStyle = color;
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 14 * scale;
+        ctx.lineWidth = 2 * scale;
+        ctx.beginPath();
+        ctx.moveTo(cx - 7 * scale, cy - 13 * scale); ctx.lineTo(cx - 3 * scale, cy - 2 * scale); ctx.lineTo(cx + 3 * scale, cy - 2 * scale); ctx.lineTo(cx + 7 * scale, cy - 13 * scale); ctx.stroke();
+        ctx.beginPath(); ctx.arc(cx, cy + 5 * scale, 11 * scale, 0, Math.PI * 2); ctx.stroke();
+        ctx.beginPath(); ctx.arc(cx, cy + 5 * scale, 5 * scale, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+    }
+
+    function drawCrosshair(cx, cy, r, color) {
+        ctx.save();
+        ctx.strokeStyle = color; ctx.lineWidth = 1; ctx.globalAlpha = .35;
+        ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+        for (const a of [0, Math.PI / 2, Math.PI, Math.PI * 1.5]) {
+            ctx.beginPath();
+            ctx.moveTo(cx + Math.cos(a) * (r + 4), cy + Math.sin(a) * (r + 4));
+            ctx.lineTo(cx + Math.cos(a) * (r + 13), cy + Math.sin(a) * (r + 13));
+            ctx.stroke();
+        }
+        ctx.restore();
+    }
+
+    function drawStatIcon(cx, cy, color, type) {
+        ctx.save();
+        ctx.fillStyle = '#0b1423';
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 1;
+        ctx.shadowColor = color;
+        ctx.shadowBlur = 12;
+        ctx.beginPath(); ctx.arc(cx, cy, 25, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+        ctx.shadowBlur = 0;
+        ctx.globalAlpha = .18;
+        ctx.beginPath(); ctx.arc(cx, cy, 21, 0, Math.PI * 2); ctx.fillStyle = color; ctx.fill();
+        ctx.globalAlpha = 1;
+        if (type === 'kills') drawSwordIcon(cx, cy, .82, color);
+        if (type === 'deaths') drawSkullIcon(cx, cy, .78, color);
+        if (type === 'fame') drawGemIcon(cx, cy, .75, color);
+        if (type === 'killer') drawCrownIcon(cx, cy, .78, color);
+        if (type === 'mvp') drawMedalIcon(cx, cy, .82, color);
+        ctx.restore();
+    }
+
+    ctx.fillStyle = '#02050a'; ctx.fillRect(0, 0, width, height);
+    const bg = ctx.createRadialGradient(width * .52, 90, 20, width * .52, height * .45, width * .82);
+    bg.addColorStop(0, '#17243b'); bg.addColorStop(.38, '#0a1322'); bg.addColorStop(1, '#010409');
+    ctx.fillStyle = bg; ctx.fillRect(0, 0, width, height);
+
+    ctx.save();
+    ctx.strokeStyle = 'rgba(148,163,184,.075)'; ctx.lineWidth = 1;
+    for (let x = 0; x <= width; x += 32) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, height); ctx.stroke(); }
+    for (let y = 0; y <= height; y += 32) { ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(width, y); ctx.stroke(); }
+    ctx.strokeStyle = 'rgba(220,38,38,.045)';
+    for (let x = -height; x < width; x += 210) { ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x + height, height); ctx.stroke(); }
+    ctx.restore();
+
+    const edge = ctx.createLinearGradient(0, 0, width, 0);
+    edge.addColorStop(0, '#dc2626'); edge.addColorStop(.5, '#f59e0b'); edge.addColorStop(1, '#dc2626');
+    ctx.fillStyle = edge; ctx.fillRect(0, 0, width, 4);
+
+    drawCrosshair(width - 92, 55, 25, '#ef4444');
+    ctx.save();
+    ctx.shadowColor = 'rgba(255,255,255,.16)'; ctx.shadowBlur = 12;
+    ctx.fillStyle = '#f8fafc'; ctx.font = '900 38px Arial, sans-serif';
+    ctx.fillText('BATTLE REPORT', padding, padding + 37);
+    ctx.restore();
+    ctx.fillStyle = '#94a3b8'; ctx.font = 'bold 12px Arial, sans-serif';
+    ctx.fillText(`EAST SERVER   |   ${formatUTCTime(battleInfo.battleTime || Date.now())}   |   MATCH ID: ${battleInfo.matchId || 'N/A'}`, padding + 1, padding + 60);
+    ctx.fillStyle = '#ef4444'; ctx.font = '900 10px Arial, sans-serif';
+    ctx.fillText('COMBAT ANALYTICS  /  LIVE BATTLE DATA', padding + 1, padding + 79);
+
+    const badgeW = 184, badgeH = 62, badgeX = width - padding - badgeW, badgeY = 23;
+    rounded(badgeX, badgeY, badgeW, badgeH, 14, '#08111f', '#334b70', 1.2);
+    ctx.fillStyle = '#101c2f'; drawRoundRect(ctx, badgeX + 6, badgeY + 6, 54, badgeH - 12, 10); ctx.fill();
+    centerText(String(sortedPlayers.length), badgeX + 33, badgeY + 39, 25, '#f8fafc', '900');
+    ctx.fillStyle = '#64748b'; ctx.font = '900 10px Arial, sans-serif'; ctx.fillText('PLAYERS', badgeX + 73, badgeY + 27);
+    ctx.fillStyle = '#cbd5e1'; ctx.font = 'bold 11px Arial, sans-serif'; ctx.fillText('IN BATTLE', badgeX + 73, badgeY + 45);
+
+    const statY = padding + headerHeight;
+    const statGap = 12;
+    const statW = (width - padding * 2 - statGap * 4) / 5;
+    const statH = 82;
+    const stats = [
+        { label: 'TOTAL KILLS', value: totalKills.toLocaleString(), sub: 'ELIMINATIONS', color: '#ef4444', icon: 'kills' },
+        { label: 'TOTAL DEATHS', value: totalDeaths.toLocaleString(), sub: 'CASUALTIES', color: '#f87171', icon: 'deaths' },
+        { label: 'TOTAL FAME', value: formatFame(totalFame), sub: 'KILL FAME', color: '#fbbf24', icon: 'fame' },
+        { label: 'TOP KILLER', value: String(topKiller.name), sub: `${topKiller.kills} KILLS`, color: '#d946ef', icon: 'killer' },
+        { label: 'MVP  /  TOP FAME', value: String(mvp.name), sub: `${formatFame(mvp.fame)} FAME`, color: '#f59e0b', icon: 'mvp' }
+    ];
+
+    stats.forEach((st, i) => {
+        const x = padding + i * (statW + statGap);
+        rounded(x, statY, statW, statH, 13, '#08111f', '#1e3049', 1.2);
+        ctx.fillStyle = st.color; drawRoundRect(ctx, x, statY, 4, statH, 3); ctx.fill();
+        drawStatIcon(x + 32, statY + 41, st.color, st.icon);
+        ctx.fillStyle = '#64748b'; ctx.font = '900 9px Arial, sans-serif'; ctx.fillText(st.label, x + 66, statY + 23);
+        const val = String(st.value);
+        const fs = textFit(val, statW - 78, i >= 3 ? 18 : 22, '900');
+        ctx.font = `900 ${fs}px Arial, sans-serif`;
+        ctx.fillStyle = '#f8fafc';
+        ctx.fillText(val, x + 66, statY + 49);
+        ctx.fillStyle = st.color; ctx.font = '900 8px Arial, sans-serif'; ctx.fillText(st.sub, x + 66, statY + 67);
+    });
+
+    const iconImages = await Promise.all(sortedPlayers.map(p => loadAlbionWeaponIcon(p.weapon, p.weaponQuality || 1)));
+
+    sortedPlayers.forEach((p, i) => {
+        const col = i % playersPerRow;
+        const row = Math.floor(i / playersPerRow);
+        const x = padding + col * (cardWidth + gapX);
+        const y = gridOffsetY + row * (cardHeight + gapY);
+        const isMVP = i === 0;
+        const k = Number(p.kills) || 0;
+        const d = Number(p.deaths) || 0;
+        const q = Math.max(1, Math.min(5, Number(p.weaponQuality) || 1));
+        const qm = qualityMeta[q];
+        const cx = x + cardWidth / 2;
+
+        rounded(x, y, cardWidth, cardHeight, 15, isMVP ? '#111a2b' : '#07101c', isMVP ? '#f59e0b' : '#22344d', isMVP ? 2 : 1.2);
+        if (isMVP) {
+            ctx.save();
+            ctx.shadowColor = 'rgba(245,158,11,.35)'; ctx.shadowBlur = 20;
+            ctx.strokeStyle = '#f59e0b'; ctx.lineWidth = 1.5;
+            drawRoundRect(ctx, x, y, cardWidth, cardHeight, 15); ctx.stroke();
+            ctx.restore();
+        }
+
+        rounded(x + 10, y + 10, 38, 23, 7, isMVP ? '#f59e0b' : '#142238', isMVP ? '#fcd34d' : '#2a405e', 1);
+        centerText(String(i + 1).padStart(2, '0'), x + 29, y + 26, 11, isMVP ? '#111827' : '#cbd5e1', '900');
+
+        if (isMVP) {
+            ctx.fillStyle = '#fbbf24'; ctx.font = '900 9px Arial, sans-serif'; ctx.fillText('MVP', x + cardWidth - 40, y + 26);
+        }
+
+        const wy = y + 63;
+        ctx.save();
+        ctx.shadowColor = qm.color; ctx.shadowBlur = isMVP ? 18 : 10;
+        ctx.fillStyle = '#030811';
+        ctx.beginPath(); ctx.arc(cx, wy, 45, 0, Math.PI * 2); ctx.fill();
+        ctx.shadowBlur = 0;
+        ctx.strokeStyle = qm.color; ctx.lineWidth = isMVP ? 2.4 : 1.8;
+        ctx.beginPath(); ctx.arc(cx, wy, 45, 0, Math.PI * 2); ctx.stroke();
+        ctx.strokeStyle = 'rgba(255,255,255,.13)'; ctx.lineWidth = 1;
+        ctx.beginPath(); ctx.arc(cx, wy, 37, 0, Math.PI * 2); ctx.stroke();
+        ctx.restore();
+
+        ctx.save();
+        ctx.strokeStyle = qm.color; ctx.lineWidth = 2; ctx.globalAlpha = .65;
+        [[0,-49,0,-56],[0,49,0,56],[-49,0,-56,0],[49,0,56,0]].forEach(a => {
+            ctx.beginPath(); ctx.moveTo(cx + a[0], wy + a[1]); ctx.lineTo(cx + a[2], wy + a[3]); ctx.stroke();
+        });
+        ctx.restore();
+
+        if (iconImages[i]) {
+            try { ctx.drawImage(iconImages[i], cx - 36, wy - 36, 72, 72); } catch (_) {}
+        } else {
+            drawSwordIcon(cx, wy, 1.7, qm.color);
+        }
+
+        const qText = `Q${q}  ${qm.label}`;
+        ctx.font = '900 8px Arial, sans-serif';
+        const qw = ctx.measureText(qText).width + 18;
+        rounded(cx - qw / 2, y + 108, qw, 17, 8, '#050b14', qm.color, 1);
+        centerText(qText, cx, y + 120, 8, qm.color, '900');
+
+        let name = String(p.displayName || p.name || 'Unknown').trim();
+        if (name.length > 22) name = `${name.slice(0, 20)}..`;
+        const nameSize = textFit(name, cardWidth - 20, 15, '900');
+        ctx.save();
+        ctx.textAlign = 'center';
+        ctx.font = `900 ${nameSize}px Arial, sans-serif`;
+        ctx.lineWidth = 3;
+        ctx.strokeStyle = '#02060c';
+        ctx.strokeText(name, cx, y + 145);
+        ctx.fillStyle = isMVP ? '#fef3c7' : '#f8fafc';
+        ctx.shadowColor = isMVP ? 'rgba(245,158,11,.25)' : 'rgba(255,255,255,.10)';
+        ctx.shadowBlur = 5;
+        ctx.fillText(name, cx, y + 145);
+        ctx.restore();
+
+        const guild = String(p.guild || '').trim();
+        if (guild) {
+            let g = guild.length > 21 ? `${guild.slice(0, 19)}..` : guild;
+            centerText(g, cx, y + 158, 8, '#64748b', 'bold', cardWidth - 20);
+        }
+
+        const metricY = y + 180;
+        centerText(String(k), cx - 18, metricY, 12, k > 0 ? '#ef4444' : '#64748b', '900');
+        centerText('/', cx, metricY, 11, '#475569', '900');
+        centerText(String(d), cx + 18, metricY, 12, d > 0 ? '#f87171' : '#64748b', '900');
+
+        const fameText = formatFame(p.fame || 0);
+        const famePillW = 112;
+        const famePillH = 23;
+        const fameX = cx - famePillW / 2;
+        const fameY = y + cardHeight - 31;
+        rounded(fameX, fameY, famePillW, famePillH, 10, '#0b1422', isMVP ? '#8b6518' : '#263a55', 1);
+        if (fameImg) {
+            try { ctx.drawImage(fameImg, fameX + 10, fameY + 5, 13, 13); } catch (_) {}
+        } else {
+            drawGemIcon(fameX + 17, fameY + 11, .35, '#fbbf24');
+        }
+        centerText(fameText, fameX + 72, fameY + 16, 11, '#fbbf24', '900');
+    });
+
+    const footerY = height - padding - 13;
+    ctx.strokeStyle = '#1b2b42'; ctx.lineWidth = 1;
+    ctx.beginPath(); ctx.moveTo(padding, footerY - 25); ctx.lineTo(width - padding, footerY - 25); ctx.stroke();
+    ctx.fillStyle = '#64748b'; ctx.font = '900 9px Arial, sans-serif';
+    ctx.fillText('VICTORY BELONGS TO THOSE WHO FIGHT TOGETHER', padding, footerY);
+    ctx.fillStyle = '#ef4444'; ctx.font = '900 9px Arial, sans-serif';
+    const powered = 'POWERED BY  •  BOTBOSS';
+    ctx.fillText(powered, width - padding - ctx.measureText(powered).width, footerY);
+
+    return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: 'battle-report.png' });
+}
+
+async function generateTopPerformanceImage(players) {
+    if (!players || !players.length) return null;
+    const width = 760, cardHeight = 84, gap = 12, padding = 18;
+    const height = padding * 2 + players.length * cardHeight + Math.max(0, players.length - 1) * gap;
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#1a1a1a';
+    ctx.fillRect(0, 0, width, height);
+
+    const imagePromises = players.map(async (p) => {
+        const weaponId = normalizeAlbionItemId(p.weapon);
+        if (!weaponId || !isWeaponItemId(weaponId)) return null;
+        const urls = [`https://render.albiononline.com/v1/item/${encodeURIComponent(weaponId)}.png`, `https://render.albiononline.com/v1/item/${encodeURIComponent(weaponId.split('@')[0])}.png` ];
+        for (const url of urls) {
+            try {
+                const img = await Promise.race([loadImage(url), new Promise((_, reject) => setTimeout(() => reject(new Error('Timeout')), 4000))]);
+                if (img) return img;
+            } catch (_) {}
+        }
+        return null;
+    });
+
+    const weaponImages = await Promise.all(imagePromises);
+
+    for (let i = 0; i < players.length; i++) {
+        const p = players[i], y = padding + i * (cardHeight + gap), cardX = padding, cardWidth = width - padding * 2;
+        ctx.fillStyle = '#2a2a2a';
+        drawRoundRect(ctx, cardX, y, cardWidth, cardHeight, 12); ctx.fill();
+        const percent = Math.max(0, Math.min(100, Number(p.percent) || 0));
+        const barWidth = Math.min(cardWidth, cardWidth * percent / 100);
+        if (barWidth > 0) {
+            ctx.fillStyle = p.type === 'heal' ? '#21b293' : '#ff4d6d';
+            drawRoundRect(ctx, cardX, y, barWidth, cardHeight, 12); ctx.fill();
+        }
+        if (weaponImages[i]) {
+            const size = 60;
+            ctx.drawImage(weaponImages[i], cardX + 12, y + (cardHeight - size) / 2, size, size);
+        }
+        let name = p.name;
+        if (name.length > 25) name = `${name.slice(0, 22)}...`;
+        ctx.fillStyle = '#ffffff';
+        ctx.font = 'bold 22px sans-serif';
+        ctx.fillText(name, cardX + 88, y + 36);
+        ctx.fillStyle = '#cccccc';
+        ctx.font = 'bold 16px sans-serif';
+        const typeLabel = p.type === 'heal' ? 'HEAL' : 'DMG';
+        ctx.fillText(`${typeLabel}  ${Number(p.value || 0).toLocaleString()}  (${percent}%)`, cardX + 88, y + 62);
+    }
+    return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: 'top-performance.png' });
+}
+
+function extractMatchId(input) {
+    const value = String(input || '').trim();
+    if (!value) throw new Error('Match ID ว่าง');
+    if (/^https?:\/\//i.test(value)) {
+        const match = value.match(/\/battles\/([^/?#]+)/i);
+        if (!match) throw new Error('ไม่สามารถอ่าน Match ID จากลิงก์ได้');
+        return match[1];
+    }
+    return value;
+}
+
+function isExactGuildMatch(playerGuild, targetGuilds) {
+    const playerName = String(playerGuild || '').trim().toLowerCase();
+    if (!playerName) return false;
+
+    return targetGuilds.some(g => {
+        const targetName = String(typeof g === 'string' ? g : (g?.name || '')).trim().toLowerCase();
+        return targetName && playerName === targetName;
+    });
+}
+
+async function buildBattleReportPayload(matchId, customTargetGuilds = [], options = {}) {
+    const apiData = /^\d+$/.test(matchId) ? await fetchOfficialBattle(matchId) : null;
+    if (!apiData) throw new Error('ไม่พบข้อมูลไฟต์จาก Official Albion API');
+
+    const battleTime = apiData.startTime || apiData.timestamp || null;
+
+    const knownGuildNames = new Set([
+        ...(apiData?.guilds ? Object.values(apiData.guilds).map(g => g.name?.trim().toLowerCase()).filter(Boolean) : []),
+        ...(apiData?.alliances ? Object.values(apiData.alliances).map(a => a.name?.trim().toLowerCase()).filter(Boolean) : [])
+    ]);
+
+    let rawPlayers = getApiPlayers(apiData);
+
+    try {
+        const officialWeaponMap = await fetchOfficialBattleWeaponMap(matchId);
+        const albionBBWeaponMap = await fetchAlbionBBWeaponMap(matchId);
+
+        rawPlayers = rawPlayers.map(p => {
+            const key = p.name.trim().toLowerCase();
+            if (p.weapon) return p;
+
+            const info = officialWeaponMap.get(key) || albionBBWeaponMap.get(key);
+            return info ? { ...p, weapon: info.id, weaponQuality: info.quality } : p;
+        });
+    } catch (err) {
+        console.error('⚠️ Weapon enrichment error:', err.message);
+    }
+    let allPlayers = rawPlayers.filter(p => !knownGuildNames.has(p.name.trim().toLowerCase()));
+
+    if (!allPlayers.length && rawPlayers.length > 0) {
+        allPlayers = rawPlayers;
+    }
+
+    if (!allPlayers.length) throw new Error('ไม่พบข้อมูลผู้เล่นในไฟต์นี้');
+
+    const reportStats = new Map();
+    for (const p of allPlayers) {
+        const key = p.name.toLowerCase();
+        const old = reportStats.get(key);
+        if (!old) {
+            reportStats.set(key, {
+                displayName: p.name,
+                guild: p.guild || '',
+                kills: Number(p.kills) || 0,
+                deaths: Number(p.deaths) || 0,
+                fame: Number(p.fame) || 0,
+                damage: Number(p.damage) || 0,
+                healing: Number(p.healing) || 0,
+                weapon: p.weapon || '',
+                weaponQuality: Number(p.weaponQuality) || 1
+            });
+        } else {
+            old.kills = Math.max(old.kills, Number(p.kills) || 0);
+            old.deaths = Math.max(old.deaths, Number(p.deaths) || 0);
+            old.fame = Math.max(old.fame, Number(p.fame) || 0);
+            old.damage = Math.max(old.damage, Number(p.damage) || 0);
+            old.healing = Math.max(old.healing, Number(p.healing) || 0);
+            if (!old.weapon && p.weapon) old.weapon = p.weapon;
+            if ((!old.weaponQuality || old.weaponQuality === 1) && p.weaponQuality) old.weaponQuality = p.weaponQuality;
+            if (!old.guild && p.guild) old.guild = p.guild;
+        }
+    }
+
+    const widths = { name: 20, kills: 8, deaths: 8, fame: 10 };
+    const totalWidth = widths.name + widths.kills + widths.deaths + widths.fame;
+    const divider = '='.repeat(totalWidth);
+    const subDivider = '-'.repeat(totalWidth);
+
+    const allSortedRows = [...reportStats.values()].sort((a, b) => b.fame - a.fame || b.kills - a.kills || b.damage - a.damage);
+
+    const guildNamesList = customTargetGuilds.map(g => typeof g === 'string' ? g : g.name);
+
+    const rows = allSortedRows.filter(p => {
+        if (guildNamesList.length === 0 && targetPlayers.length === 0) return true;
+
+        const isExplicitPlayer = targetPlayers.some(
+            pl => pl.trim().toLowerCase() === p.displayName.trim().toLowerCase()
+        );
+
+        const isGuildMatch = isExactGuildMatch(p.guild, guildNamesList);
+
+        return isGuildMatch || isExplicitPlayer;
+    });
+
+    let totalKills = 0, totalDeaths = 0, totalFame = 0;
+    let guildTotalFrames = 0;
+    const targetRowsToCalc = rows;
+    
+    for (const p of targetRowsToCalc) {
+        totalKills += p.kills;
+        totalDeaths += p.deaths;
+        totalFame += p.fame;
+
+        if (guildNamesList.length > 0) {
+            if (isExactGuildMatch(p.guild, guildNamesList)) {
+                guildTotalFrames += (p.kills + p.deaths);
+            }
+        } else {
+            guildTotalFrames += (p.kills + p.deaths);
+        }
+    }
+
+    let header = `\x1b[1;36m⚔️ ALBIONBB BATTLE REPORT\x1b[0m | \x1b[1;33m🆔 ${matchId}\x1b[0m\n`;
+    header += `\x1b[1;33m🕒 Time:\x1b[0m \x1b[1;37m${formatUTCTime(battleTime)}\x1b[0m\n`;
+    header += `\x1b[30m${divider}\x1b[0m\n`;
+    header += `\x1b[1;37m${'Name'.padEnd(widths.name)}${centerString('Kills', widths.kills)}${centerString('Deaths', widths.deaths)}${centerString('Fame', widths.fame)}\x1b[0m\n`;
+    header += `\x1b[30m${subDivider}\x1b[0m\n`;
+
+    let footer = `\x1b[30m${subDivider}\x1b[0m\n`;
+    footer += `\x1b[1;37m${'TOTAL'.padEnd(widths.name)}\x1b[32m${centerString(totalKills, widths.kills)}\x1b[31m${centerString(totalDeaths, widths.deaths)}\x1b[33m${centerString(formatFame(totalFame), widths.fame)}\x1b[0m\n`;
+
+    const awardCandidates = rows;
+    const executioner = [...awardCandidates].sort((a, b) => b.kills - a.kills)[0];
+    const feeder = [...awardCandidates].sort((a, b) => b.deaths - a.deaths)[0];
+
+    let awardsText = `\x1b[30m${subDivider}\x1b[0m\n`;
+    awardsText += `\x1b[1;35m🏆 BATTLE AWARDS\x1b[0m\n`;
+    if (executioner && executioner.kills > 0) {
+        awardsText += `\x1b[1;32m🎯 Executioner :\x1b[0m \x1b[1;37m${executioner.displayName.padEnd(14)}\x1b[0m \x1b[32m(${executioner.kills} Kills)\x1b[0m\n`;
+    }
+    if (feeder && feeder.deaths > 0) {
+        awardsText += `\x1b[1;31m💀 Feeder      :\x1b[0m \x1b[1;37m${feeder.displayName.padEnd(14)}\x1b[0m \x1b[31m(${feeder.deaths} Deaths)\x1b[0m\n`;
+    }
+
+    let body = '';
+    const displayRows = rows;
+    if (displayRows.length === 0) {
+        body = `\x1b[30m(ไม่พบข้อมูลผู้เล่นในไฟต์นี้)\x1b[0m\n`;
+    } else {
+        for (let i = 0; i < displayRows.length; i++) {
+            const p = displayRows[i];
+            const name = p.displayName.slice(0, widths.name - 1).padEnd(widths.name);
+            const kills = centerString(p.kills, widths.kills);
+            const deaths = centerString(p.deaths, widths.deaths);
+            const fame = centerString(formatFame(p.fame), widths.fame);
+
+            const line = `\x1b[1;37m${name}\x1b[0m${p.kills > 0 ? `\x1b[32m${kills}\x1b[0m` : `\x1b[30m${kills}\x1b[0m`}${p.deaths > 0 ? `\x1b[31m${deaths}\x1b[0m` : `\x1b[30m${deaths}\x1b[0m`}${p.fame > 0 ? `\x1b[33m${fame}\x1b[0m` : `\x1b[30m${fame}\x1b[0m`}\n`;
+
+            const remainingCount = displayRows.length - i;
+            const testReportLength = ('```ansi\n' + header + body + line + `\x1b[30m... +${remainingCount} more players\x1b[0m\n` + footer + awardsText + '```').length;
+
+            if (testReportLength > 1950) {
+                body += `\x1b[30m... +${remainingCount} more players\x1b[0m\n`;
+                break;
+            }
+            body += line;
+        }
+    }
+
+    const battleUrl = `https://east.albionbb.com/battles/${matchId}`;
+    const report = `🔗 **Battle Link:** <${battleUrl}>\n` + '```ansi\n' + header + body + footer + awardsText + '```';
+
+    const trackedPlayerNames = new Set(
+        targetPlayers.map(name => String(name || '').trim().toLowerCase()).filter(Boolean)
+    );
+    const explicitlyTrackedRows = displayRows.filter(p =>
+        trackedPlayerNames.has(String(p.displayName || p.name || '').trim().toLowerCase())
+    );
+
+    const performancePlayers = explicitlyTrackedRows
+        .filter(p => p.damage > 0 || p.healing > 0)
+        .sort((a, b) => (b.damage + b.healing) - (a.damage + a.healing))
+        .slice(0, 5);
+
+    const attachments = [];
+
+    try {
+        // IMPORTANT: /add guild does not implicitly add every guild member's
+        // weapon to this image. Only /add player entries are rendered here.
+        const playerReport = await generatePlayerWeaponReportImage(explicitlyTrackedRows, {
+            matchId: matchId,
+            battleTime: battleTime
+        });
+        if (playerReport) attachments.push(playerReport);
+    } catch (err) {
+        console.error('❌ Weapon report image error:', err.message);
+    }
+
+    if (performancePlayers.length) {
+        try {
+            const maxDamage = Math.max(1, ...performancePlayers.map(p => p.damage));
+            const maxHealing = Math.max(1, ...performancePlayers.map(p => p.healing));
+            const top = performancePlayers.map(p => {
+                const heal = p.healing > p.damage, value = heal ? p.healing : p.damage, max = heal ? maxHealing : maxDamage;
+                return { name: p.displayName, guild: p.guild, weapon: p.weapon, value, percent: Math.round((value / max) * 100), type: heal ? 'heal' : 'damage' };
+            });
+            const topImage = await generateTopPerformanceImage(top);
+            if (topImage) attachments.push(topImage);
+        } catch (err) { console.error('❌ Top performance image error:', err.message); }
+    }
+
+    let guildSummaryAttachment = null;
+    try {
+        if (apiData.guilds) {
+            const playerCountByGuild = new Map();
+
+            for (const p of rawPlayers) {
+                const guildName = String(p.guild || '').trim();
+                const playerName = String(p.name || '').trim();
+                if (!guildName || !playerName) continue;
+
+                const guildKey = guildName.toLowerCase();
+                if (!playerCountByGuild.has(guildKey)) {
+                    playerCountByGuild.set(guildKey, new Set());
+                }
+
+                playerCountByGuild.get(guildKey).add(playerName.toLowerCase());
+            }
+
+            let guildsData = Object.values(apiData.guilds).map(g => {
+                const guildName = String(g.name || 'Unknown').trim();
+                const guildKey = guildName.toLowerCase();
+
+                return {
+                    name: guildName,
+                    playersCount: playerCountByGuild.get(guildKey)?.size || 0,
+                    kills: g.kills || 0,
+                    deaths: g.deaths || 0,
+                    killFame: g.killFame || 0
+                };
+            });
+
+            if (options.autoBattle && guildNamesList.length > 0) {
+                const tracked = guildsData.filter(g => isExactGuildMatch(g.name, guildNamesList));
+                const trackedNames = new Set(tracked.map(g => g.name.trim().toLowerCase()));
+
+                const topOthers = guildsData
+                    .filter(g => !trackedNames.has(g.name.trim().toLowerCase()))
+                    .sort((a, b) =>
+                        (b.killFame || 0) - (a.killFame || 0) ||
+                        (b.kills || 0) - (a.kills || 0)
+                    )
+                    .slice(0, 3);
+
+                guildsData = [...tracked, ...topOthers];
+            } else if (guildNamesList.length > 0) {
+                guildsData = guildsData.filter(g => isExactGuildMatch(g.name, guildNamesList));
+            } else {
+                guildsData.sort((a, b) => b.killFame - a.killFame);
+            }
+
+            guildSummaryAttachment = await generateGuildSummaryImage(guildsData);
+        }
+    } catch (err) {
+        console.error('❌ Guild summary image error:', err.message);
+    }
+
+    if (guildSummaryAttachment) {
+        attachments.push(guildSummaryAttachment);
+    }
+
+    return {
+        matchId,
+        totalFame,
+        guildTotalFrames,
+        battleUrl,
+        payload: { content: report, files: attachments }
+    };
+}
+
+async function processBattleReport(input, targetContext, isMessage = false) {
+    try {
+        const matchId = extractMatchId(input);
+        const { payload } = await buildBattleReportPayload(matchId, targetGuilds, { guildId: currentGuildId() });
+        const files = Array.isArray(payload.files) ? payload.files : [];
+
+        if (files.length > 1) {
+            const firstPayload = {
+                content: payload.content,
+                files: [files[0]]
+            };
+            if (isMessage) {
+                await targetContext.edit(firstPayload);
+                for (const file of files.slice(1)) {
+                    await targetContext.channel.send({ files: [file] });
+                }
+            } else {
+                await targetContext.editReply(firstPayload);
+                for (const file of files.slice(1)) {
+                    await targetContext.followUp({ files: [file] });
+                }
+            }
+            return;
+        }
+
+        if (isMessage) await targetContext.edit(payload); else await targetContext.editReply(payload);
+    } catch (err) {
+        console.error('❌ Process battle report error:', err);
+        const message = `❌ เกิดข้อผิดพลาดในการประมวลผลไฟต์: \`${err.message}\``;
+        if (isMessage) await targetContext.edit(message); else await targetContext.editReply(message);
+    }
+}
+
+async function fetchGuildRecentBattles(guildName) {
+    try {
+        const searchUrl = `https://east.albionbb.com/?search=${encodeURIComponent(guildName)}&minPlayers=1&_=${Date.now()}`;
+        const searchRes = await cloudscraper.get(searchUrl).catch(() => null);
+        if (!searchRes) return [];
+
+        const $ = cheerio.load(searchRes);
+        const matchIds = [];
+        $('a[href*="/battles/"]').each((_, el) => {
+            const href = $(el).attr('href');
+            const match = href ? href.match(/\/battles\/(\d+)/) : null;
+            if (match && match[1]) {
+                matchIds.push(match[1]);
+            }
+        });
+
+        return [...new Set(matchIds)];
+    } catch (err) {
+        console.warn(`⚠️ Fetch guild battles error for ${guildName}:`, err.message);
+        return [];
+    }
+}
+
+async function primeAutoBattleHistory() {
+    const guilds = getAllGuildConfigs();
+    for (const { guildId } of guilds) {
+        await guildContext.run({ guildId }, async () => {
+            await primeAutoBattleHistoryForGuild();
+        });
+    }
+}
+
+async function primeAutoBattleHistoryForGuild(configs = autoBattleConfigs) {
+    // IMPORTANT: the recent-battles page contains historical fights. When a
+    // tracker is created for the first time (or after an upgrade with no saved
+    // history), mark everything currently visible as already seen. Only fights
+    // that appear after this baseline are eligible for an alert.
+    let added = 0;
+    for (const config of configs) {
+        try {
+            const recentMatches = await fetchGuildRecentBattles(config.targetGuild);
+            for (const id of recentMatches) {
+                const key = String(id);
+                if (!processedBattles.has(key)) {
+                    processedBattles.add(key);
+                    added++;
+                }
+            }
+        } catch (err) {
+            console.warn(`⚠️ Auto-Battle baseline failed for ${config.targetGuild}: ${err.message}`);
+        }
+    }
+
+    if (processedBattles.size > 1000) {
+        processedBattles = new Set([...processedBattles].slice(-1000));
+    }
+    if (added > 0) saveData();
+    return added;
+}
+
+async function checkAutoBattles() {
+    const guilds = getAllGuildConfigs();
+    for (const { guildId } of guilds) {
+        await guildContext.run({ guildId }, async () => {
+            await checkAutoBattlesForGuild();
+        });
+    }
+}
+
+async function checkAutoBattlesForGuild() {
+    if (!autoBattleConfigs.length) return;
+    if (autoBattleCheckRunning) return;
+
+    autoBattleCheckRunning = true;
+    try {
+        for (const config of autoBattleConfigs) {
+            const recentMatches = await fetchGuildRecentBattles(config.targetGuild);
+            if (!recentMatches.length) continue;
+
+            const newMatchIds = recentMatches.filter(id => !processedBattles.has(id));
+            if (!newMatchIds.length) continue;
+
+            // Process every unseen battle returned by the search page so a burst
+            // of fights between 5-minute polls is not silently skipped.
+            for (const latestMatchId of newMatchIds.slice(0, 10)) {
+                try {
+                    const officialBattle = await fetchOfficialBattle(latestMatchId);
+                if (!officialBattle) {
+                    console.warn(`⚠️ Official Albion API ไม่พบ Match ID ${latestMatchId}`);
+                    continue;
+                }
+
+                const officialGuildNames = officialBattle.guilds
+                    ? Object.values(officialBattle.guilds).map(g => g?.name).filter(Boolean)
+                    : [];
+
+                if (!isExactGuildMatch(config.targetGuild, officialGuildNames)) {
+                    console.log(
+                        `⏭️ Skip Match ${latestMatchId}: tracked Guild "${config.targetGuild}" ` +
+                        `ไม่ตรงกับ Official Guilds: ${officialGuildNames.join(', ') || 'N/A'}`
+                    );
+                    processedBattles.add(latestMatchId);
+                    continue;
+                }
+
+                const result = await buildBattleReportPayload(
+                    latestMatchId,
+                    [config.targetGuild],
+                    { autoBattle: true }
+                );
+
+                const checkValue = config.minFrames;
+                if (result.guildTotalFrames >= checkValue || result.totalFame >= checkValue) {
+                    const channel = await client.channels.fetch(config.channelId).catch(() => null);
+                    if (channel) {
+                        await channel.send({
+                            content: 
+                                `🚨 **Auto-Battle Alert!** ตรวจพบไฟต์ใหม่ของกิลด์ **${config.targetGuild}**\n` +
+                                `⚔️ รวม Kills + Deaths: \`${result.guildTotalFrames.toLocaleString()}\`\n` +
+                                `💰 Total Fame: \`${formatFame(result.totalFame)}\`\n` +
+                                `🔗 **Battle Link:** <${result.battleUrl}>`
+                        });
+
+                        const reportFiles = Array.isArray(result.payload.files) ? result.payload.files : [];
+                        if (reportFiles.length > 0) {
+                            for (const file of reportFiles) {
+                                await channel.send({ files: [file] });
+                            }
+                        } else {
+                            await channel.send({ content: result.payload.content });
+                        }
+                    }
+                }
+                
+                processedBattles.add(String(latestMatchId));
+                saveData();
+                } catch (e) {
+                    console.error(`❌ Auto-Battle Error on Match ID ${latestMatchId} for guild ${config.targetGuild}:`, e.message);
+                }
+            }
+
+            if (processedBattles.size > 300) {
+                const arr = [...processedBattles];
+                processedBattles = new Set(arr.slice(150));
+            }
+        }
+    } catch (err) {
+        console.error('❌ Auto-Battle background polling error:', err.message);
+    } finally {
+        autoBattleCheckRunning = false;
+    }
+}
+
+// ---------------------------
+// HELPER FOR DAILY BONUS
+// ---------------------------
+// Albion's public GameInfo API does NOT expose a /dailyactivity endpoint.
+// Daily production bonuses are published/recorded by third-party trackers.
+// AO-SAGE publicly shows the current bonus for all three live servers.
+const DAILY_BONUS_SOURCE = 'https://ao-sage.com/';
+const DAILY_CACHE_FILE = path.join(__dirname, 'daily-bonus-cache.json');
+
+// Albion Data Project confirms live festivities from multiple game clients.
+// It may return 404 when a server has no confirmed snapshot yet, so it is a
+// fallback only and must never replace one server's data with another server's.
+const AODP_FESTIVITIES_URLS = {
+    west: 'https://west.albion-online-data.com/api/v2/stats/festivities',
+    asia: 'https://east.albion-online-data.com/api/v2/stats/festivities',
+    europe: 'https://europe.albion-online-data.com/api/v2/stats/festivities'
+};
+
+const SERVER_NAMES = {
+    west: 'Americas (West)',
+    asia: 'Asia (East)',
+    europe: 'Europe (EU)'
+};
+
+// Daily production bonus reset times. Asia resets at 00:00 UTC (07:00 Thai),
+// while Americas and Europe reset at 10:00 UTC (17:00 Thai).
+const DAILY_RESET_UTC_HOURS = {
+    asia: 0,
+    west: 10,
+    europe: 10
+};
+
+function getDailyResetText(serverKey) {
+    const utcHour = DAILY_RESET_UTC_HOURS[serverKey] ?? 10;
+    const thaiHour = (utcHour + 7) % 24;
+    return `⏳ ${String(thaiHour).padStart(2, '0')}:00 น. ไทย (${String(utcHour).padStart(2, '0')}:00 UTC)`;
+}
+
+const DAILY_SERVER_LABELS = {
+    west: 'Americas',
+    asia: 'Asia',
+    europe: 'Europe'
+};
+
+const DAILY_CATEGORY_META = {
+    cloth_helmet: { label: 'Cloth Cowl', city: 'Thetford', baseBonus: 15 },
+    cloth_robe: { label: 'Cloth Robes', city: 'Fort Sterling', baseBonus: 15 },
+    cloth_boots: { label: 'Cloth Sandals', city: 'Bridgewatch', baseBonus: 15 },
+    crossbow: { label: 'Crossbow', city: 'Bridgewatch', baseBonus: 15 },
+    cursestaff: { label: 'Cursed Staff', city: 'Bridgewatch', baseBonus: 15 },
+    dagger: { label: 'Dagger', city: 'Bridgewatch', baseBonus: 15 },
+    plate_armor: { label: 'Plate Armor', city: 'Bridgewatch', baseBonus: 15 },
+    stone: { label: 'Stone', city: 'Bridgewatch', baseBonus: 40 },
+    hammer: { label: 'Hammer', city: 'Fort Sterling', baseBonus: 15 },
+    holystaff: { label: 'Holy Staff', city: 'Fort Sterling', baseBonus: 15 },
+    plate_helmet: { label: 'Plate Helmet', city: 'Fort Sterling', baseBonus: 15 },
+    spear: { label: 'Spear', city: 'Fort Sterling', baseBonus: 15 },
+    wood: { label: 'Wood', city: 'Fort Sterling', baseBonus: 40 },
+    arcane_staff: { label: 'Arcane Staff', city: 'Lymhurst', baseBonus: 15 },
+    bow: { label: 'Bow', city: 'Lymhurst', baseBonus: 15 },
+    fiber: { label: 'Fiber', city: 'Lymhurst', baseBonus: 40 },
+    leather_helmet: { label: 'Leather Hood', city: 'Lymhurst', baseBonus: 15 },
+    leather_shoes: { label: 'Leather Shoes', city: 'Lymhurst', baseBonus: 15 },
+    sword: { label: 'Sword', city: 'Lymhurst', baseBonus: 15 },
+    axe: { label: 'Axe', city: 'Martlock', baseBonus: 15 },
+    froststaff: { label: 'Frost Staff', city: 'Martlock', baseBonus: 15 },
+    hide: { label: 'Hide', city: 'Martlock', baseBonus: 40 },
+    offhand: { label: 'Off-Hand', city: 'Martlock', baseBonus: 15 },
+    plate_boots: { label: 'Plate Boots', city: 'Martlock', baseBonus: 15 },
+    quarterstaff: { label: 'Quarterstaff', city: 'Martlock', baseBonus: 15 },
+    firestaff: { label: 'Fire Staff', city: 'Thetford', baseBonus: 15 },
+    leather_jacket: { label: 'Leather Jackets', city: 'Thetford', baseBonus: 15 },
+    mace: { label: 'Mace', city: 'Thetford', baseBonus: 15 },
+    naturestaff: { label: 'Nature Staff', city: 'Thetford', baseBonus: 15 },
+    ore: { label: 'Ore', city: 'Thetford', baseBonus: 40 },
+    food: { label: 'Food', city: 'Caerleon', baseBonus: 15 },
+    gathering_gear: { label: 'Gathering Gear', city: 'Caerleon', baseBonus: 15 },
+    shapeshifter_staff: { label: 'Shapeshifter Staff', city: 'Caerleon', baseBonus: 15 },
+    tool: { label: 'Tool', city: 'Caerleon', baseBonus: 15 },
+    war_gloves: { label: 'War Gloves', city: 'Caerleon', baseBonus: 15 },
+    bag: { label: 'Bag', city: 'Brecilien', baseBonus: 15 },
+    cape: { label: 'Cape', city: 'Brecilien', baseBonus: 15 },
+    potion: { label: 'Potion', city: 'Brecilien', baseBonus: 15 }
+};
+
+const DAILY_CATEGORY_ALIASES = {
+    cloth_cowl: 'cloth_helmet',
+    cloth_helmet: 'cloth_helmet',
+    cloth_robe: 'cloth_robe',
+    cloth_sandals: 'cloth_boots',
+    leather_hood: 'leather_helmet',
+    leather_jackets: 'leather_jacket',
+    arcane_staff: 'arcane_staff',
+    frost_staff: 'froststaff',
+    holy_staff: 'holystaff',
+    fire_staff: 'firestaff',
+    nature_staff: 'naturestaff',
+    quarter_staff: 'quarterstaff',
+    gathering_equipment: 'gathering_gear',
+    shapeshifterstaff: 'shapeshifter_staff',
+    war_glove: 'war_gloves',
+    off_hand: 'offhand'
+};
+
+const DAILY_CATEGORY_ITEM_IDS = {
+    'Cloth Robes': ['T4_CLOTH_ROBE', 'T5_CLOTH_ROBE', 'T6_CLOTH_ROBE', 'T7_CLOTH_ROBE', 'T8_CLOTH_ROBE', 'T4_CLOTH_ROBE@1', 'T5_CLOTH_ROBE@1', 'T6_CLOTH_ROBE@1', 'T7_CLOTH_ROBE@1'],
+    'Leather Jackets': ['T4_LEATHER_JACKET', 'T5_LEATHER_JACKET', 'T6_LEATHER_JACKET', 'T7_LEATHER_JACKET', 'T8_LEATHER_JACKET', 'T4_LEATHER_JACKET@1', 'T5_LEATHER_JACKET@1', 'T6_LEATHER_JACKET@1', 'T7_LEATHER_JACKET@1'],
+    'Cloth Cowl': ['T4_CLOTH_COWL', 'T5_CLOTH_COWL', 'T6_CLOTH_COWL', 'T7_CLOTH_COWL', 'T8_CLOTH_COWL', 'T4_CLOTH_COWL@1', 'T5_CLOTH_COWL@1', 'T6_CLOTH_COWL@1', 'T7_CLOTH_COWL@1'],
+    'Nature Staff': ['T4_MAIN_NATURESTAFF', 'T5_MAIN_NATURESTAFF', 'T6_MAIN_NATURESTAFF', 'T7_MAIN_NATURESTAFF', 'T8_MAIN_NATURESTAFF', 'T4_MAIN_NATURESTAFF@1', 'T5_MAIN_NATURESTAFF@1', 'T6_MAIN_NATURESTAFF@1', 'T7_MAIN_NATURESTAFF@1']
+};
+
+const DAILY_CATEGORY_ICON_URLS = {
+    'Cloth Robes': 'https://render.albiononline.com/v1/destiny/Cloth%20Robe%20Crafter.png?locale=en',
+    'Leather Jackets': 'https://render.albiononline.com/v1/destiny/Leather%20Jacket%20Crafter.png?locale=en',
+    'Cloth Cowl': 'https://render.albiononline.com/v1/destiny/Cloth%20Cowl%20Crafter.png?locale=en',
+    'Nature Staff': 'https://render.albiononline.com/v1/destiny/Nature%20Staff%20Crafter.png?locale=en'
+};
+const dailyIconCache = new Map();
+const DAILY_CATEGORY_ICON_ITEM_FALLBACKS = {
+    'Cloth Cowl': ['T4_HEAD_CLOTH_SET1', 'T4_CLOTH_COWL'],
+    'Cloth Robes': ['T4_ARMOR_CLOTH_SET1', 'T4_CLOTH_ROBE'],
+    'Cloth Sandals': ['T4_SHOES_CLOTH_SET1', 'T4_CLOTH_SHOES'],
+    'Leather Hood': ['T4_HEAD_LEATHER_SET1', 'T4_LEATHER_HOOD'],
+    'Leather Jackets': ['T4_ARMOR_LEATHER_SET1', 'T4_LEATHER_JACKET'],
+    'Leather Shoes': ['T4_SHOES_LEATHER_SET1', 'T4_LEATHER_SHOES'],
+    'Plate Helmet': ['T4_HEAD_PLATE_SET1', 'T4_PLATE_HELMET'],
+    'Plate Armor': ['T4_ARMOR_PLATE_SET1', 'T4_PLATE_ARMOR'],
+    'Plate Boots': ['T4_SHOES_PLATE_SET1', 'T4_PLATE_BOOTS'],
+    'Sword': ['T4_MAIN_SWORD'], 'Axe': ['T4_MAIN_AXE'], 'Spear': ['T4_MAIN_SPEAR'],
+    'Dagger': ['T4_MAIN_DAGGER'], 'Mace': ['T4_MAIN_MACE'], 'Hammer': ['T4_MAIN_HAMMER'],
+    'Crossbow': ['T4_2H_CROSSBOW'], 'Bow': ['T4_2H_BOW'], 'Cursed Staff': ['T4_MAIN_CURSEDSTAFF'],
+    'Fire Staff': ['T4_MAIN_FIRESTAFF'], 'Frost Staff': ['T4_MAIN_FROSTSTAFF'],
+    'Nature Staff': ['T4_MAIN_NATURESTAFF'], 'Holy Staff': ['T4_MAIN_HOLYSTAFF'],
+    'Arcane Staff': ['T4_MAIN_ARCANESTAFF'], 'Quarterstaff': ['T4_MAIN_QUARTERSTAFF'],
+    'Off-Hand': ['T4_OFF_BOOK', 'T4_OFF_TORCH'], 'War Gloves': ['T4_MAIN_WARGLOVES'],
+    'Shapeshifter Staff': ['T4_MAIN_SHAPESHIFTERSTAFF'],
+    'Stone': ['T4_ROCK'], 'Wood': ['T4_WOOD'], 'Ore': ['T4_ORE'], 'Hide': ['T4_HIDE'], 'Fiber': ['T4_FIBER'],
+    'Food': ['T4_MEAL_ROASTED_PORK'], 'Gathering Gear': ['T4_GATHERER_GATHERINGSET1'],
+    'Tool': ['T4_TOOL_PICKAXE'], 'Bag': ['T4_BAG'], 'Cape': ['T4_CAPE'], 'Potion': ['T4_POTION_HEAL'],
+    'Caerleon': ['T4_CAPE'],
+};
+
+function getDailyIconItemIds(categoryKey) {
+    return DAILY_CATEGORY_ITEM_IDS[categoryKey] || DAILY_CATEGORY_ICON_ITEM_FALLBACKS[categoryKey] || [];
+}
+
+function buildDailyCategoryIconUrls(categoryKey) {
+    const names = {
+        'Cloth Cowl': 'Cloth Cowl Crafter', 'Cloth Robes': 'Cloth Robe Crafter', 'Cloth Sandals': 'Cloth Sandals Crafter',
+        'Leather Hood': 'Leather Hood Crafter', 'Leather Jackets': 'Leather Jacket Crafter', 'Leather Shoes': 'Leather Shoes Crafter',
+        'Plate Helmet': 'Plate Helmet Crafter', 'Plate Armor': 'Plate Armor Crafter', 'Plate Boots': 'Plate Boots Crafter',
+        'Sword': 'Sword Crafter', 'Axe': 'Axe Crafter', 'Spear': 'Spear Crafter', 'Dagger': 'Dagger Crafter',
+        'Mace': 'Mace Crafter', 'Hammer': 'Hammer Crafter', 'Crossbow': 'Crossbow Crafter', 'Bow': 'Bow Crafter',
+        'Cursed Staff': 'Cursed Staff Crafter', 'Fire Staff': 'Fire Staff Crafter', 'Frost Staff': 'Frost Staff Crafter',
+        'Nature Staff': 'Nature Staff Crafter', 'Holy Staff': 'Holy Staff Crafter', 'Arcane Staff': 'Arcane Staff Crafter',
+        'Quarterstaff': 'Quarterstaff Crafter', 'War Gloves': 'War Gloves Crafter', 'Shapeshifter Staff': 'Shapeshifter Staff Crafter',
+        'Stone': 'Stone Mason Crafter', 'Wood': 'Wood Crafter', 'Ore': 'Ore Miner Crafter', 'Hide': 'Hide Tanner Crafter', 'Fiber': 'Fiber Weaver Crafter'
+    };
+    const name = names[categoryKey];
+    return name ? `https://render.albiononline.com/v1/destiny/${encodeURIComponent(name)}.png?locale=en` : null;
+}
+
+
+function dailyCategoryKey(raw) {
+    const key = String(raw || '').toLowerCase().replace(/^common_|^rare_/, '').replace(/-/g, '_');
+    return DAILY_CATEGORY_ALIASES[key] || key;
+}
+
+function loadDailyCache() {
+    try {
+        if (!fs.existsSync(DAILY_CACHE_FILE)) return null;
+        const cached = JSON.parse(fs.readFileSync(DAILY_CACHE_FILE, 'utf8'));
+        return cached && typeof cached === 'object' ? cached : null;
+    } catch (err) {
+        console.warn('⚠️ Daily cache read failed:', err.message);
+        return null;
+    }
+}
+
+function saveDailyCache(serverKey, data) {
+    try {
+        const cache = loadDailyCache() || {};
+        const previous = cache[serverKey];
+        const oldSignature = (previous?.entries || []).map(x => `${x.category}|${x.city}|${x.dailyBonus}`).sort().join('||');
+        const newSignature = (data?.entries || []).map(x => `${x.category}|${x.city}|${x.dailyBonus}`).sort().join('||');
+        const changed = Boolean(oldSignature && newSignature && oldSignature !== newSignature);
+        data.changed = changed;
+        if (changed) data.changedAt = new Date().toISOString();
+        cache[serverKey] = { ...data, changed, changedAt: changed ? new Date().toISOString() : previous?.changedAt, cachedAt: new Date().toISOString() };
+        fs.writeFileSync(DAILY_CACHE_FILE, JSON.stringify(cache, null, 2), 'utf8');
+    } catch (err) {
+        console.warn('⚠️ Daily cache write failed:', err.message);
+    }
+}
+
+function setDailySourceStatus(serverKey, patch) {
+    const cfg = currentGuildConfig();
+    if (!cfg) return;
+    cfg.dailySourceStatus[serverKey] = { ...(cfg.dailySourceStatus[serverKey] || {}), ...patch, checkedAt: new Date().toISOString() };
+    saveData();
+}
+
+function getCommunityDailyData(serverKey) {
+    const today = getExpectedDailyDate();
+    const rows = currentGuildConfig()?.dailyConfirmations?.filter(x => x.server === serverKey && x.date === today) || [];
+    if (!rows.length) return null;
+    const entries = rows.filter((item, index, all) => all.findIndex(x => x.category === item.category) === index)
+        .map(x => ({ category: x.category, city: x.city, baseBonus: Number(x.baseBonus) || 15, dailyBonus: Number(x.dailyBonus) || 10 }))
+        .slice(0, 2);
+    if (!entries.length) return null;
+    return { entries, source: 'COMMUNITY', stale: false, date: today, confirmations: rows.length, fetchedAt: new Date().toISOString() };
+}
+
+function dailyDataSignature(data) {
+    return (data?.entries || []).map(x => `${x.category}|${x.city}|${x.dailyBonus}`).sort().join('||');
+}
+
+function parseAodpDailyBonus(serverKey, payload) {
+    if (!payload || !Array.isArray(payload.Events)) return null;
+
+    const entries = payload.Events
+        .filter(event => Number(event?.Kind) === 2 && String(event?.Category || '').toUpperCase() === 'GENERAL')
+        .map(event => {
+            const rawName = String(event.UniqueName || '');
+            const key = dailyCategoryKey(rawName);
+            const meta = DAILY_CATEGORY_META[key];
+            if (!meta) return null;
+            return {
+                category: meta.label,
+                city: meta.city,
+                baseBonus: meta.baseBonus,
+                dailyBonus: /^RARE_/i.test(rawName) ? 20 : 10
+            };
+        })
+        .filter(Boolean)
+        .filter((item, index, all) => all.findIndex(x => x.category === item.category) === index)
+        .slice(0, 2);
+
+    if (!entries.length) return null;
+    return {
+        entries,
+        raw: `AODP ${payload.Server || serverKey}`,
+        source: 'AODP',
+        stale: false,
+        date: payload.ConfirmedAt || new Date().toISOString()
+    };
+}
+
+function cleanDailyText(value) {
+    return String(value || '')
+        .replace(/\u00a0/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+}
+
+function extractDailyServerBlock(bodyText, serverKey) {
+    const label = DAILY_SERVER_LABELS[serverKey];
+    if (!label) return '';
+
+    const text = cleanDailyText(bodyText);
+    const labels = Object.values(DAILY_SERVER_LABELS);
+    const positions = [];
+
+    // Find every standalone server heading. We intentionally keep only occurrences
+    // that have another server heading after them; this avoids matching the FAQ/footer.
+    const re = new RegExp(`\\b${label}\\b`, 'g');
+    let match;
+    while ((match = re.exec(text)) !== null) {
+        positions.push(match.index);
+    }
+
+    for (const start of positions) {
+        const nextPositions = labels
+            .filter(x => x !== label)
+            .map(x => {
+                const m = text.slice(start + label.length).match(new RegExp(`\\b${x}\\b`));
+                return m ? start + label.length + m.index : Infinity;
+            })
+            .filter(Number.isFinite)
+            .sort((a, b) => a - b);
+
+        const end = nextPositions.length ? nextPositions[0] : Math.min(text.length, start + 1200);
+        const block = text.slice(start, end);
+
+        // The homepage has a short card list for each server. A useful block normally
+        // contains at least one percentage pair (+10%/+20%).
+        if (/\+\d+%\s+\+\d+%/.test(block)) return block;
+    }
+
+    return '';
+}
+
+function parseDailyBonusBlock(block) {
+    const result = {
+        entries: [],
+        raw: cleanDailyText(block)
+    };
+
+    if (!block) return result;
+
+    // Remove the server heading itself so it cannot become part of the category name.
+    block = cleanDailyText(block).replace(/^(Americas|Asia|Europe)\b/i, '').trim();
+
+    // Parse known category/city labels instead of a greedy generic expression.
+    // The generic parser could consume both cards and return stale-looking data.
+    const categoryNames = Object.values(DAILY_CATEGORY_META)
+        .map(x => x.label)
+        .sort((a, b) => b.length - a.length)
+        .map(x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .join('|');
+    const cityNames = [...new Set(Object.values(DAILY_CATEGORY_META).map(x => x.city))]
+        .sort((a, b) => b.length - a.length)
+        .map(x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        .join('|');
+    const pairRe = new RegExp(`(${categoryNames})\\s+(${cityNames})\\s+\\+(\\d+)%\\s+\\+(\\d+)%`, 'gi');
+    let match;
+    while ((match = pairRe.exec(block)) !== null) {
+        const category = cleanDailyText(match[1]);
+        const city = cleanDailyText(match[2]);
+        const baseBonus = Number(match[3]);
+        const dailyBonus = Number(match[4]);
+        if (!category || !city) continue;
+
+        // Avoid accidental matches from unrelated page text.
+        if (category.length > 70 || city.length > 45) continue;
+        result.entries.push({ category, city, baseBonus, dailyBonus });
+    }
+
+    // Deduplicate cards that may appear more than once in the HTML.
+    const seen = new Set();
+    result.entries = result.entries.filter(item => {
+        const key = `${item.category}|${item.city}|${item.baseBonus}|${item.dailyBonus}`;
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+    }).slice(0, 2);
+
+    return result;
+}
+
+function extractDailyPageDate(html, serverKey) {
+    const label = DAILY_SERVER_LABELS[serverKey];
+    if (!label) return '';
+    const re = new RegExp(`region:["']${serverKey}["'][^}]{0,180}?date:["'](\\d{4}-\\d{2}-\\d{2})["']`, 'i');
+    const match = String(html || '').match(re);
+    return match ? match[1] : '';
+}
+
+function getExpectedDailyDate() {
+    return new Date().toISOString().slice(0, 10);
+}
+
+function formatIctTime(dateValue) {
+    const date = new Date(dateValue || Date.now());
+    return date.toLocaleTimeString('en-GB', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit' });
+}
+
+function getNextResetInfo(serverKey) {
+    const resetHour = DAILY_RESET_UTC_HOURS[serverKey] ?? 10;
+    const now = new Date();
+    const next = new Date(now);
+    next.setUTCHours(resetHour, 0, 0, 0);
+    if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
+    const minutes = Math.max(0, Math.floor((next - now) / 60000));
+    return {
+        clock: `${String((resetHour + 7) % 24).padStart(2, '0')}:00 ICT`,
+        countdown: `${Math.floor(minutes / 60)}h ${minutes % 60}m`
+    };
+}
+
+async function fetchDailyBonus(serverKey) {
+    const aodpUrl = AODP_FESTIVITIES_URLS[serverKey];
+    const aoPromise = axios.get(DAILY_BONUS_SOURCE, {
+        timeout: 8000,
+        headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'text/html,application/xhtml+xml' },
+        validateStatus: status => status >= 200 && status < 300
+    });
+    const aodpPromise = aodpUrl ? axios.get(aodpUrl, {
+        timeout: 5000,
+        headers: { 'User-Agent': 'BOTBOSS Daily Bonus/1.0', Accept: 'application/json' },
+        validateStatus: status => status >= 200 && status < 300
+    }) : Promise.reject(new Error('No AODP URL configured'));
+    const [aoResult, aodpResult] = await Promise.allSettled([aoPromise, aodpPromise]);
+
+    if (aoResult.status === 'fulfilled') {
+        const html = aoResult.value.data;
+        const $ = cheerio.load(html);
+        const block = extractDailyServerBlock($('body').text(), serverKey);
+        const parsed = parseDailyBonusBlock(block);
+        const pageDate = extractDailyPageDate(html, serverKey);
+        if (pageDate === getExpectedDailyDate() && parsed.entries.length) {
+            parsed.source = 'AO-SAGE'; parsed.stale = false; parsed.date = pageDate; parsed.fetchedAt = new Date().toISOString();
+            setDailySourceStatus(serverKey, { aoSage: 'confirmed', aoSageDate: pageDate });
+            saveDailyCache(serverKey, parsed);
+            console.log(`✅ Daily bonus source connected: ${serverKey} -> AO-SAGE`);
+            return parsed;
+        }
+        setDailySourceStatus(serverKey, { aoSage: 'waiting', aoSageDate: pageDate || null });
+        console.warn(`⚠️ AO-SAGE ${serverKey} has no confirmed snapshot for ${getExpectedDailyDate()}`);
+    } else console.warn(`⚠️ AO-SAGE request failed (${serverKey}):`, aoResult.reason?.message || 'unknown error');
+
+    if (aodpResult.status === 'fulfilled') {
+        const parsed = parseAodpDailyBonus(serverKey, aodpResult.value.data);
+        if (parsed && String(parsed.date || '').slice(0, 10) === getExpectedDailyDate()) {
+            parsed.fetchedAt = new Date().toISOString(); saveDailyCache(serverKey, parsed);
+            setDailySourceStatus(serverKey, { aodp: 'confirmed', aodpDate: getExpectedDailyDate() });
+            console.log(`✅ Daily bonus fallback connected: ${serverKey} -> ${aodpUrl}`);
+            return parsed;
+        }
+        setDailySourceStatus(serverKey, { aodp: 'waiting' });
+        console.warn(`⚠️ AODP has no confirmed snapshot for ${serverKey}`);
+    } else console.warn(`⚠️ AODP request failed (${serverKey}):`, aodpResult.reason?.message || 'unavailable');
+
+    const community = getCommunityDailyData(serverKey);
+    if (community) {
+        setDailySourceStatus(serverKey, { community: 'confirmed', confirmations: community.confirmations });
+        saveDailyCache(serverKey, community);
+        return community;
+    }
+
+    // Fallback 2: use the last confirmed value for the same server only.
+    const cache = loadDailyCache();
+    const cached = cache?.[serverKey];
+    const currentServerDate = getExpectedDailyDate();
+    const cachedDate = String(cached?.date || cached?.cachedAt || '').slice(0, 10);
+    if (cached?.entries?.length && cachedDate === currentServerDate) {
+        console.warn(`⚠️ Using stale daily bonus cache for ${serverKey}, cached at ${cached.cachedAt || 'unknown time'}`);
+        return {
+            ...cached,
+            source: cached.source || 'CACHE',
+            stale: true
+        };
+    }
+
+    if (cached?.entries?.length) {
+        console.warn(`⚠️ Ignoring old daily bonus cache for ${serverKey}: ${cachedDate || 'unknown date'} (today is ${currentServerDate})`);
+    }
+
+    return null;
+}
+
+async function generateDailyBonusEmbed(serverChoice) {
+    const serverDisplayName = SERVER_NAMES[serverChoice] || 'Albion Server';
+    const dailyData = await fetchDailyBonus(serverChoice, currentGuildId());
+
+    if (!dailyData) return null;
+
+    const entries = dailyData.entries || [];
+    const bonusLines = entries.map((item, index) =>
+        `${index + 1}. **${item.category}** — **+${item.dailyBonus}% Daily Bonus**\n   🏙️ Best Craft City: **${item.city}** (+${item.baseBonus}%)`
+    ).join('\n\n');
+
+    const sourceLabel = dailyData.stale
+        ? `⚠️ ${dailyData.source || 'CACHE'} — ข้อมูลล่าสุดที่ยืนยันได้ (อาจไม่ใช่โบนัสของวันนี้)`
+        : `${dailyData.source || 'AO-SAGE'} — ข้อมูลประจำวันที่ ${String(dailyData.date || '').slice(0, 10)} หลังการรีเซ็ตประจำวัน`;
+
+    return new EmbedBuilder()
+        .setColor(0xF1C40F)
+        .setTitle('✨ **ALBION ONLINE — DAILY BONUS REPORT** ✨')
+        .setDescription(`📢 **โบนัสประจำวัน**\n\`\`\`ansi\n\x1b[1;33m🌐 Server: ${serverDisplayName}\x1b[0m\n\`\`\``)
+        .addFields(
+            {
+                name: '🎯 **หมวดหมู่โบนัสวันนี้ (DAILY BONUS)**',
+                value: bonusLines || 'ไม่พบข้อมูลโบนัสสำหรับเซิร์ฟเวอร์นี้',
+                inline: false
+            },
+            {
+                name: '📝 **แหล่งข้อมูล**',
+                value: sourceLabel,
+                inline: false
+            },
+            {
+                name: '⏰ **เวลาการรีเซ็ต**',
+                value: getDailyResetText(serverChoice),
+                inline: false
+            }
+        )
+        .setThumbnail('https://render.albiononline.com/v1/spell/T6_GVGSEASONREWARD_FAMEBUFF_SPELL.png')
+        .setFooter({ text: 'Albion Online Daily Bonus • Powered by BOTBOSS', iconURL: client.user.displayAvatarURL() })
+        .setTimestamp();
+}
+
+async function loadDailyItemIcon(itemId) {
+    const urls = [
+        `https://render.albiononline.com/v1/item/${encodeURIComponent(itemId)}.png?quality=1&size=96`,
+        `https://render.albiononline.com/v1/item/${encodeURIComponent(itemId)}.png?size=96`
+    ];
+    for (const url of urls) {
+        try {
+            const response = await axios.get(url, {
+                responseType: 'arraybuffer',
+                timeout: 8000,
+                headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'image/png,image/*,*/*;q=0.8' },
+                validateStatus: status => status >= 200 && status < 300
+            });
+            if (response.data?.length > 100) return await loadImage(Buffer.from(response.data));
+        } catch (_) {}
+    }
+    return null;
+}
+
+async function loadDailyCategoryIcon(category) {
+    const aliases = {
+        'Cloth Robe': 'Cloth Robes', 'Leather Jacket': 'Leather Jackets', 'Nature Staves': 'Nature Staff',
+        'Cloth Helmet': 'Cloth Cowl', 'Cloth Boots': 'Cloth Sandals', 'Leather Helmet': 'Leather Hood',
+        'Leather Boot': 'Leather Shoes', 'Plate Helmet': 'Plate Helmet'
+    };
+    const categoryKey = aliases[String(category).trim()] || String(category).trim();
+    if (dailyIconCache.has(categoryKey)) return dailyIconCache.get(categoryKey);
+
+    const urls = [...new Set([DAILY_CATEGORY_ICON_URLS[categoryKey], buildDailyCategoryIconUrls(categoryKey)].filter(Boolean))];
+    for (const url of urls) {
+        try {
+            const response = await axios.get(url, {
+                responseType: 'arraybuffer', timeout: 8000,
+                headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'image/png,image/*,*/*;q=0.8' },
+                validateStatus: status => status >= 200 && status < 300
+            });
+            if (response.data?.length > 100) {
+                const image = await loadImage(Buffer.from(response.data));
+                dailyIconCache.set(categoryKey, image);
+                return image;
+            }
+        } catch (err) {
+            console.warn(`⚠️ Daily category icon failed (${categoryKey}):`, err.message);
+        }
+    }
+
+    // Use several real Albion item icons as fallback. This fixes the old
+    // behaviour where only four categories had item-id fallbacks.
+    const itemIds = getDailyIconItemIds(categoryKey);
+    for (const itemId of itemIds) {
+        const fallback = await loadDailyItemIcon(itemId);
+        if (fallback) {
+            dailyIconCache.set(categoryKey, fallback);
+            return fallback;
+        }
+    }
+    return null;
+}
+
+async function preloadDailyIcons() {
+    await Promise.all(Object.keys(DAILY_CATEGORY_ICON_URLS).map(category => loadDailyCategoryIcon(category)));
+    console.log(`✅ Preloaded ${dailyIconCache.size} Daily Bonus icons`);
+}
+
+function drawCategoryPlaceholder(ctx, category, x, y, size) {
+    const initials = String(category || 'DB').split(/\s+/).map(x => x[0]).join('').slice(0, 3).toUpperCase();
+    ctx.save();
+    ctx.fillStyle = '#3d2917'; ctx.strokeStyle = '#d39a45'; ctx.lineWidth = 4;
+    ctx.beginPath(); ctx.arc(x + size / 2, y + size / 2, size / 2 - 8, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#ffe0a3'; ctx.font = `900 ${Math.floor(size * 0.22)}px Arial, sans-serif`;
+    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(initials, x + size / 2, y + size / 2);
+    ctx.restore();
+}
+
+function drawCityBadge(ctx, city, x, y, size) {
+    const cityStyles = {
+        'Fort Sterling': { fill: '#f4f1e8', accent: '#b8d9e4', text: '#23313a', mark: 'FS' },
+        Thetford: { fill: '#4f285f', accent: '#d7a0ed', text: '#fff0ff', mark: 'TH' },
+        Bridgewatch: { fill: '#77502d', accent: '#f0c06a', text: '#fff0c8', mark: 'BW' },
+        Lymhurst: { fill: '#315640', accent: '#9bd29f', text: '#eaffea', mark: 'LY' },
+        Martlock: { fill: '#4b5365', accent: '#bfc8dd', text: '#f4f6ff', mark: 'MA' },
+        Caerleon: { fill: '#242326', accent: '#aaa5b5', text: '#f4f0ff', mark: 'CA' },
+        Brecilien: { fill: '#40576b', accent: '#9fc4d4', text: '#e9f7ff', mark: 'BR' }
+    };
+    const style = cityStyles[city] || { fill: '#4b4037', accent: '#d2b273', text: '#fff4df', mark: String(city || 'CT').slice(0, 2).toUpperCase() };
+    ctx.save();
+    ctx.shadowColor = 'rgba(0, 0, 0, 0.45)';
+    ctx.shadowBlur = 12;
+    ctx.fillStyle = style.fill;
+    ctx.beginPath();
+    ctx.arc(x + size / 2, y + size / 2, size / 2, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.shadowBlur = 0;
+    ctx.strokeStyle = style.accent;
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.fillStyle = style.accent;
+    ctx.beginPath();
+    ctx.moveTo(x + size / 2, y + size - 7);
+    ctx.lineTo(x + size / 2 - 10, y + size / 2 + 8);
+    ctx.lineTo(x + size / 2 + 10, y + size / 2 + 8);
+    ctx.closePath();
+    ctx.fill();
+    ctx.fillStyle = style.fill;
+    ctx.beginPath();
+    ctx.arc(x + size / 2, y + size / 2 - 2, 8, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.fillStyle = style.text;
+    ctx.font = `900 ${Math.max(12, Math.floor(size * 0.22))}px Arial, sans-serif`;
+    ctx.textAlign = 'center';
+    ctx.fillText(style.mark, x + size / 2, y + size / 2 + 5);
+    ctx.textAlign = 'left';
+    ctx.restore();
+}
+
+async function generateDailyBonusCard(serverChoice) {
+    const dailyData = await fetchDailyBonus(serverChoice);
+    if (!dailyData?.entries?.length) return null;
+
+    const entries = dailyData.entries.slice(0, 2);
+    // Render at 1.5x resolution so Discord's preview keeps the text and
+    // large bonus icon sharper while all layout coordinates stay unchanged.
+    const width = 960;
+    const height = 1140;
+    const renderScale = 1.5;
+    const canvas = createCanvas(Math.round(width * renderScale), Math.round(height * renderScale));
+    const ctx = canvas.getContext('2d');
+    ctx.scale(renderScale, renderScale);
+    const bg = ctx.createLinearGradient(0, 0, width, height);
+    bg.addColorStop(0, '#080706');
+    bg.addColorStop(0.5, '#120e0b');
+    bg.addColorStop(1, '#060505');
+    ctx.fillStyle = bg;
+    ctx.fillRect(0, 0, width, height);
+
+    const dateText = String(dailyData.date || new Date().toISOString()).slice(0, 10)
+        .split('-').reverse().join(' ');
+    const resetText = serverChoice === 'asia' ? 'resets 00:00 UTC' : 'resets 10:00 UTC';
+    const nextReset = getNextResetInfo(serverChoice);
+    const statusText = dailyData.stale ? 'STALE DATA' : dailyData.source === 'COMMUNITY' ? 'COMMUNITY CONFIRMED' : dailyData.changed ? 'UPDATED TODAY' : 'CONFIRMED TODAY';
+    const statusFill = dailyData.stale ? '#6d3429' : dailyData.source === 'COMMUNITY' ? '#5b4b18' : '#28543f';
+    ctx.fillStyle = '#9a8b80';
+    ctx.font = 'bold 15px Arial, sans-serif';
+    ctx.letterSpacing = '3px';
+    ctx.fillText(`DAILY PRODUCTION BONUS`, 44, 43);
+    ctx.fillStyle = '#e0a83a';
+    ctx.font = 'bold 13px Arial, sans-serif';
+    ctx.fillText(String(serverChoice).toUpperCase(), 264, 43);
+    ctx.fillStyle = '#c9c0b8';
+    ctx.font = 'bold 14px Arial, sans-serif';
+    ctx.fillText(`${dateText}   ${resetText}`, 326, 43);
+    drawRoundRect(ctx, 690, 24, 220, 30, 15);
+    ctx.fillStyle = statusFill;
+    ctx.fill();
+    ctx.strokeStyle = dailyData.stale ? '#b45d45' : '#55a679';
+    ctx.lineWidth = 1;
+    ctx.stroke();
+    ctx.fillStyle = '#f4eadf';
+    ctx.font = '900 12px Arial, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText(statusText, 800, 44);
+    ctx.textAlign = 'left';
+    ctx.fillStyle = '#28201b';
+    ctx.fillRect(44, 58, width - 88, 1);
+
+    const gap = 18;
+    const cardX = 44;
+    const cardY = 78;
+    const cardW = width - 88;
+    const cardH = 470;
+
+    const rounded = (x, y, w, h, r, fill, stroke) => {
+        drawRoundRect(ctx, x, y, w, h, r);
+        ctx.fillStyle = fill; ctx.fill();
+        if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1; ctx.stroke(); }
+    };
+
+    const iconTasks = entries.map(async entry => ({
+        category: await loadDailyCategoryIcon(entry.category)
+    }));
+    const iconSets = await Promise.all(iconTasks);
+
+    entries.forEach((entry, index) => {
+        const x = cardX;
+        const y = cardY + index * (cardH + gap);
+        const border = entry.dailyBonus >= 20 ? '#d47a24' : '#553a20';
+        rounded(x, y, cardW, cardH, 14, '#17120f', border);
+        ctx.fillStyle = '#b39b87';
+        ctx.font = 'bold 15px Arial, sans-serif';
+        ctx.fillText('PRODUCTION BONUS', x + 30, y + 34);
+
+        const title = String(entry.category).toUpperCase();
+        ctx.fillStyle = '#f2eee9';
+        ctx.font = '900 40px Arial, sans-serif';
+        ctx.fillText(title, x + 30, y + 92, cardW - 320);
+        rounded(x + cardW - 168, y + 52, 126, 52, 26,
+            entry.dailyBonus >= 20 ? '#71320e' : '#4a2b0c',
+            entry.dailyBonus >= 20 ? '#f09a38' : '#b87824');
+        ctx.fillStyle = entry.dailyBonus >= 20 ? '#ffd18b' : '#f0b34c';
+        ctx.font = '900 27px Arial, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.fillText(`+${entry.dailyBonus}%${entry.dailyBonus >= 20 ? ' HIGH' : ''}`, x + cardW - 105, y + 88);
+        ctx.textAlign = 'left';
+
+        ctx.fillStyle = '#33251c';
+        ctx.fillRect(x + 30, y + 115, cardW - 60, 1);
+        ctx.fillStyle = '#b0a095';
+        ctx.font = 'bold 14px Arial, sans-serif';
+        ctx.fillText('BEST CRAFT CITY', x + 30, y + 144);
+        ctx.fillStyle = '#eee7df';
+        ctx.font = 'bold 23px Arial, sans-serif';
+        ctx.fillText(`${entry.city}  +${entry.baseBonus}%`, x + 30, y + 176, cardW - 410);
+
+        const iconData = iconSets[index] || { items: [], category: null };
+        // Keep one prominent category icon beside the Best Craft City details.
+        // It is intentionally separated from the city badge in the lower-right.
+        if (iconData.category) {
+            try { ctx.drawImage(iconData.category, x + cardW / 2 - 140, y + 126, 280, 280); } catch (_) {}
+        } else drawCategoryPlaceholder(ctx, entry.category, x + cardW / 2 - 140, y + 126, 280);
+
+        // Decorative crafting route panel uses a city badge at bottom-right.
+        ctx.fillStyle = '#a99a8f';
+        ctx.font = 'bold 14px Arial, sans-serif';
+        ctx.fillText('CRAFTING ROUTE', x + 32, y + 424);
+        ctx.fillStyle = '#c2a36a';
+        ctx.font = 'bold 17px Arial, sans-serif';
+        ctx.fillText('BONUS CITY VERIFIED', x + 32, y + 450);
+        ctx.strokeStyle = '#46352a';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(x + 32, y + 458);
+        ctx.lineTo(x + cardW - 150, y + 458);
+        ctx.stroke();
+        drawCityBadge(ctx, entry.city, x + cardW - 106, y + cardH - 105, 66);
+        ctx.fillStyle = '#d9c3a0';
+        ctx.font = 'bold 12px Arial, sans-serif';
+        ctx.fillText(entry.city, x + cardW - 190, y + cardH - 38, 82);
+
+        // Price/volume data is not available from the current source, so keep
+        // this area intentionally empty instead of rendering overlapping N/A text.
+    });
+
+    const footer = dailyData.stale
+        ? `STALE CACHE — ${String(dailyData.date || '').slice(0, 10)}`
+        : `${dailyData.source || 'AO-SAGE'}${dailyData.confirmations ? ` (${dailyData.confirmations} confirmations)` : ''}${dailyData.changed ? ' — BONUS CHANGED' : ''} — UPDATED ${formatIctTime(dailyData.fetchedAt)}`;
+    ctx.fillStyle = '#6c5f55';
+    ctx.font = 'bold 13px Arial, sans-serif';
+    ctx.fillText(footer, 44, height - 38);
+    ctx.fillStyle = '#a99172';
+    ctx.fillText(`NEXT RESET ${nextReset.clock}  •  IN ${nextReset.countdown}`, 44, height - 16);
+
+    return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: 'daily-production-bonus.png' });
+}
+
+
+// ----------------------------------------
+// AVALON (AVA) MAP CHECK
+// Source: Albion Battle Hub map pages.
+// Returns Thai summary + map image URL.
+// ----------------------------------------
+const AVA_MAP_SOURCE = 'https://albionbattlehub.com/en/avalon-maps/';
+const AVA_MAP_SOURCE_TH = 'https://albionbattlehub.com/th/avalon-maps/';
+
+const AVA_LABELS_TH = {
+    'Green chest': 'เขียว',
+    'Blue chest': 'น้ำเงิน',
+    'Gold chest': 'ทอง',
+    'Stone': 'หินใหญ่',
+    'Wood': 'ไม้',
+    'Ore': 'แร่',
+    'Hide': 'หนัง',
+    'Fiber': 'เส้นใย',
+    'Solo dungeon': 'ดันเดี่ยว',
+    'Group dungeon': 'ดันกลุ่ม'
+};
+
+function normalizeAvaSlug(input) {
+    const raw = String(input || '').trim();
+    if (!raw) throw new Error('กรุณาระบุชื่อแมพ AVA');
+
+    const urlMatch = raw.match(/albionbattlehub\.com\/(?:en|th)\/avalon-maps\/([^/?#]+)/i);
+    if (urlMatch) return decodeURIComponent(urlMatch[1]).toLowerCase();
+
+    return raw
+        .replace(/\bT(?:ier)?\s*[45678]\b/ig, '')
+        .trim()
+        .replace(/\s+/g, '-')
+        .replace(/[^a-zA-Z0-9_-]/g, '')
+        .toLowerCase();
+}
+
+function extractAvaCount(bodyText, label) {
+    const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const patterns = [
+        new RegExp(`${escaped}\\s*[×x*:]?\\s*(\\d+)`, 'i'),
+        new RegExp(`${escaped}[\\s\\S]{0,24}?[×x*:]\\s*(\\d+)`, 'i')
+    ];
+    for (const re of patterns) {
+        const m = bodyText.match(re);
+        if (m) return Number(m[1]) || 0;
+    }
+    return 0;
+}
+
+function extractAvaConnection(html, bodyText) {
+    const source = `${html}\n${bodyText}`;
+    const m = source.match(/\b(TUNNEL_(?:LOW|MEDIUM|HIGH|DEEP(?:_RAID)?|HIDEOUT(?:_DEEP)?))\b/i);
+    if (!m) return null;
+    return m[1].toUpperCase()
+        .replace(/^TUNNEL_/, '')
+        .replace(/_DEEP_RAID$/, ' DEEP RAID')
+        .replace(/_DEEP$/, ' DEEP')
+        .replace(/_HIDEOUT_DEEP$/, ' HIDEOUT DEEP')
+        .replace(/_HIDEOUT$/, ' HIDEOUT')
+        .replace(/_MEDIUM$/, ' MEDIUM')
+        .replace(/_HIGH$/, ' HIGH')
+        .replace(/_LOW$/, ' LOW')
+        .replace(/\bMEDIUM\b/, 'MEDIUM');
+}
+
+function formatAvaConnection(connection) {
+    if (!connection) return 'ไม่พบข้อมูล';
+    const map = {
+        LOW: 'Tunnel Low',
+        MEDIUM: 'Tunnel Medium',
+        HIGH: 'Tunnel High',
+        DEEP: 'Tunnel Deep',
+        'DEEP RAID': 'Tunnel Deep Raid',
+        HIDEOUT: 'Tunnel Hideout',
+        'HIDEOUT DEEP': 'Tunnel Hideout Deep',
+        ROYAL: 'Tunnel Royal'
+    };
+    return map[connection] || `Tunnel ${connection}`;
+}
+
+function normalizeAvaDataTotals(data) {
+    const c = data?.counts || {};
+    const counts = {
+        'Gold chest': Number(c['Gold chest']) || 0,
+        'Blue chest': Number(c['Blue chest']) || 0,
+        'Green chest': Number(c['Green chest']) || 0,
+        'Group dungeon': Number(c['Group dungeon']) || 0,
+        'Solo dungeon': Number(c['Solo dungeon']) || 0,
+        Wood: Number(c.Wood) || 0, Ore: Number(c.Ore) || 0,
+        Stone: Number(c.Stone) || 0, Hide: Number(c.Hide) || 0, Fiber: Number(c.Fiber) || 0
+    };
+    return {
+        ...data, counts,
+        totalChests: counts['Gold chest'] + counts['Blue chest'] + counts['Green chest'],
+        totalResources: counts.Wood + counts.Ore + counts.Stone + counts.Hide + counts.Fiber,
+        totalDungeons: counts['Group dungeon'] + counts['Solo dungeon']
+    };
+}
+
+function avaDataPointCount(data) {
+    const d = normalizeAvaDataTotals(data);
+    return d.totalChests + d.totalResources + d.totalDungeons;
+}
+
+async function fetchAvaMapData(input) {
+    const slug = normalizeAvaSlug(input);
+    const urls = [
+        `${AVA_MAP_SOURCE}${encodeURIComponent(slug)}`,
+        `${AVA_MAP_SOURCE_TH}${encodeURIComponent(slug)}`
+    ];
+
+    let lastError = null;
+    for (const url of urls) {
+        try {
+            const response = await axios.get(url, {
+                timeout: 15000,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (compatible; AlbionAssistant/1.0)',
+                    'Accept': 'text/html,application/xhtml+xml'
+                },
+                validateStatus: status => status >= 200 && status < 400
+            });
+
+            const html = String(response.data || '');
+            const $ = cheerio.load(html);
+            const bodyText = $('body').text().replace(/\s+/g, ' ').trim();
+            const title = $('h1').first().text().trim() || slug;
+
+            if (!/Avalon|Road Layout|Green chest|หีบเขียว/i.test(bodyText + html)) {
+                throw new Error('ไม่ใช่หน้า Avalon map');
+            }
+
+            const tierMatch =
+                bodyText.match(/\bT\s*([468])\b/i) ||
+                title.match(/\bT\s*([468])\b/i);
+            const layoutMatch = bodyText.match(/Road Layout\s*([A-Z])/i);
+            const mapImageRaw =
+                $('meta[property="og:image"]').attr('content') ||
+                $('meta[name="twitter:image"]').attr('content') ||
+                $('img[alt*="Avalon" i]').first().attr('src') ||
+                $('img').first().attr('src') || '';
+
+            let mapImage = mapImageRaw;
+            if (mapImage && !/^https?:\/\//i.test(mapImage)) {
+                mapImage = new URL(mapImage, url).href;
+            }
+
+            const counts = {};
+            for (const label of Object.keys(AVA_LABELS_TH)) {
+                counts[label] = extractAvaCount(bodyText, label);
+            }
+
+            const connection = extractAvaConnection(html, bodyText);
+            const totalChests = counts['Green chest'] + counts['Blue chest'] + counts['Gold chest'];
+            const totalResources =
+                counts.Stone + counts.Wood + counts.Ore + counts.Hide + counts.Fiber;
+            const totalDungeons = counts['Solo dungeon'] + counts['Group dungeon'];
+
+            return {
+                slug,
+                name: title.replace(/\s+/g, ' ').trim(),
+                tier: tierMatch ? `T${tierMatch[1]}` : 'ไม่พบข้อมูล',
+                layout: layoutMatch ? layoutMatch[1].toUpperCase() : 'ไม่พบข้อมูล',
+                connection,
+                counts,
+                totalChests,
+                totalResources,
+                totalDungeons,
+                mapImage,
+                sourceUrl: url
+            };
+        } catch (err) {
+            lastError = err;
+        }
+    }
+
+    throw new Error(`หาแมพ AVA "${input}" ไม่พบ${lastError?.message ? `: ${lastError.message}` : ''}`);
+}
+
+function avaCountLine(items) {
+    const parts = items
+        .filter(([, count]) => Number(count) > 0)
+        .map(([label, count]) => `${label} ${count}`);
+    return parts.length ? parts.join('  •  ') : 'ไม่มีข้อมูล';
+}
+
+async function generateAvaCheckResponse(input) {
+    const data = await fetchAvaMapDataWithFallback(input);
+
+    const embed = new EmbedBuilder()
+        .setColor(0x2dd4bf)
+        .setTitle(`🗺️ AVA CHECK — ${data.name}`)
+        .setDescription(
+            `🛡️ **Tier:** ${data.tier}  •  🧭 **Layout:** ${data.layout}\n` +
+            `🌀 **Connection:** ${formatAvaConnection(data.connection)}`
+        )
+        .addFields(
+            {
+                name: '📦 กล่อง',
+                value: avaCountLine([
+                    ['🟢 เขียว', data.counts['Green chest']],
+                    ['🔵 น้ำเงิน', data.counts['Blue chest']],
+                    ['🟡 ทอง', data.counts['Gold chest']]
+                ]),
+                inline: false
+            },
+            {
+                name: '⛏️ ทรัพยากร',
+                value: avaCountLine([
+                    ['🪨 หินใหญ่', data.counts.Stone],
+                    ['⛏️ แร่', data.counts.Ore],
+                    ['🪵 ไม้', data.counts.Wood],
+                    ['🦌 หนัง', data.counts.Hide],
+                    ['🌿 เส้นใย', data.counts.Fiber]
+                ]),
+                inline: false
+            },
+            {
+                name: '🏰 ดันเจี้ยน',
+                value: avaCountLine([
+                    ['🟣 ดันเดี่ยว', data.counts['Solo dungeon']],
+                    ['🔴 ดันกลุ่ม', data.counts['Group dungeon']]
+                ]),
+                inline: false
+            },
+            {
+                name: '📊 รวม',
+                value: `กล่อง **${data.totalChests}** • ทรัพยากร **${data.totalResources}** • ดันเจี้ยน **${data.totalDungeons}**`,
+                inline: false
+            }
+        )
+        .setFooter({ text: `ข้อมูลแผนที่จาก ${data.source || 'AVA sources'}` })
+        .setTimestamp();
+
+    if (data.mapImage) embed.setImage(data.mapImage);
+    embed.setURL(data.sourceUrl);
+    return embed;
+}
+
+// ----------------------------------------
+// AVA IMAGE OCR + ALBION ROADS AUTO CHECK
+// ----------------------------------------
+const ALBION_ROADS_SOURCE = 'https://albionroads.com/';
+// AVA: canonical map names are resolved before source lookup.
+const AVA_IMAGE_EXTENSIONS = /\.(?:png|jpe?g|webp|gif)$/i;
+const avaOcrCache = new Map();
+const avaPendingSelections = new Map();
+const avaProcessingMessages = new Set();
+const avaPollState = new Map();
+const avaRawRetryTimers = new Map();
+const avaCanonicalMapCache = { names: [], expiresAt: 0 };
+
+function normalizeMapNameText(value) {
+    return String(value || '').replace(/[|_]+/g, '-').replace(/\s*[-–—]\s*/g, '-').replace(/[^A-Za-z0-9\-\s]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+function extractMapNamesFromOcr(text) {
+    const raw = normalizeMapNameText(text);
+    const blacklist = /^(Albion|Assistant|Production|Bonus|Road|Avalon|Connection|Chests|Resources|Green|Gold|Blue|Stone|Wood|Ore|Hide|Fiber|Tier)-/i;
+    const found = [];
+    const add = value => {
+        const name = normalizeMapNameText(value).replace(/\s+/g, '');
+        if (!name || blacklist.test(name)) return;
+        if (!/^[A-Za-z]{3,18}-[A-Za-z]{3,18}$/.test(name)) return;
+        if (!found.some(x => normalizeAvaLookupName(x) === normalizeAvaLookupName(name))) found.push(name);
+    };
+    for (const line of String(text || '').split(/\r?\n/)) {
+        const normalizedLine = normalizeMapNameText(line);
+        for (const m of normalizedLine.matchAll(/\b([A-Za-z]{3,18})\s*-\s*([A-Za-z]{3,18})\b/g)) add(`${m[1]}-${m[2]}`);
+    }
+    for (const m of raw.matchAll(/\b([A-Za-z]{3,18})\s*-\s*([A-Za-z]{3,18})\b/g)) add(`${m[1]}-${m[2]}`);
+    return found;
+}
+
+function extractMapNameFromOcr(text) {
+    return extractMapNamesFromOcr(text)[0] || null;
+}
+
+async function renderAvaOcrCrop(imageBuffer) {
+    const image = await loadImage(imageBuffer);
+    const scale = 3;
+    const width = Math.max(1, Math.round(image.width * scale));
+    const sourceCropHeight = Math.max(1, Math.min(image.height * 0.72, 900));
+    const cropHeight = Math.max(1, Math.round(sourceCropHeight * scale));
+    const canvas = createCanvas(width, cropHeight);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, width, cropHeight);
+    ctx.drawImage(image, 0, 0, width, Math.round(image.height * scale));
+    return canvas.toBuffer('image/png');
+}
+
+async function ocrWithSystemTesseract(buffer, psm = 6) {
+    const command = String(process.env.TESSERACT_CMD || '/usr/bin/tesseract');
+    if (!fs.existsSync(command)) return null;
+    const tempDir = path.join(__dirname, '.ava-ocr'); fs.mkdirSync(tempDir, { recursive: true });
+    const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const inputPath = path.join(tempDir, `${id}.png`), outputBase = path.join(tempDir, id), outputPath = `${outputBase}.txt`;
+    try {
+        fs.writeFileSync(inputPath, buffer);
+        await new Promise((resolve, reject) => execFile(command, [inputPath, outputBase, '--psm', String(psm), '-l', 'eng', '-c', 'tessedit_char_whitelist=ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz- '], { timeout: 25000 }, err => err ? reject(err) : resolve()));
+        return fs.existsSync(outputPath) ? fs.readFileSync(outputPath, 'utf8') : '';
+    } catch (err) { console.warn('⚠️ System Tesseract OCR failed:', err.message); return null; }
+    finally { for (const file of [inputPath, outputPath]) { try { if (fs.existsSync(file)) fs.unlinkSync(file); } catch (_) {} } }
+}
+
+async function ocrWithTesseractJs(buffer) {
+    let tesseract; try { tesseract = require('tesseract.js'); } catch (_) { return null; }
+    let worker;
+    try {
+        worker = await tesseract.createWorker('eng');
+        const result = await worker.recognize(buffer);
+        return result?.data?.text || null;
+    } catch (err) { console.warn('⚠️ Tesseract.js OCR failed:', err.message); return null; }
+    finally { try { if (worker) await worker.terminate(); } catch (_) {} }
+}
+
+async function detectAvaMapNameFromImage(imageBuffer) {
+    const cacheKey = require('crypto').createHash('sha1').update(imageBuffer).digest('hex');
+    if (avaOcrCache.has(cacheKey)) return avaOcrCache.get(cacheKey);
+
+    const image = await loadImage(imageBuffer);
+    const crops = [];
+
+    // Map names are normally near the top of the AVA screenshot.
+    // Keep a full-ish crop as a fallback for alternate layouts.
+    const makeCrop = (sourceHeightRatio, scale) => {
+        const width = Math.max(1, Math.round(image.width * scale));
+        const height = Math.max(1, Math.round(Math.min(image.height * sourceHeightRatio, 1000) * scale));
+        const canvas = createCanvas(width, height);
+        const ctx = canvas.getContext('2d');
+        ctx.fillStyle = '#ffffff';
+        ctx.fillRect(0, 0, width, height);
+        ctx.drawImage(image, 0, 0, width, Math.round(image.height * scale));
+        return canvas.toBuffer('image/png');
+    };
+
+    crops.push(makeCrop(0.30, 4));
+    crops.push(makeCrop(0.45, 4));
+    crops.push(makeCrop(0.72, 3));
+    crops.push(makeCrop(1.00, 3));
+
+    const texts = [];
+    const candidates = [];
+    const addCandidate = value => {
+        const name = normalizeMapNameText(value).replace(/\s+/g, '');
+        if (!name) return;
+        if (!candidates.some(x => normalizeAvaLookupName(x) === normalizeAvaLookupName(name))) candidates.push(name);
+    };
+
+    for (const crop of crops) {
+        for (const psm of [7, 6, 11]) {
+            const text = await ocrWithSystemTesseract(crop, psm);
+            if (text) {
+                texts.push(text);
+                for (const name of extractMapNamesFromOcr(text)) addCandidate(name);
+            }
+        }
+        const jsText = await ocrWithTesseractJs(crop);
+        if (jsText) {
+            texts.push(jsText);
+            for (const name of extractMapNamesFromOcr(jsText)) addCandidate(name);
+        }
+    }
+
+    const combined = texts.join('\n');
+    for (const name of extractMapNamesFromOcr(combined)) addCandidate(name);
+    const result = {
+        mapName: candidates[0] || null,
+        candidates: candidates.slice(0, 12),
+        rawText: combined
+    };
+    avaOcrCache.set(cacheKey, result);
+    if (avaOcrCache.size > 100) avaOcrCache.delete(avaOcrCache.keys().next().value);
+    return result;
+}
+
+function extractAvaExactMarkerCount(text, labels) {
+    const normalized = String(text || '').replace(/\s+/g, ' ').trim();
+    for (const label of labels) {
+        const escaped = String(label || '').replace(/[.*+?^$\{\}()|[\]\\]/g, '\\$&');
+        const patterns = [
+            // Battle Hub renders entries like "ImageGreen chest×2". The icon/image
+            // token may touch the label, so do NOT require a non-alphanumeric
+            // boundary before the label.
+            new RegExp(escaped + '\\s*(?:×|x|X)\\s*(\\d+)\\b', 'i'),
+            new RegExp(escaped + '[^0-9]{0,12}(\\d+)\\s*(?:×|x|X)', 'i')
+        ];
+        for (const re of patterns) {
+            const match = normalized.match(re);
+            if (match) return Number(match[1]) || 0;
+        }
+    }
+    return 0;
+}
+
+function extractAlbionRoadsNumberNearText(text, labels) {
+    const normalized = String(text || '').replace(/\s+/g, ' ');
+    for (const label of labels) {
+        const escaped = label.replace(/[.*+?^$\{\}()|[\]\\]/g, '\\$&');
+        const after = normalized.match(new RegExp(escaped + '[^0-9]{0,80}(\\d+)', 'i'));
+        if (after) return Number(after[1]) || 0;
+        const before = normalized.match(new RegExp('(\\d+)[^A-Za-z0-9]{0,20}' + escaped, 'i'));
+        if (before) return Number(before[1]) || 0;
+    }
+    return 0;
+}
+
+function extractAvaCountFromPageText(text, labels) {
+    const exact = extractAvaExactMarkerCount(text, labels);
+    return exact > 0 ? exact : extractAlbionRoadsNumberNearText(text, labels);
+}
+
+function extractAlbionRoadsImage($, baseUrl, mapName) {
+    const candidates = [];
+    $('img').each((_, el) => {
+        const src = $(el).attr('src') || $(el).attr('data-src') || $(el).attr('data-lazy-src') || '';
+        const alt = $(el).attr('alt') || '';
+        if (!src) return;
+        const score = (alt.toLowerCase().includes(mapName.toLowerCase()) ? 100 : 0) + (/map|minimap|avalon|road/i.test(`${src} ${alt}`) ? 20 : 0);
+        candidates.push({ src, score });
+    });
+    candidates.sort((a, b) => b.score - a.score);
+    if (!candidates.length) return '';
+    try { return new URL(candidates[0].src, baseUrl).href; } catch (_) { return candidates[0].src; }
+}
+
+function extractBattleHubMapImage($, baseUrl, mapName) {
+    const rawCandidates = [
+        $('meta[property="og:image"]').attr('content'),
+        $('meta[name="twitter:image"]').attr('content'),
+        $('img[alt*="Roads of Avalon" i]').first().attr('src'),
+        $('img[alt*="Avalon" i]').first().attr('src')
+    ].filter(Boolean);
+    $('img').each((_, el) => {
+        const src = $(el).attr('src') || $(el).attr('data-src') || $(el).attr('data-lazy-src') || '';
+        const alt = $(el).attr('alt') || '';
+        if (src && /avalon|map/i.test(`${src} ${alt}`)) rawCandidates.push(src);
+    });
+    for (const raw of rawCandidates) {
+        try {
+            const absolute = new URL(raw, baseUrl).href;
+            // Prefer the original image behind Next.js optimization URLs.
+            const parsed = new URL(absolute);
+            const original = parsed.searchParams.get('url');
+            if (original) return new URL(original, baseUrl).href;
+            if (/\.(?:png|jpe?g|webp|gif)(?:[?#].*)?$/i.test(absolute) || /\/api\/og\/avalon/i.test(absolute)) return absolute;
+        } catch (_) {}
+    }
+    return '';
+}
+
+function normalizeAvaLookupName(value) {
+    return normalizeMapNameText(value).toLowerCase().replace(/\s+/g, '').replace(/[–—]/g, '-');
+}
+
+function levenshteinDistance(a, b) {
+    a = String(a || ''); b = String(b || '');
+    const prev = Array.from({ length: b.length + 1 }, (_, i) => i);
+    for (let i = 1; i <= a.length; i++) {
+        const cur = [i];
+        for (let j = 1; j <= b.length; j++) {
+            cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+        }
+        for (let j = 0; j <= b.length; j++) prev[j] = cur[j];
+    }
+    return prev[b.length];
+}
+
+function avaNameSimilarity(a, b) {
+    const aa = normalizeAvaLookupName(a), bb = normalizeAvaLookupName(b);
+    if (!aa || !bb) return 0;
+    if (aa === bb) return 1;
+    const maxLen = Math.max(aa.length, bb.length);
+    const distanceScore = 1 - (levenshteinDistance(aa, bb) / maxLen);
+    const [ap, as] = aa.split('-'), [bp, bs] = bb.split('-');
+    const prefixScore = ap && bp ? 1 - levenshteinDistance(ap, bp) / Math.max(ap.length, bp.length) : 0;
+    const suffixScore = as && bs ? 1 - levenshteinDistance(as, bs) / Math.max(as.length, bs.length) : 0;
+    return (distanceScore * 0.35) + (prefixScore * 0.35) + (suffixScore * 0.30);
+}
+
+// OCR มักสับสน i/l/I/u และตัวอักษรที่หน้าตาคล้ายกันในชื่อแมพ AVA.
+// แก้เฉพาะ typo ที่ยืนยันจากฐานข้อมูลจริงก่อน เพื่อไม่ให้เดาไปเป็นแมพอื่น.
+const AVA_OCR_NAME_ALIASES = new Map([
+    ['teros-aulusum', 'Teros-Auiusum'],
+    ['teros-auiusum', 'Teros-Auiusum'],
+
+    // Confirmed OCR confusions seen in real AVA screenshots.
+    ['tynos-atatios', 'Tynos-Atatlos'],
+    ['ollent-odesas', 'Qiient-Odesas'],
+    ['coues-xakrom', 'Coues-Exakrom']
+]);
+
+function normalizeAvaOcrMapName(value) {
+    const normalized = normalizeAvaLookupName(value);
+    return AVA_OCR_NAME_ALIASES.get(normalized) || normalizeMapNameText(value);
+}
+
+function parseAvaNameFromHref(href) {
+    const m = String(href || '').match(/(?:avalon-maps|maps\/avalon)\/([^/?#]+)/i);
+    return m ? decodeURIComponent(m[1]).replace(/-/g, '-').trim() : '';
+}
+
+async function requestBattleHubHtml(url, timeoutMs = 15000) {
+    const headers = {
+        'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        Referer: 'https://albionbattlehub.com/'
+    };
+    try {
+        const response = await axios.get(url, { timeout: timeoutMs, headers, validateStatus: status => status >= 200 && status < 400 });
+        return String(response.data || '');
+    } catch (axiosError) {
+        const seconds = Math.max(5, Math.ceil(timeoutMs / 1000));
+        try {
+            const output = await new Promise((resolve, reject) => {
+                execFile('curl', ['-L', '-sS', '--max-time', String(seconds), '-A', headers['User-Agent'], '-H', `Accept: ${headers.Accept}`, '-H', `Accept-Language: ${headers['Accept-Language']}`, '-H', `Referer: ${headers.Referer}`, url], { timeout: timeoutMs + 3000, maxBuffer: 8 * 1024 * 1024 }, (err, stdout) => err ? reject(err) : resolve(stdout));
+            });
+            return String(output || '');
+        } catch (curlError) {
+            throw new Error(`Battle Hub request failed (axios: ${axiosError.response?.status || axiosError.message}; curl: ${curlError.message})`);
+        }
+    }
+}
+
+async function fetchBattleHubMapIndex() {
+    if (avaCanonicalMapCache.names.length && avaCanonicalMapCache.expiresAt > Date.now()) return avaCanonicalMapCache.names;
+    const urls = [
+        'https://albionbattlehub.com/en/avalon-maps',
+        'https://albionbattlehub.com/th/avalon-maps',
+        'https://albionbattlehub.com/sitemap.xml',
+        'https://albionbattlehub.com/sitemap-0.xml'
+    ];
+
+    const collectNames = (html, baseUrl) => {
+        const $ = cheerio.load(html, { xmlMode: /sitemap/i.test(baseUrl) });
+        const maps = [];
+
+        // Canonical zone URLs from sitemap/XML.
+        $('loc').each((_, el) => {
+            const loc = $(el).text().trim();
+            const name = parseAvaNameFromHref(loc);
+            if (name && /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/.test(name)) maps.push(name);
+        });
+
+        // Canonical names from normal page links. Support hideout names with
+        // multiple hyphen-separated parts, e.g. Qiient-Qi-Odesas.
+        $('a[href]').each((_, el) => {
+            const name = parseAvaNameFromHref($(el).attr('href'));
+            if (name && /^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/.test(name)) maps.push(name);
+        });
+
+        // Next.js pages may keep canonical links inside escaped JSON rather
+        // than ordinary <a href> elements. Extract those slugs as a fallback.
+        for (const match of String(html || '').matchAll(/(?:avalon-maps|maps\/avalon)[\/\\]+([A-Za-z0-9]+(?:-[A-Za-z0-9]+)+)/gi)) {
+            const name = match[1];
+            if (/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/.test(name)) maps.push(name);
+        }
+
+        // Some page versions contain the complete 400-zone list as visible text.
+        const bodyText = $('body').text().replace(/\s+/g, ' ');
+        const bodyNameRe = /\b([A-Za-z0-9]+(?:-[A-Za-z0-9]+)+)\s*T(?:4|6|8)\b/g;
+        for (const match of bodyText.matchAll(bodyNameRe)) maps.push(match[1]);
+
+        return [...new Map(maps.map(x => [normalizeAvaLookupName(x), x])).values()];
+    };
+
+    for (const url of urls) {
+        try {
+            const html = await requestBattleHubHtml(url, 15000);
+            const unique = collectNames(html, url);
+            if (unique.length) {
+                console.log('🗺️ Battle Hub canonical Avalon map index loaded: ' + unique.length + ' names from ' + url);
+                // Prefer a complete-looking index. The known Avalon dataset has 400 zones.
+                if (unique.length >= 300 || /sitemap/i.test(url)) {
+                    avaCanonicalMapCache.names = unique;
+                    avaCanonicalMapCache.expiresAt = Date.now() + (30 * 60 * 1000);
+                    return unique;
+                }
+            }
+        } catch (err) {
+            console.warn('⚠️ Battle Hub map index request failed (' + url + '): ' + err.message);
+        }
+    }
+    return [];
+}
+
+async function getAvaMapSuggestions(ocrCandidates = [], limit = 5) {
+    const inputs = [...new Set(ocrCandidates.filter(Boolean).map(value => normalizeAvaOcrMapName(value).replace(/\s+/g, '')).filter(Boolean))];
+    const canonicalNames = await fetchBattleHubMapIndex();
+    if (!canonicalNames.length) return inputs.slice(0, limit).map(name => ({ name, score: 0.99 }));
+    return canonicalNames.map(name => ({
+        name,
+        score: inputs.reduce((best, input) => Math.max(best, avaNameSimilarity(input, name)), 0)
+    })).sort((a, b) => b.score - a.score || a.name.localeCompare(b.name)).slice(0, limit);
+}
+
+function avaSelectionComponents(guildId, token, suggestions) {
+    const select = new StringSelectMenuBuilder()
+        .setCustomId('ava_select:' + guildId + ':' + token)
+        .setPlaceholder('เลือกชื่อแมพที่ตรงกับรูป')
+        .setMinValues(1)
+        .setMaxValues(1)
+        .addOptions(...suggestions.map((item, index) => ({
+            label: String(item.name).slice(0, 100),
+            value: String(item.name).slice(0, 100),
+            description: ('ความใกล้เคียง ' + Math.round(Number(item.score || 0) * 100) + '% • ตัวเลือกที่ ' + (index + 1)).slice(0, 100)
+        })));
+    return [
+        new ActionRowBuilder().addComponents(select),
+        new ActionRowBuilder().addComponents(
+            new ButtonBuilder().setCustomId('ava_retry:' + guildId + ':' + token).setLabel('🔄 อ่านรูปใหม่').setStyle(ButtonStyle.Secondary),
+            new ButtonBuilder().setCustomId('ava_cancel:' + guildId + ':' + token).setLabel('❌ ยกเลิก').setStyle(ButtonStyle.Danger)
+        )
+    ];
+}
+
+async function resolveAvaMapName(input) {
+    const normalizedInput = normalizeAvaOcrMapName(input);
+    if (!normalizedInput) return { name: '', score: 0, exact: false };
+
+    // First try the exact name against Battle Hub. This is important for OCR results
+    // such as "Sasitos-Umogaum", which is a valid T4 Avalon map.
+    const directSlug = normalizedInput.toLowerCase().replace(/\s+/g, '-');
+    const directUrls = [
+        `https://albionbattlehub.com/en/avalon-maps/${encodeURIComponent(directSlug)}`,
+        `https://albionbattlehub.com/th/avalon-maps/${encodeURIComponent(directSlug)}`
+    ];
+    for (const url of directUrls) {
+        try {
+            const $ = cheerio.load(await requestBattleHubHtml(url, 10000));
+            const h1 = $('h1').first().text().trim();
+            if (h1 && normalizeAvaLookupName(h1) === normalizeAvaLookupName(normalizedInput)) {
+                return { name: h1, score: 1, exact: true };
+            }
+        } catch (_) {}
+    }
+
+    const candidates = await fetchBattleHubMapIndex();
+    if (!candidates.length) return { name: normalizedInput, score: 0, exact: false };
+    const ranked = candidates.map(name => ({ name, score: avaNameSimilarity(normalizedInput, name) }))
+        .sort((a, b) => b.score - a.score);
+    const best = ranked[0];
+    // OCR can be off by 1-2 characters. Require a reasonably strong fuzzy match,
+    // but do not reject a clear one-character OCR typo such as Aulusum -> Auiusum.
+    if (!best || best.score < 0.62) return { name: normalizedInput, score: best?.score || 0, exact: false };
+    return { name: best.name, score: best.score, exact: false };
+}
+
+function parseBattleHubAvaData(html, url, requestedName) {
+    const $ = cheerio.load(html);
+    const bodyText = $('body').text().replace(/\s+/g, ' ').trim();
+    const h1 = $('h1').first().text().trim() || requestedName;
+    const tierMatch = bodyText.match(/\bT\s*([468])\b/i);
+    const layoutMatch = bodyText.match(/Road Layout\s+([A-Z])/i) || bodyText.match(/เส้นทางรูปแบบ\s+([A-Z])/i);
+    const getCount = labels => extractAvaCountFromPageText(bodyText, labels);
+    const counts = {
+        'Gold chest': getCount(['Gold chest', 'Gold Chest', 'หีบทอง', 'Peti emas', 'Cofre dorado', 'صندوق ذهبي']),
+        'Blue chest': getCount(['Blue chest', 'Blue Chest', 'หีบน้ำเงิน', 'หีบฟ้า', 'Peti biru', 'Cofre azul', 'صندوق أزرق']),
+        'Green chest': getCount(['Green chest', 'Green Chest', 'หีบเขียว', 'Peti hijau', 'Cofre verde', 'صندوق أخضر']),
+        'Group dungeon': getCount(['Group dungeon', 'ดันเจี้ยนกลุ่ม', 'ดันเจี้ยนกลุ่ม×', 'Dungeon Group']),
+        'Solo dungeon': getCount(['Solo dungeon', 'ดันเจี้ยนเดี่ยว', 'Dungeon solo']),
+        Wood: getCount(['Wood', 'ไม้', 'Kayu', 'Madera']),
+        Ore: getCount(['Ore', 'แร่', 'Bijih', 'Minério', 'خام']),
+        Stone: getCount(['Stone', 'หิน', 'Batu', 'Piedra', 'حجر']),
+        Hide: getCount(['Hide', 'หนัง', 'Kulit', 'Pelego', 'Cuero']),
+        Fiber: getCount(['Fiber', 'ไฟเบอร์', 'เส้นใย', 'Serat', 'Fibra'])
+    };
+    const mapImage = extractBattleHubMapImage($, url, h1) || extractAlbionRoadsImage($, url, h1);
+    let connection = '';
+    const tunnel = html.match(/TUNNEL(?:_BLACK)?_(?:LOW|MEDIUM|HIGH|DEEP(?:_RAID)?|HIDEOUT(?:_DEEP)?)/i);
+    if (tunnel) connection = tunnel[0].toUpperCase();
+    return {
+        name: h1,
+        tier: tierMatch ? `T${tierMatch[1]}` : 'ไม่พบข้อมูล',
+        layout: layoutMatch ? layoutMatch[1] : '',
+        counts,
+        mapImage,
+        sourceUrl: url,
+        source: 'Albion Battle Hub',
+        connection
+    };
+}
+
+async function fetchBattleHubMapData(lookupName) {
+    // Always normalize OCR aliases before building the Battle Hub URL.
+    // Example: OCR "Teros-Aulusum" -> real zone "Teros-Auiusum".
+    const normalizedInput = normalizeAvaOcrMapName(lookupName);
+    const resolved = await resolveAvaMapName(normalizedInput);
+    const resolvedName = resolved.name || normalizedInput;
+    const slug = resolvedName.toLowerCase().replace(/\s+/g, '-');
+    const urls = [
+        `https://albionbattlehub.com/en/avalon-maps/${encodeURIComponent(slug)}`,
+        `https://albionbattlehub.com/th/avalon-maps/${encodeURIComponent(slug)}`
+    ];
+    let lastError = null;
+    for (const url of urls) {
+        try {
+            const data = parseBattleHubAvaData(await requestBattleHubHtml(url), url, resolvedName);
+            if (data.name && data.tier !== 'ไม่พบข้อมูล' || Object.values(data.counts).some(Boolean)) {
+                return { ...data, requestedName: lookupName, resolvedScore: resolved.score };
+            }
+        } catch (err) { lastError = err; }
+    }
+    throw lastError || new Error(`ไม่พบข้อมูล ${lookupName}`);
+}
+
+async function fetchAlbionOnlineBuildsAvaMapData(lookupName) {
+    const correctedName = normalizeAvaOcrMapName(lookupName);
+    const slug = normalizeMapNameText(correctedName).toLowerCase().replace(/\s+/g, '-');
+    const url = 'https://www.albiononlinebuilds.com/maps/avalon/' + encodeURIComponent(slug);
+
+    let html = '';
+    let lastError = null;
+    try {
+        html = String(await cloudscraper.get({
+            uri: url, timeout: 25000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36',
+                Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                Referer: 'https://www.albiononlinebuilds.com/maps/avalon'
+            }
+        }));
+    } catch (err) { lastError = err; }
+
+    if (!html) {
+        try {
+            const response = await axios.get(url, {
+                timeout: 25000,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36',
+                    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    Referer: 'https://www.albiononlinebuilds.com/maps/avalon'
+                },
+                validateStatus: status => status >= 200 && status < 400
+            });
+            html = String(response.data || '');
+        } catch (err) { lastError = err; }
+    }
+
+    if (!html) throw new Error('Albion Online Builds ไม่สามารถเปิดแมพ ' + correctedName + (lastError?.message ? ' (' + lastError.message + ')' : ''));
+
+    const $ = cheerio.load(html);
+    const bodyText = $('body').text().replace(/\s+/g, ' ').trim();
+    const sourceText = [bodyText, $('body').html() || '', ...$('script').map((_, el) => $(el).html() || '').get()].join(' ');
+    const title = $('h1').first().text().replace(/\s+/g, ' ').trim() || $('title').first().text().replace(/\s+/g, ' ').trim();
+    const nameMatch = title.match(/([A-Za-z0-9]{3,24}-[A-Za-z0-9]{3,24})/);
+    const name = nameMatch ? nameMatch[1] : correctedName;
+    const tierMatch = (title + ' ' + bodyText).match(/\bT\s*([468])\b/i);
+
+    const escapeRe = value => String(value).replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+    const findCount = labels => {
+        for (const label of labels) {
+            const escaped = escapeRe(label);
+            const patterns = [
+                new RegExp('(?:Image\\s*:\\s*)?' + escaped + '\\s+' + escaped + '\\s*([0-9]{1,3})\\b', 'i'),
+                new RegExp('(?:Image\\s*:\\s*)?' + escaped + '\\s*[:x×-]?\\s*([0-9]{1,3})\\b', 'i'),
+                new RegExp('([0-9]{1,3})\\s+(?:Image\\s*:\\s*)?' + escaped + '\\b', 'i')
+            ];
+            for (const re of patterns) {
+                const m = bodyText.match(re);
+                if (m) return { value: Number(m[1]) || 0, found: true };
+            }
+        }
+        let result = { value: 0, found: false };
+        $('body *').each((_, el) => {
+            if (result.found) return;
+            const text = $(el).text().replace(/\s+/g, ' ').trim();
+            if (!text || text.length > 180) return;
+            for (const label of labels) {
+                const re = new RegExp('(?:Image\\s*:\\s*)?' + escapeRe(label) + '(?:\\s+' + escapeRe(label) + ')?\\s*([0-9]{1,3})\\b', 'i');
+                const m = text.match(re);
+                if (m) { result = { value: Number(m[1]) || 0, found: true }; return; }
+            }
+        });
+        return result;
+    };
+
+    const fields = {
+        'Gold chest': findCount(['Gold Chest']),
+        'Blue chest': findCount(['Blue Chest']),
+        'Green chest': findCount(['Green Chest']),
+        'Group dungeon': findCount(['Group Dungeon', 'Group dungeon', 'Avalonian Dungeon']),
+        'Solo dungeon': findCount(['Solo Dungeon', 'Solo dungeon']),
+        Wood: findCount(['Wood']),
+        Ore: findCount(['Ore']),
+        Stone: findCount(['Rock', 'Stone']),
+        Hide: findCount(['Hide']),
+        Fiber: findCount(['Fiber'])
+    };
+    const counts = Object.fromEntries(Object.entries(fields).map(([key, info]) => [key, Number(info.value) || 0]));
+    const countMeta = Object.fromEntries(Object.entries(fields).map(([key, info]) => [key, Boolean(info.found)]));
+
+    const imageCandidates = [];
+    const pushImage = value => { if (value) { const raw = String(value).trim().replace(/^['"]|['"]$/g, ''); if (raw) imageCandidates.push(raw); } };
+    $('meta[property="og:image"],meta[name="twitter:image"],meta[itemprop="image"]').each((_, el) => pushImage($(el).attr('content')));
+    $('img').each((_, el) => {
+        pushImage($(el).attr('src'));
+        pushImage($(el).attr('data-src'));
+        pushImage($(el).attr('data-lazy-src'));
+        const srcset = $(el).attr('srcset') || $(el).attr('data-srcset');
+        if (srcset) { const parts = srcset.split(',').map(x => x.trim()).filter(Boolean); if (parts.length) pushImage(parts[parts.length - 1].split(/\s+/)[0]); }
+    });
+    $('[style*="background-image"]').each((_, el) => {
+        const style = $(el).attr('style') || '';
+        const m = style.match(/url\((['"]?)(.*?)\1\)/i);
+        if (m) pushImage(m[2]);
+    });
+    const imageUrlRe = /https?:[^"'\s<>]+?\.(?:png|jpe?g|webp|gif)(?:\?[^"'\s<>]*)?/ig;
+    for (const m of sourceText.matchAll(imageUrlRe)) pushImage(m[0]);
+
+    let mapImage = '';
+    for (const raw of [...new Set(imageCandidates)]) {
+        try {
+            const absolute = new URL(raw, url).href;
+            if (/\.(?:png|jpe?g|webp|gif)(?:[?#].*)?$/i.test(absolute)) { mapImage = absolute; break; }
+        } catch (_) {}
+    }
+
+    if (!Object.values(counts).some(Boolean)) throw new Error('Albion Online Builds พบหน้า ' + correctedName + ' แต่ไม่พบข้อมูล POI');
+    return {
+        name, tier: tierMatch ? 'T' + tierMatch[1] : 'ไม่พบข้อมูล', layout: '', connection: '',
+        counts, countMeta, mapImage, sourceUrl: url, source: 'Albion Online Builds'
+    };
+}
+
+async function fetchAvalonTrackerMapData(lookupName) {
+    const correctedName = normalizeAvaOcrMapName(lookupName);
+    const slug = normalizeMapNameText(correctedName).toLowerCase().replace(/\s+/g, '-');
+    const url = 'https://avalonroads-97617.web.app/mapas/' + encodeURIComponent(slug) + '.html';
+
+    const response = await axios.get(url, {
+        timeout: 25000,
+        headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36',
+            Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            Referer: 'https://avalonroads-97617.web.app/'
+        },
+        validateStatus: status => status >= 200 && status < 400
+    });
+
+    const html = String(response.data || '');
+    const $ = cheerio.load(html);
+    const bodyText = $('body').text().replace(/\s+/g, ' ').trim();
+
+    // Avalon Roads has multiple page layouts. Values may be visible text,
+    // data-* attributes, or JavaScript state, so parse all representations.
+    const sourceText = [
+        bodyText,
+        $('body').html() || '',
+        ...$('script').map((_, el) => $(el).html() || '').get()
+    ].join(' ');
+
+    const escapeRe = value => String(value).replace(/[-\/\\^$*+?.()|[\]{}]/g, '\\$&');
+
+    const findCount = labels => {
+        const labelList = labels.map(String);
+
+        // Structured values: "ore":67, ore:67, data-ore="67", etc.
+        for (const label of labelList) {
+            const key = label.toLowerCase().replace(/[^a-z0-9]+/g, '');
+            if (!key) continue;
+            const patterns = [
+                new RegExp('["]' + escapeRe(label) + '["]\\s*[:=]\\s*["]?([0-9]{1,5})\\b', 'i'),
+                new RegExp('\\bdata-(?:count-)?' + escapeRe(key) + '\\s*=\\s*["]?([0-9]{1,5})\\b', 'i'),
+                new RegExp('\\b' + escapeRe(label) + '\\s*[:=]\\s*([0-9]{1,5})\\b', 'i')
+            ];
+            for (const re of patterns) {
+                const m = sourceText.match(re);
+                if (m) return { value: Number(m[1]) || 0, found: true };
+            }
+        }
+
+        // Human-readable forms: Ore 67, 67 Ore, Ore x 67, 67 ImageOre.
+        for (const label of labelList) {
+            const escaped = escapeRe(label);
+            const patterns = [
+                new RegExp('\\b' + escaped + '\\s*(?:×|x|X|:|-)?\\s*([0-9]{1,5})\\b', 'i'),
+                new RegExp('\\b([0-9]{1,5})\\s*(?:×|x|X|:|-)?\\s*' + escaped + '\\b', 'i'),
+                new RegExp('([0-9]{1,5})\\s*Image\\s*' + escaped + '\\b', 'i'),
+                new RegExp('Image\\s*' + escaped + '\\s*(?:×|x|X|:|-)?\\s*([0-9]{1,5})\\b', 'i')
+            ];
+            for (const re of patterns) {
+                const m = sourceText.match(re);
+                if (m) return { value: Number(m[1]) || 0, found: true };
+            }
+        }
+
+        // DOM-local parsing prevents unrelated page numbers from being used.
+        let result = { value: 0, found: false };
+        $('body *').each((_, el) => {
+            if (result.found) return;
+            const text = $(el).text().replace(/\s+/g, ' ').trim();
+            if (!text || text.length > 220) return;
+
+            for (const label of labelList) {
+                const hasLabel = new RegExp('\\b' + escapeRe(label) + '\\b', 'i').test(text) ||
+                    new RegExp('Image\\s*' + escapeRe(label), 'i').test(text);
+                if (!hasLabel) continue;
+
+                const patterns = [
+                    new RegExp('\\b([0-9]{1,5})\\s*(?:×|x|X|:|-)?\\s*' + escapeRe(label) + '\\b', 'i'),
+                    new RegExp('\\b' + escapeRe(label) + '\\s*(?:×|x|X|:|-)?\\s*([0-9]{1,5})\\b', 'i'),
+                    new RegExp('([0-9]{1,5})\\s*Image\\s*' + escapeRe(label) + '\\b', 'i'),
+                    new RegExp('Image\\s*' + escapeRe(label) + '\\s*(?:×|x|X|:|-)?\\s*([0-9]{1,5})\\b', 'i')
+                ];
+
+                for (const re of patterns) {
+                    const m = text.match(re);
+                    if (m) {
+                        result = { value: Number(m[1]) || 0, found: true };
+                        return;
+                    }
+                }
+
+                const nearby = text.match(/\b([0-9]{1,5})\b/g) || [];
+                if (nearby.length === 1) {
+                    result = { value: Number(nearby[0]) || 0, found: true };
+                    return;
+                }
+            }
+        });
+
+        return result;
+    };
+
+    const fields = {
+        'Gold chest': findCount(['Gold Chest', 'Gold chest', 'gold-chest', 'goldChest']),
+        'Blue chest': findCount(['Blue Chest', 'Blue chest', 'blue-chest', 'blueChest']),
+        'Green chest': findCount(['Green Chest', 'Green chest', 'green-chest', 'greenChest']),
+        'Group dungeon': findCount(['Avalonian Dungeon', 'Group dungeon', 'Group Dungeon', 'dg-group', 'dgGroup']),
+        'Solo dungeon': findCount(['Solo dungeon', 'Solo Dungeon', 'dg-solo', 'dgSolo']),
+        Wood: findCount(['Wood', 'wood', 'LOGS']),
+        Ore: findCount(['Ore', 'ore', 'ORE']),
+        Stone: findCount(['Stone', 'stone', 'ROCK']),
+        Hide: findCount(['Hide', 'hide', 'HIDE']),
+        Fiber: findCount(['Fiber', 'fiber', 'COTTON'])
+    };
+
+    const counts = Object.fromEntries(Object.entries(fields).map(([key, info]) => [key, Number(info.value) || 0]));
+    const countMeta = Object.fromEntries(Object.entries(fields).map(([key, info]) => [key, Boolean(info.found)]));
+
+    const tier = bodyText.match(/\bT\s*([468])\b/i);
+    const title = $('h1').first().text().trim() || $('title').first().text().trim();
+    const nameMatch = title.match(/([A-Za-z0-9]{3,18}-[A-Za-z0-9]{3,18})/);
+    const name = nameMatch ? nameMatch[1] : correctedName;
+
+    // Prefer the actual map image from the tracker page.
+    const imageCandidates = [];
+    const pushImage = value => {
+        if (!value) return;
+        const raw = String(value).trim().replace(/^['"]|['"]$/g, '');
+        if (raw) imageCandidates.push(raw);
+    };
+
+    $('meta[property="og:image"],meta[name="twitter:image"],meta[itemprop="image"]').each((_, el) => pushImage($(el).attr('content')));
+    $('img').each((_, el) => {
+        pushImage($(el).attr('src'));
+        pushImage($(el).attr('data-src'));
+        pushImage($(el).attr('data-lazy-src'));
+        const ss = $(el).attr('srcset') || $(el).attr('data-srcset');
+        if (ss) pushImage(ss.split(',').pop().trim().split(/\s+/)[0]);
+    });
+    $('[style*="background-image"]').each((_, el) => {
+        const style = $(el).attr('style') || '';
+        const m = style.match(/url\((['"]?)(.*?)\1\)/i);
+        if (m) pushImage(m[2]);
+    });
+    $('a[href*="img_webp"],a[href$=".png"],a[href$=".jpg"],a[href$=".jpeg"],a[href$=".webp"],a[href$=".gif"]').each((_, el) => pushImage($(el).attr('href')));
+
+    const imageUrlRe = /https?:[^"'\s<>]+?\.(?:png|jpe?g|webp|gif)(?:\?[^"'\s<>]*)?/ig;
+    for (const m of sourceText.matchAll(imageUrlRe)) pushImage(m[0]);
+
+    let mapImage = '';
+    for (const raw of [...new Set(imageCandidates)]) {
+        try {
+            const absolute = new URL(raw, url).href;
+            if (/\.(?:png|jpe?g|webp|gif)(?:[?#].*)?$/i.test(absolute) || /img_webp/i.test(absolute)) {
+                mapImage = absolute;
+                break;
+            }
+        } catch (_) {}
+    }
+
+    const tunnel = sourceText.match(/TUNNEL(?:_BLACK)?_[A-Z_]+/i);
+    return {
+        name,
+        tier: tier ? 'T' + tier[1] : 'ไม่พบข้อมูล',
+        layout: '',
+        connection: tunnel ? tunnel[0].toUpperCase() : '',
+        counts,
+        countMeta,
+        mapImage,
+        sourceUrl: url,
+        source: 'Avalon Roads Tracker'
+    };
+}
+
+async function fetchAlbionRoadsMapData(lookupName) {
+    const resolved = await resolveAvaMapName(lookupName);
+    const queryName = resolved.name || lookupName;
+    const queryUrl = `${ALBION_ROADS_SOURCE}?search=${encodeURIComponent(queryName)}`;
+    let lastError = null;
+    const urls = [queryUrl, ALBION_ROADS_SOURCE];
+    for (const url of urls) {
+        try {
+            const response = await cloudscraper.get({
+                uri: url,
+                timeout: 15000,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36',
+                    Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    Referer: 'https://albionroads.com/'
+                }
+            });
+            const html = String(response || '');
+            const $ = cheerio.load(html);
+            const bodyText = $('body').text().replace(/\s+/g, ' ').trim();
+            const foundName = bodyText.toLowerCase().includes(queryName.toLowerCase());
+            const tierMatch = bodyText.match(/\bT([468])\b/i);
+            const counts = {
+                'Gold chest': extractAvaCountFromPageText(bodyText, ['Baú Dourado', 'Gold chest', 'Gold Chest']),
+                'Blue chest': extractAvaCountFromPageText(bodyText, ['Baú Azul', 'Blue chest', 'Blue Chest']),
+                'Green chest': extractAvaCountFromPageText(bodyText, ['Baú Verde', 'Green chest', 'Green Chest']),
+                'Group dungeon': extractAvaCountFromPageText(bodyText, ['Masmorra de Grupo', 'Group dungeon']),
+                'Solo dungeon': extractAvaCountFromPageText(bodyText, ['Masmorra Solo', 'Solo dungeon']),
+                Wood: extractAvaCountFromPageText(bodyText, ['Madeira', 'Wood']), Ore: extractAvaCountFromPageText(bodyText, ['Minério', 'Ore']),
+                Stone: extractAvaCountFromPageText(bodyText, ['Pedra', 'Stone']), Hide: extractAvaCountFromPageText(bodyText, ['Pelego / Couro', 'Couro', 'Hide']), Fiber: extractAvaCountFromPageText(bodyText, ['Algodão / Fibra', 'Fibra', 'Fiber'])
+            };
+            const mapImage = extractAlbionRoadsImage($, url, queryName);
+            if (!foundName && !Object.values(counts).some(Boolean)) continue;
+            return { name: queryName, tier: tierMatch ? `T${tierMatch[1]}` : 'ไม่พบข้อมูล', counts, mapImage, sourceUrl: queryUrl, source: 'albionroads.com', resolvedScore: resolved.score };
+        } catch (err) { lastError = err; }
+    }
+    throw new Error(`Albion Roads ไม่สามารถตอบข้อมูลได้${lastError ? ` (${lastError.message})` : ''}`);
+}
+
+async function fetchAvaMapDataWithFallback(mapName, ocrCandidates = []) {
+    const errors = [];
+
+    // Resolve OCR text against canonical Avalon map names before querying sources.
+    let lookupName = mapName;
+    try {
+        const inputs = [mapName, ...ocrCandidates].filter(Boolean);
+        const ranked = [];
+        for (const input of inputs) {
+            const resolved = await resolveAvaMapName(input);
+            if (resolved?.name) ranked.push({ input, ...resolved });
+        }
+        ranked.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+        if (ranked[0] && Number(ranked[0].score || 0) >= 0.62) {
+            lookupName = ranked[0].name;
+            console.log('🗺️ AVA fuzzy map match: OCR=' + mapName +
+                ' candidates=' + JSON.stringify(ocrCandidates.slice(0, 8)) +
+                ' -> canonical=' + lookupName +
+                ' score=' + Number(ranked[0].score || 0).toFixed(3));
+        }
+    } catch (err) {
+        console.warn('⚠️ AVA fuzzy name resolver failed: ' + err.message);
+    }
+
+    // Primary: Avalon Roads Tracker — dedicated Roads of Avalon map database.
+    try {
+        const primary = normalizeAvaDataTotals(await fetchAvalonTrackerMapData(lookupName));
+        if (avaDataPointCount(primary) > 0) {
+            // The tracker can provide POI counts but omit the actual map image.
+            // Enrich the result from Battle Hub so the generated Discord card
+            // always has a usable map image when the page exists.
+            if (!primary.mapImage) {
+                try {
+                    const imageData = await fetchBattleHubMapData(lookupName);
+                    if (imageData?.mapImage) primary.mapImage = imageData.mapImage;
+                    if ((!primary.name || primary.name === lookupName) && imageData?.name) primary.name = imageData.name;
+                } catch (imageErr) {
+                    console.warn('⚠️ AVA map image enrichment failed: ' + imageErr.message);
+                }
+            }
+            return primary;
+        }
+        errors.push('Avalon Roads Tracker: พบหน้าแต่ไม่มีตัวเลข POI');
+    } catch (err) {
+        errors.push('Avalon Roads Tracker: ' + err.message);
+        console.warn('⚠️ AVA Avalon Roads Tracker unavailable for ' + mapName + ': ' + err.message);
+    }
+
+    // Fallbacks: other static Avalon map databases.
+    const fallbackSources = [
+        ['Albion Battle Hub', fetchBattleHubMapData],
+        ['Albion Online Builds', fetchAlbionOnlineBuildsAvaMapData],
+        ['Albion Roads', fetchAlbionRoadsMapData]
+    ];
+    for (const [sourceName, fetcher] of fallbackSources) {
+        try {
+            const data = normalizeAvaDataTotals(await fetcher(lookupName));
+            if (avaDataPointCount(data) > 0) return data;
+            errors.push(sourceName + ': พบหน้าแต่ไม่มีตัวเลข');
+        } catch (err) {
+            errors.push(sourceName + ': ' + err.message);
+            console.warn('⚠️ AVA ' + sourceName + ' fallback failed for ' + mapName + ': ' + err.message);
+        }
+    }
+
+    throw new Error('ไม่พบข้อมูล AVA สำหรับ "' + mapName + '"\n' + errors.join('\n'));
+}
+async function downloadImageForCanvas(url) {
+    if (!url) return null;
+    try { const response = await axios.get(url, { responseType: 'arraybuffer', timeout: 12000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'image/*,*/*;q=0.8' }, validateStatus: status => status >= 200 && status < 300 }); return await loadImage(Buffer.from(response.data)); } catch (_) { return null; }
+}
+
+const AVA_CARD_ICON_FILES = {
+    Gold: path.join(__dirname, 'ava-icons', 'Gold.png'),
+    Blue: path.join(__dirname, 'ava-icons', 'Blue.png'),
+    Green: path.join(__dirname, 'ava-icons', 'Green.png'),
+    GroupDungeon: path.join(__dirname, 'ava-icons', 'GroupDungeon.png'),
+    Fiber: path.join(__dirname, 'ava-icons', 'Fiber.png'),
+    Hide: path.join(__dirname, 'ava-icons', 'Hide.png'),
+    Ore: path.join(__dirname, 'ava-icons', 'Ore.png'),
+    Stone: path.join(__dirname, 'ava-icons', 'S.png'),
+    Wood: path.join(__dirname, 'ava-icons', 'Wood.png')
+};
+const avaCardIconCache = new Map();
+
+async function loadAvaCardIcon(name) {
+    if (avaCardIconCache.has(name)) return avaCardIconCache.get(name);
+    const file = AVA_CARD_ICON_FILES[name];
+    if (!file || !fs.existsSync(file)) return null;
+    try {
+        const image = await loadImage(file);
+        avaCardIconCache.set(name, image);
+        return image;
+    } catch (_) { return null; }
+}
+
+function drawAvaStatBox(ctx, x, y, w, title, rows, accent) {
+    drawRoundRect(ctx, x, y, w, 185, 18); ctx.fillStyle = '#11151d'; ctx.fill(); ctx.strokeStyle = accent; ctx.lineWidth = 2; ctx.stroke();
+    ctx.fillStyle = accent; ctx.font = '900 22px Arial, sans-serif'; ctx.fillText(title, x + 20, y + 40);
+    rows.forEach((row, rowIndex) => {
+        row.forEach((item, colIndex) => {
+            const itemX = x + 18 + colIndex * 250;
+            const itemY = y + 58 + rowIndex * 40;
+            if (item.icon) ctx.drawImage(item.icon, itemX, itemY, 30, 30);
+            ctx.fillStyle = '#f1f5f9'; ctx.font = '700 22px Arial, sans-serif';
+            ctx.fillText(`${item.label}  ${item.value}`, itemX + 38, itemY + 24);
+        });
+    });
+}
+
+async function generateAvaRoadsCard(data, ocrText = '') {
+    // AVA report is map-only: no stats/header/footer. Render the source map
+    // as large as possible so the map itself uses the entire report.
+    const width = 2400, height = 1600;
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext('2d');
+
+    ctx.fillStyle = '#05070b';
+    ctx.fillRect(0, 0, width, height);
+
+    const mapImage = await downloadImageForCanvas(data.mapImage);
+    if (!mapImage) {
+        ctx.fillStyle = '#f1f5f9';
+        ctx.font = '900 52px Arial, sans-serif';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText('MAP IMAGE NOT AVAILABLE', width / 2, height / 2);
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'alphabetic';
+    } else {
+        const scale = Math.min(width / mapImage.width, height / mapImage.height);
+        const dw = Math.round(mapImage.width * scale);
+        const dh = Math.round(mapImage.height * scale);
+        const dx = Math.round((width - dw) / 2);
+        const dy = Math.round((height - dh) / 2);
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(mapImage, dx, dy, dw, dh);
+    }
+
+    return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: `ava-map-${data.name}.png` });
+}
+
+async function processAvaImageMessage(message, fallbackAttachments = []) {
+    const messageGuildId = message?.guildId || message?.guild?.id;
+    if (!messageGuildId) return false;
+    const messageChannelId = message.channelId || message.channel?.id;
+    if (!messageChannelId) return false;
+
+    // AVA message handling must be isolated by guild, but must not depend on
+    // AsyncLocalStorage. messageCreate can run outside the interaction scope.
+    const guildConfig = getGuildConfig(String(messageGuildId));
+    const configured = Array.isArray(guildConfig?.avaAuto) ? guildConfig.avaAuto : [];
+    const channelIds = new Set([
+        String(messageChannelId),
+        message.channel?.id ? String(message.channel.id) : null,
+        message.channel?.parentId ? String(message.channel.parentId) : null
+    ].filter(Boolean));
+
+    const config = configured.find(x =>
+        x?.enabled !== false &&
+        String(x?.guildId || messageGuildId) === String(messageGuildId) &&
+        channelIds.has(String(x?.channelId || ''))
+    );
+
+    if (!config) return false;
+
+    console.log('🗺️ AVA message received in configured channel: guild=' + messageGuildId +
+        ' channel=' + messageChannelId + ' message=' + message.id);
+
+    // IMPORTANT: Message Content Intent must also be enabled in Discord Developer Portal.
+    // The REST fetch below is a second line of defense when Gateway attachment metadata
+    // is incomplete or missing.
+    let sourceMessage = message;
+    const getAttachmentList = source => {
+        const value = source?.attachments;
+        if (!value) return [];
+        if (typeof value.values === 'function') return [...value.values()];
+        if (typeof value.array === 'function') return value.array();
+        if (Array.isArray(value)) return value;
+        if (typeof value === 'object') return Object.values(value);
+        return [];
+    };
+    let attachments = getAttachmentList(message);
+
+    if (!attachments.length && Array.isArray(fallbackAttachments) && fallbackAttachments.length) {
+        attachments = fallbackAttachments;
+        console.log('🗺️ AVA using raw MESSAGE_CREATE attachments: ' + attachments.length);
+    }
+
+    if (!attachments.length && typeof message.fetch === 'function') {
+        try {
+            // Force a REST fetch. Some gateway payloads contain an empty
+            // attachment collection while the REST representation is complete.
+            sourceMessage = await message.fetch(true);
+            attachments = getAttachmentList(sourceMessage);
+            console.log('🗺️ AVA message refetched: guild=' + messageGuildId +
+                ' channel=' + messageChannelId + ' attachments=' + attachments.length);
+        } catch (err) {
+            console.warn('⚠️ AVA message refetch failed: ' + err.message);
+        }
+    }
+
+    const isImageAttachment = a => {
+        const name = String(a?.name || '');
+        const url = String(a?.url || '');
+        const proxyUrl = String(a?.proxyURL || a?.proxyUrl || '');
+        const type = String(a?.contentType || a?.content_type || '');
+        return /^image\//i.test(type) ||
+            /\.(?:png|jpe?g|webp|gif)(?:[?#]|$)/i.test(name) ||
+            /\.(?:png|jpe?g|webp|gif)(?:[?#]|$)/i.test(url) ||
+            /\.(?:png|jpe?g|webp|gif)(?:[?#]|$)/i.test(proxyUrl);
+    };
+
+    let imageAttachments = attachments.filter(isImageAttachment);
+
+    // Some Discord CDN attachments may have missing MIME/extension metadata.
+    // Probe every attachment URL until one can actually be decoded as an image.
+    if (!imageAttachments.length) {
+        for (const candidate of attachments) {
+            if (!candidate?.url) continue;
+            try {
+                const probe = await axios.get(candidate.url, {
+                    responseType: 'arraybuffer',
+                    timeout: 15000,
+                    headers: {
+                        'User-Agent': 'Mozilla/5.0',
+                        Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
+                    },
+                    validateStatus: status => status >= 200 && status < 300
+                });
+                await loadImage(Buffer.from(probe.data));
+                imageAttachments = [candidate];
+                console.log('🗺️ AVA decoded extensionless attachment: guild=' + messageGuildId +
+                    ' channel=' + messageChannelId);
+                break;
+            } catch (_) {}
+        }
+    }
+
+    // Also support images represented as Discord embeds/link previews.
+    if (!imageAttachments.length) {
+        const embedImage = (sourceMessage.embeds || []).map(e => e?.image?.url || e?.thumbnail?.url).find(Boolean);
+        if (embedImage) {
+            imageAttachments = [{ url: embedImage, name: 'discord-embed-image.png', contentType: 'image/png' }];
+            console.log('🗺️ AVA detected image from embed: guild=' + messageGuildId +
+                ' channel=' + messageChannelId);
+        }
+    }
+
+    if (!imageAttachments.length) {
+        console.log('ℹ️ AVA ignored message ' + message.id +
+            ': configured channel but no readable image attachment. ' +
+            'gatewayAttachments=' + (message.attachments?.size || 0) +
+            ' fetchedAttachments=' + attachments.length);
+        return false;
+    }
+
+    console.log('🗺️ AVA image detected: guild=' + messageGuildId +
+        ' channel=' + messageChannelId + ' file=' + (imageAttachments[0].name || 'unknown'));
+
+    if (avaProcessedMessages.has(message.id) || avaProcessingMessages.has(String(message.id))) return true;
+    avaProcessingMessages.add(String(message.id));
+
+    let status;
+    try {
+        status = await message.reply('🗺️ กำลังอ่านชื่อแมพ AVA จากรูป...');
+    } catch (err) {
+        console.error('❌ AVA reply failed:', err.message);
+        return true;
+    }
+
+    avaProcessedMessages.add(message.id);
+    if (avaProcessedMessages.size > 500) {
+        avaProcessedMessages.delete(avaProcessedMessages.values().next().value);
+    }
+    saveData();
+
+    try {
+        const imageResponse = await axios.get(imageAttachments[0].url, {
+            responseType: 'arraybuffer',
+            timeout: 30000,
+            headers: {
+                'User-Agent': 'Mozilla/5.0',
+                Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
+            },
+            validateStatus: status => status >= 200 && status < 300
+        });
+
+        const imageBuffer = Buffer.from(imageResponse.data);
+        const ocr = await detectAvaMapNameFromImage(imageBuffer);
+        console.log('🗺️ AVA OCR result: ' + JSON.stringify({
+            mapName: ocr?.mapName || '',
+            candidates: ocr?.candidates || [],
+            rawText: String(ocr?.rawText || '').slice(0, 300)
+        }));
+
+        if (!ocr.mapName) {
+            throw new Error('อ่านชื่อแมพจากรูปไม่สำเร็จ\nOCR: ' + String(ocr.rawText || '').slice(0, 300));
+        }
+
+        const ocrCandidates = [ocr.mapName, ...(ocr.candidates || [])].filter(Boolean);
+        const suggestions = await getAvaMapSuggestions(ocrCandidates, 5);
+        const top = suggestions[0];
+
+        // ถ้าความมั่นใจสูงมาก ให้ทำต่ออัตโนมัติ ไม่ต้องถามผู้ใช้
+        if (top && Number(top.score || 0) >= 0.94) {
+            const data = await fetchAvaMapDataWithFallback(top.name, [top.name, ...ocrCandidates]);
+            const card = await generateAvaRoadsCard(data, ocr.mapName);
+            await status.edit({
+                content: '✅ อ่านแมพได้: **' + data.name + '** • **' + data.tier + '**',
+                components: [],
+                files: [card]
+            });
+            return true;
+        }
+
+        if (!suggestions.length) {
+            throw new Error('ไม่พบชื่อแมพที่ใกล้เคียงจากฐานข้อมูล Avalon');
+        }
+
+        const token = Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-6);
+        avaPendingSelections.set(token, {
+            guildId: String(messageGuildId),
+            channelId: String(messageChannelId),
+            userId: String(message.author?.id || ''),
+            messageId: String(message.id),
+            statusMessage: status,
+            imageBuffer,
+            ocrName: ocr.mapName,
+            ocrCandidates,
+            suggestions,
+            createdAt: Date.now()
+        });
+
+        await status.edit({
+            content:
+                '🗺️ **ตรวจพบภาพ AVA**\n' +
+                'OCR อ่านได้: \`' + String(ocr.mapName) + '\`\n\n' +
+                '⚠️ ชื่อแมพยังไม่มั่นใจ 100%\n' +
+                '**เลือกชื่อแมพที่ใกล้เคียงกับในรูป:**',
+            components: avaSelectionComponents(messageGuildId, token, suggestions)
+        });
+
+        setTimeout(() => {
+            const pending = avaPendingSelections.get(token);
+            if (!pending) return;
+            avaPendingSelections.delete(token);
+            pending.statusMessage.edit({
+                content: '⏰ หมดเวลาการเลือกชื่อแมพ AVA แล้ว กรุณาส่งรูปอีกครั้ง',
+                components: []
+            }).catch(() => {});
+        }, 120000);
+    } catch (err) {
+        console.error('❌ AVA image auto-check error:', err);
+        await status.edit({
+            content: '❌ ตรวจภาพ AVA ไม่สำเร็จ: ' + err.message
+        }).catch(editErr => console.error('❌ AVA error reply edit failed:', editErr.message));
+    } finally {
+        avaProcessingMessages.delete(String(message.id));
+    }
+
+    return true;
+}
+
+// ----------------------------------------
+// AUTOMATED DAILY REPORT SCHEDULER
+// ----------------------------------------
+async function checkAndSendDailyAutoReports() {
+    const guilds = getAllGuildConfigs();
+    for (const { guildId } of guilds) {
+        await guildContext.run({ guildId }, async () => {
+            await checkAndSendDailyAutoReportsForGuild();
+        });
+    }
+}
+
+async function checkAndSendDailyAutoReportsForGuild() {
+    if (!dailyAutoConfigs.length) return;
+
+    const now = new Date();
+    const utcHours = now.getUTCHours();
+    const utcMinutes = now.getUTCMinutes();
+    const todayStr = now.toISOString().split('T')[0];
+
+    // Each server has its own reset clock. Asia resets at 00:00 UTC (07:00
+    // Thai), while Americas/Europe reset at 10:00 UTC (17:00 Thai).
+    for (const config of dailyAutoConfigs) {
+        const serverKey = config.serverChoice || 'asia';
+        const resetHour = DAILY_RESET_UTC_HOURS[serverKey] ?? 10;
+        const afterDailyReset = utcHours > resetHour || (utcHours === resetHour && utcMinutes >= 5);
+        const reportKey = `${config.guildId}:${serverKey}:${todayStr}`;
+        if (!afterDailyReset) continue;
+
+        try {
+            const channel = await client.channels.fetch(config.channelId).catch(() => null);
+            if (!channel) continue;
+
+            console.log(`⏰ Triggering ${serverKey} daily bonus report...`);
+            const card = await generateDailyBonusCard(serverKey);
+            if (card) {
+                const latest = loadDailyCache()?.[serverKey];
+                const signature = dailyDataSignature(latest);
+                if (signature && lastDailyReportDate[reportKey] === signature) continue;
+                await channel.send({
+                    content: `📢 **รายงานโบนัสรายวันอัตโนมัติประจำวันที่ ${todayStr}**${latest?.changed ? '\n🔄 ตรวจพบข้อมูลโบนัสเปลี่ยนแปลง' : ''}`,
+                    files: [card]
+                });
+                lastDailyReportDate[reportKey] = signature || true;
+                saveData();
+            } else {
+                // Do not mark the report as sent and do not publish yesterday's
+                // data. The next scheduler tick retries until today's snapshot
+                // becomes available (useful when the game opens late).
+                console.warn(`⏳ ${serverKey} daily data is not ready; retrying next minute`);
+            }
+        } catch (err) {
+            console.error(`❌ Automated Daily Report failed for channel ${config.channelId}:`, err.message);
+        }
+    }
+}
+
+function getDailyRetryDelayMs(serverKey = 'asia') {
+    const now = new Date();
+    const resetHour = DAILY_RESET_UTC_HOURS[serverKey] ?? 10;
+    const minutesSinceReset = ((now.getUTCHours() - resetHour + 24) % 24) * 60 + now.getUTCMinutes();
+    if (minutesSinceReset < 60) return 30 * 1000;
+    if (minutesSinceReset < 180) return 60 * 1000;
+    return 5 * 60 * 1000;
+}
+
+function scheduleDailyAutoCheck() {
+    const serverKeys = [...new Set(dailyAutoConfigs.map(x => x.serverChoice || 'asia'))];
+    const delay = serverKeys.length ? Math.min(...serverKeys.map(getDailyRetryDelayMs)) : getDailyRetryDelayMs('asia');
+    setTimeout(async () => {
+        try { await checkAndSendDailyAutoReports(); }
+        finally { scheduleDailyAutoCheck(); }
+    }, delay);
+}
+
+// ----------------------------------------
+// BANDIT ASSAULT (ASIA) SCHEDULE & ALERTS
+// Source: user-provided Asia schedule reference image.
+// ----------------------------------------
+const BANDIT_ASSAULT_SCHEDULE_UTC = [
+    { hour: 5, chance: 30 }, { hour: 7, chance: 50 },
+    { hour: 9, chance: 60 }, { hour: 11, chance: 40 }, { hour: 13, chance: 60 },
+    { hour: 15, chance: 60 }, { hour: 17, chance: 60 }
+];
+const BANDIT_SERVER_NAMES = { asia: 'Asia (East)' };
+
+function getNextBanditAssault(now = new Date()) {
+    const candidates = [];
+    for (let dayOffset = 0; dayOffset <= 1; dayOffset += 1) {
+        for (const slot of BANDIT_ASSAULT_SCHEDULE_UTC) {
+            const start = new Date(now);
+            start.setUTCDate(start.getUTCDate() + dayOffset);
+            start.setUTCHours(slot.hour, 0, 0, 0);
+            if (start > now) candidates.push({ ...slot, start });
+        }
+    }
+    candidates.sort((a, b) => a.start - b.start);
+    return candidates[0] || null;
+}
+
+function banditCountdownText(minutes) {
+    const safeMinutes = Math.max(0, Math.ceil(minutes));
+    return safeMinutes >= 60
+        ? `${Math.floor(safeMinutes / 60)} ชม. ${safeMinutes % 60} นาที`
+        : `${safeMinutes} นาที`;
+}
+
+function banditCountdownImageText(minutes) {
+    const safeMinutes = Math.max(0, Math.ceil(minutes));
+    if (safeMinutes >= 60) {
+        const hours = Math.floor(safeMinutes / 60);
+        const remaining = safeMinutes % 60;
+        return remaining ? `${hours}H ${remaining}M` : `${hours}H`;
+    }
+    return `${safeMinutes} MIN`;
+}
+
+function banditEventKey(event) {
+    return event ? event.start.toISOString() : '';
+}
+
+function getBanditChanceStyle(chance) {
+    if (chance >= 60) return { label: 'HIGH CHANCE', fill: '#71320e', accent: '#f09a38', text: '#ffd18b' };
+    if (chance >= 40) return { label: 'MEDIUM CHANCE', fill: '#66500d', accent: '#e0bd4c', text: '#ffed9b' };
+    return { label: 'LOW CHANCE', fill: '#353b46', accent: '#a9b5c8', text: '#e5edf8' };
+}
+
+function drawBanditSword(ctx, x, y, size, color = '#d5a35b') {
+    ctx.save(); ctx.translate(x, y); ctx.rotate(-0.18);
+    ctx.fillStyle = color; ctx.strokeStyle = '#6e4323'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(size * 0.52, 0); ctx.lineTo(size * 0.68, size * 0.10); ctx.lineTo(size * 0.42, size * 0.72); ctx.lineTo(size * 0.32, size * 0.68); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#7e3e2d'; ctx.fillRect(size * 0.25, size * 0.64, size * 0.38, size * 0.09);
+    ctx.fillStyle = '#c28b4d'; ctx.fillRect(size * 0.38, size * 0.70, size * 0.12, size * 0.22);
+    ctx.fillStyle = '#8c5a32'; ctx.beginPath(); ctx.arc(size * 0.44, size * 0.95, size * 0.08, 0, Math.PI * 2); ctx.fill();
+    ctx.restore();
+}
+
+function drawCaerleonCrest(ctx, x, y, size) {
+    ctx.save();
+    ctx.fillStyle = '#171519'; ctx.strokeStyle = '#b88a54'; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.moveTo(x + size / 2, y); ctx.lineTo(x + size, y + size * 0.22); ctx.lineTo(x + size * 0.86, y + size * 0.78); ctx.lineTo(x + size / 2, y + size); ctx.lineTo(x + size * 0.14, y + size * 0.78); ctx.lineTo(x, y + size * 0.22); ctx.closePath(); ctx.fill(); ctx.stroke();
+    ctx.fillStyle = '#7d3027'; ctx.beginPath(); ctx.arc(x + size / 2, y + size * 0.5, size * 0.26, 0, Math.PI * 2); ctx.fill();
+    ctx.fillStyle = '#e1bd78'; ctx.font = `900 ${Math.floor(size * 0.23)}px 'Bandit Display'`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText('C', x + size / 2, y + size * 0.51);
+    ctx.restore();
+}
+
+const BANDIT_BACKGROUND_FILE = path.join(__dirname, 'caerleon-background.jpg');
+const BANDIT_COIN_FILE = path.join(__dirname, 'caerleon-coin-transparent.png');
+let banditArtworkPromise = null;
+
+function drawCoverImage(ctx, image, x, y, width, height) {
+    const sourceRatio = image.width / image.height;
+    const targetRatio = width / height;
+    let sx = 0, sy = 0, sw = image.width, sh = image.height;
+    if (sourceRatio > targetRatio) { sw = image.height * targetRatio; sx = (image.width - sw) / 2; }
+    else { sh = image.width / targetRatio; sy = (image.height - sh) / 2; }
+    ctx.drawImage(image, sx, sy, sw, sh, x, y, width, height);
+}
+
+function loadBanditArtwork() {
+    if (!banditArtworkPromise) {
+        banditArtworkPromise = Promise.all([
+            fs.existsSync(BANDIT_BACKGROUND_FILE) ? loadImage(BANDIT_BACKGROUND_FILE) : null,
+            fs.existsSync(BANDIT_COIN_FILE) ? loadImage(BANDIT_COIN_FILE) : null
+        ]).catch(err => {
+            console.warn('⚠️ Bandit artwork load failed:', err.message);
+            return [null, null];
+        });
+    }
+    return banditArtworkPromise;
+}
+
+async function generateBanditCard(event, minutesUntil) {
+    const width = 960;
+    const height = 560;
+    const scale = 1.5;
+    const canvas = createCanvas(width * scale, height * scale);
+    const ctx = canvas.getContext('2d');
+    ctx.scale(scale, scale);
+    const style = getBanditChanceStyle(event.chance);
+    const [caerleonBackground, caerleonCoin] = await loadBanditArtwork();
+    const ictTime = event.start.toLocaleTimeString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', hour12: false });
+    const dateText = event.start.toLocaleDateString('en-GB', { timeZone: 'Asia/Bangkok', day: '2-digit', month: 'long', year: 'numeric' });
+
+    if (caerleonBackground) drawCoverImage(ctx, caerleonBackground, 0, 0, width, height);
+    else { ctx.fillStyle = '#120e12'; ctx.fillRect(0, 0, width, height); }
+    ctx.fillStyle = 'rgba(5, 5, 10, 0.70)'; ctx.fillRect(0, 0, width, height);
+    const vignette = ctx.createRadialGradient(width / 2, height / 2, 90, width / 2, height / 2, 620);
+    vignette.addColorStop(0, 'rgba(0,0,0,0.02)'); vignette.addColorStop(1, 'rgba(0,0,0,0.62)');
+    ctx.fillStyle = vignette; ctx.fillRect(0, 0, width, height);
+    ctx.strokeStyle = style.accent; ctx.lineWidth = 2; ctx.strokeRect(26, 26, width - 52, height - 52);
+    ctx.strokeStyle = '#6d4531'; ctx.lineWidth = 1; ctx.strokeRect(34, 34, width - 68, height - 68);
+    if (caerleonCoin) { ctx.save(); ctx.shadowColor = 'rgba(0,0,0,.75)'; ctx.shadowBlur = 14; drawCoverImage(ctx, caerleonCoin, 48, 30, 58, 58); ctx.restore(); }
+    else drawCaerleonCrest(ctx, 52, 34, 50);
+    drawBanditSword(ctx, 850, 34, 52, style.accent);
+    ctx.fillStyle = '#d6b27a'; ctx.font = "900 15px 'Bandit Display', sans-serif";
+    ctx.fillText('BANDIT ASSAULT', 120, 62);
+    ctx.fillStyle = '#e0a83a'; ctx.font = "900 14px 'Bandit Display', sans-serif";
+    ctx.fillText('ASIA (EAST)', 260, 62);
+    ctx.fillStyle = '#c9c0b8'; ctx.font = "600 14px 'Bandit Display', sans-serif";
+    ctx.fillText(`${dateText}  •  STARTS ${ictTime} ICT`, 390, 62);
+
+    drawRoundRect(ctx, 52, 92, 856, 408, 18);
+    ctx.fillStyle = 'rgba(12, 10, 14, 0.92)'; ctx.fill(); ctx.strokeStyle = '#6b4430'; ctx.stroke();
+    ctx.fillStyle = '#a38f80'; ctx.font = "700 14px 'Bandit Display', sans-serif";
+    ctx.fillText('EVENT FORECAST', 86, 132);
+    ctx.fillStyle = '#f5eee7'; ctx.font = "900 45px 'Bandit Serif', serif";
+    ctx.fillText('BANDIT ASSAULT', 86, 190);
+    ctx.fillStyle = style.text; ctx.font = "900 72px 'Bandit Serif', serif";
+    ctx.fillText(`${event.chance}%`, 86, 285);
+    ctx.fillStyle = '#a38f80'; ctx.font = "700 16px 'Bandit Display', sans-serif";
+    ctx.fillText('CHANCE OF OCCURRENCE', 94, 318);
+    drawRoundRect(ctx, 90, 350, 285, 46, 23); ctx.fillStyle = style.fill; ctx.fill(); ctx.strokeStyle = style.accent; ctx.stroke();
+    ctx.fillStyle = style.text; ctx.font = "900 17px 'Bandit Display', sans-serif"; ctx.textAlign = 'center';
+    ctx.fillText(style.label, 232, 380); ctx.textAlign = 'left';
+    ctx.fillStyle = '#2b2528'; ctx.fillRect(90, 414, 285, 10);
+    ctx.fillStyle = style.accent; ctx.fillRect(90, 414, Math.max(12, 285 * Math.min(100, event.chance) / 100), 10);
+    ctx.fillStyle = '#8d7770'; ctx.font = "700 12px 'Bandit Display', sans-serif";
+    ctx.fillText('CAERLEON  //  OUTLANDS  //  FACTION WARFARE', 90, 452);
+
+    ctx.fillStyle = '#d9c6b7'; ctx.font = "800 18px 'Bandit Display', sans-serif";
+    ctx.fillText(`STARTS IN  ${banditCountdownImageText(minutesUntil)}`, 500, 190, 330);
+    ctx.fillStyle = '#e0a83a'; ctx.font = "900 42px 'Bandit Serif', serif";
+    ctx.fillText(`${ictTime} ICT`, 500, 250);
+    ctx.fillStyle = '#9e8e83'; ctx.font = "600 15px 'Bandit Display', sans-serif";
+    ctx.fillText('Schedule source: Asia reference table', 500, 292);
+    ctx.fillText('Probability is a forecast, not a guarantee', 500, 322);
+    ctx.fillStyle = '#6e5b4e'; ctx.fillRect(500, 355, 330, 1);
+    ctx.fillStyle = '#cbb5a1'; ctx.font = "700 15px 'Bandit Display', sans-serif";
+    ctx.fillText('Next check runs every minute', 500, 390);
+    ctx.fillStyle = '#887366'; ctx.font = "600 13px 'Bandit Display', sans-serif";
+    ctx.fillText(`EVENT KEY  ${event.start.toISOString()}`, 500, 430);
+    ctx.fillText('BOTBOSS • BANDIT ALERT', 52, 532);
+    return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: 'bandit-assault.png' });
+}
+
+function banditAlertComponents(guildId) {
+    return new ActionRowBuilder().addComponents(
+        new ButtonBuilder().setCustomId(`bandit_toggle:${guildId}`).setLabel('เปิด/ปิดแจ้งเตือน').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId(`bandit_status:${guildId}`).setLabel('ดูรอบถัดไป').setStyle(ButtonStyle.Primary)
+    );
+}
+
+async function checkAndSendBanditAlerts() {
+    const guilds = getAllGuildConfigs();
+    for (const { guildId } of guilds) {
+        await guildContext.run({ guildId }, async () => {
+            await checkAndSendBanditAlertsForGuild();
+        });
+    }
+}
+
+async function checkAndSendBanditAlertsForGuild() {
+    if (!banditAutoConfigs.length) return;
+    const now = new Date();
+    const event = getNextBanditAssault(now);
+    if (!event) return;
+
+    const minutesUntil = (event.start - now) / 60000;
+    // Alert at the 15-minute mark; if the bot was restarted later, alert once
+    // immediately while still showing the accurate remaining countdown.
+    if (minutesUntil <= 15 && minutesUntil > 0) {
+        const key = banditEventKey(event);
+        for (const config of banditAutoConfigs) {
+            if ((config.server || 'asia') !== 'asia') continue;
+            if (config.enabled === false) continue;
+            if (lastBanditAlertKey[config.guildId] === key || config.lastEventKey === key) continue;
+            try {
+                const channel = await client.channels.fetch(config.channelId).catch(() => null);
+                if (!channel) continue;
+                const ictTime = event.start.toLocaleTimeString('th-TH', {
+                    timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', hour12: false
+                });
+                const chanceLabel = event.chance >= 60 ? `${event.chance}% (โอกาสสูง)` : event.chance >= 40 ? `${event.chance}% (ปานกลาง)` : `${event.chance}% (ต่ำ)`;
+                if (config.lastMessageId) {
+                    await channel.messages.delete(config.lastMessageId).catch(err => {
+                        console.warn(`⚠️ Could not delete previous Bandit alert ${config.lastMessageId}:`, err.message);
+                    });
+                }
+                const card = await generateBanditCard(event, minutesUntil);
+                const alertMessage = await channel.send({
+                    content: `⚔️ **BANDIT ASSAULT — ASIA**\nกำลังจะเริ่มใน **${banditCountdownText(minutesUntil)}**\n🕒 เวลาเริ่ม: **${ictTime} น. (ICT)**\n🎲 โอกาสเกิด: **${chanceLabel}**`,
+                    files: [card],
+                    components: [banditAlertComponents(config.guildId)]
+                });
+                config.lastMessageId = alertMessage.id;
+                config.lastEventKey = key;
+                saveData();
+                lastBanditAlertKey[config.guildId] = key;
+            } catch (err) {
+                console.error(`❌ Bandit Assault alert failed for channel ${config.channelId}:`, err.message);
+            }
+        }
+    }
+}
+
+const commands = [
+    new SlashCommandBuilder().setName('check').setDescription('ระบบตรวจสอบสถิติและรายชื่อ')
+        .addSubcommand(s => s.setName('battles').setDescription('เช็กสถิติไฟต์จาก Match ID หรือ ลิงก์').addStringOption(o => o.setName('link_or_id').setDescription('ลิงก์ AlbionBB หรือ Match ID').setRequired(true)))
+        .addSubcommand(s => s.setName('guilds').setDescription('แสดงรายชื่อกิลด์ที่ติดตาม'))
+        .addSubcommand(s => s.setName('members').setDescription('แสดงรายชื่อผู้เล่นที่ติดตาม')),
+    new SlashCommandBuilder().setName('add').setDescription('เพิ่มรายการติดตาม')
+        .addSubcommand(s => s.setName('guild').setDescription('เพิ่มกิลด์และกำหนดห้องสำหรับดึงข้อมูลเมื่อวางลิงก์')
+            .addStringOption(o => o.setName('name').setDescription('ชื่อกิลด์').setRequired(true))
+            .addChannelOption(o => o.setName('channel').setDescription('ห้องที่อนุญาตให้วางลิงก์เพื่อดึงข้อมูลอัตโนมัติ').addChannelTypes(ChannelType.GuildText).setRequired(true)))
+        .addSubcommand(s => s.setName('player').setDescription('เพิ่มผู้เล่น').addStringOption(o => o.setName('name').setDescription('ชื่อผู้เล่น').setRequired(true))),
+    new SlashCommandBuilder().setName('remove').setDescription('ลบรายการติดตาม')
+        .addSubcommand(s => s.setName('guild').setDescription('ลบกิลด์').addStringOption(o => o.setName('name').setDescription('ชื่อกิลด์').setRequired(true)))
+        .addSubcommand(s => s.setName('player').setDescription('ลบผู้เล่น').addStringOption(o => o.setName('name').setDescription('ชื่อผู้เล่น').setRequired(true))),
+    new SlashCommandBuilder().setName('autobattle').setDescription('จัดการระบบติดตามไฟต์อัตโนมัติ')
+        .addSubcommand(s => s.setName('set').setDescription('ตั้งค่าระบบติดตามไฟต์อัตโนมัติ')
+            .addChannelOption(o => o.setName('channel').setDescription('ห้องที่ต้องการให้แจ้งเตือน').addChannelTypes(ChannelType.GuildText).setRequired(true))
+            .addStringOption(o => o.setName('guild').setDescription('ชื่อ Guild ที่ต้องการติดตาม').setRequired(true))
+            .addStringOption(o => o.setName('min_frames').setDescription('จำนวนขั้นต่ำ เช่น 200K (Fame หรือ Kills+Deaths)').setRequired(true)))
+        .addSubcommand(s => s.setName('list').setDescription('แสดงรายชื่อกิลด์ที่ตั้งค่า Auto-Battle ในเซิร์ฟเวอร์นี้'))
+        .addSubcommand(s => s.setName('remove').setDescription('ลบกิลด์ที่ตั้งค่า Auto-Battle ออก')
+            .addStringOption(o => o.setName('guild').setDescription('ชื่อ Guild ที่ต้องการยกเลิกติดตาม Auto-Battle').setRequired(true))),
+    new SlashCommandBuilder().setName('daily').setDescription('ดึงข้อมูลหรือตั้งค่ารายงานโบนัสประจำวันอัตโนมัติ')
+        .addSubcommand(s => s.setName('get').setDescription('ดึงข้อมูลโบนัสประจำวันทันที')
+            .addChannelOption(o => o.setName('channel').setDescription('ส่งรายงานไปยังห้องที่เลือก (ไม่เลือกจะส่งห้องนี้)').addChannelTypes(ChannelType.GuildText)))
+        .addSubcommand(s => s.setName('setup').setDescription('ตั้งค่าให้บอทส่งรายงานโบนัสประจำวันให้อัตโนมัติทุกวัน (17:05 น. ไทย)')
+            .addChannelOption(o => o.setName('channel').setDescription('ห้องที่ต้องการให้แจ้งเตือนอัตโนมัติ').addChannelTypes(ChannelType.GuildText).setRequired(true))
+            .addStringOption(o => o.setName('server').setDescription('เลือกเซิร์ฟเวอร์').setRequired(true)
+                .addChoices(
+                    { name: '🌏 Asia (East)', value: 'asia' },
+                    { name: '🌎 West (Americas)', value: 'west' },
+                    { name: '🌍 Europe (EU)', value: 'europe' }
+                )))
+        .addSubcommand(s => s.setName('confirm').setDescription('ยืนยันโบนัส Asia จากข้อมูลที่เห็นในเกม')
+            .addStringOption(o => o.setName('category').setDescription('ชื่อหมวดโบนัส เช่น Cloth Robes').setRequired(true))
+            .addStringOption(o => o.setName('city').setDescription('เมืองที่ได้โบนัส เช่น Fort Sterling').setRequired(true))
+            .addIntegerOption(o => o.setName('bonus').setDescription('เปอร์เซ็นต์โบนัส เช่น 10 หรือ 20').setRequired(true).setMinValue(1).setMaxValue(100)))
+        .addSubcommand(s => s.setName('status').setDescription('ตรวจสถานะแหล่งข้อมูลและเวลาตรวจล่าสุด'))
+        .addSubcommand(s => s.setName('refresh').setDescription('ดึงข้อมูล Daily ใหม่ทันที'))
+        .addSubcommand(s => s.setName('remove').setDescription('ยกเลิกการส่งรายงานโบนัสประจำวันอัตโนมัติในเซิร์ฟเวอร์นี้'))
+    ,new SlashCommandBuilder().setName('ava').setDescription('เช็กข้อมูลแผนที่ Roads of Avalon เป็นภาษาไทย')
+        .addSubcommand(s => s.setName('check').setDescription('เช็กกล่อง ทรัพยากร ดันเจี้ยน และ Connection ของแมพ AVA')
+            .addStringOption(o => o.setName('map').setDescription('ชื่อแมพ เช่น Casitos-Alieam หรือ URL ของแมพ').setRequired(true)))
+        .addSubcommand(s => s.setName('setup').setDescription('ตั้งค่าห้องสำหรับตรวจจับรูป AVA อัตโนมัติ')
+            .addChannelOption(o => o.setName('channel').setDescription('ห้องที่บอทจะตรวจรูป AVA อัตโนมัติ').addChannelTypes(ChannelType.GuildText).setRequired(true)))
+        .addSubcommand(s => s.setName('status').setDescription('ดูห้องที่ตั้งค่าตรวจรูป AVA อัตโนมัติ'))
+        .addSubcommand(s => s.setName('remove').setDescription('ยกเลิกการตรวจรูป AVA อัตโนมัติ'))
+     ,new SlashCommandBuilder().setName('bandit').setDescription('แจ้งเตือนกิจกรรม Bandit Assault เซิร์ฟเวอร์ Asia')
+        .addSubcommand(s => s.setName('setup').setDescription('ตั้งค่าการแจ้งเตือน Bandit Assault ล่วงหน้า 15 นาที')
+            .addChannelOption(o => o.setName('channel').setDescription('ห้องที่ต้องการให้แจ้งเตือน').addChannelTypes(ChannelType.GuildText).setRequired(true))
+            .addStringOption(o => o.setName('server').setDescription('เซิร์ฟเวอร์ของตาราง Bandit Assault').setRequired(true)
+                .addChoices({ name: '🌏 Asia (East)', value: 'asia' })))
+        .addSubcommand(s => s.setName('status').setDescription('ดูรอบ Bandit Assault ครั้งถัดไป'))
+        .addSubcommand(s => s.setName('remove').setDescription('ยกเลิกการแจ้งเตือน Bandit Assault'))
+].map(c => c.toJSON());
+
+
+async function pollAvaConfiguredChannels() {
+    const seenChannels = new Set();
+
+    for (const [guildId, cfg] of Object.entries(guildConfigs || {})) {
+        const avaConfigs = Array.isArray(cfg?.avaAuto) ? cfg.avaAuto.filter(x => x?.enabled !== false && x?.channelId) : [];
+        for (const avaConfig of avaConfigs) {
+            const channelId = String(avaConfig.channelId);
+            const stateKey = String(guildId) + ':' + channelId;
+            seenChannels.add(stateKey);
+
+            try {
+                const channel = await client.channels.fetch(channelId);
+                if (!channel?.messages?.fetch) continue;
+
+                const fetched = await channel.messages.fetch({ limit: 10, cache: false });
+                const messages = [...fetched.values()].sort((a, b) => {
+                    try { return Number(BigInt(String(a.id)) - BigInt(String(b.id))); }
+                    catch (_) { return String(a.id).localeCompare(String(b.id)); }
+                });
+                if (!messages.length) continue;
+                const latestId = String(messages[messages.length - 1].id);
+                const previousId = avaPollState.get(stateKey);
+                if (!previousId) {
+                    avaPollState.set(stateKey, latestId);
+                    console.log('🗺️ AVA poll baseline: guild=' + guildId + ' channel=' + channelId + ' latest=' + latestId);
+                    continue;
+                }
+                const newer = messages.filter(message => {
+                    try { return BigInt(String(message.id)) > BigInt(previousId); }
+                    catch (_) { return String(message.id) !== String(previousId); }
+                });
+                if (newer.length) {
+                    avaPollState.set(stateKey, latestId);
+                    for (const message of newer) {
+                        if (message.author?.bot) continue;
+                        try {
+                            await guildContext.run({ guildId }, async () => { await processAvaImageMessage(message); });
+                        } catch (err) {
+                            console.error('❌ AVA poll message error:', err.message);
+                        }
+                    }
+                } else {
+                    avaPollState.set(stateKey, latestId);
+                }
+            } catch (err) {
+                console.warn('⚠️ AVA poll failed for channel ' + channelId + ': ' + err.message);
+            }
+        }
+    }
+
+    for (const key of avaPollState.keys()) {
+        if (!seenChannels.has(key)) avaPollState.delete(key);
+    }
+}
+
+client.once('clientReady', async () => {
+    console.log(`✅ Logged in as ${client.user.tag}`);
+    await migrateLegacyDataAfterReady();
+    const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
+    try {
+        await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
+        console.log('✅ Slash commands registered.');
+    } catch (err) { console.error('❌ Slash command registration error:', err); }
+
+    setTimeout(async () => {
+        const seeded = await primeAutoBattleHistory();
+        console.log(`🛡️ Auto-Battle initialized: marked ${seeded} existing battle(s) as already seen. No historical backlog will be reported.`);
+    }, 5000);
+
+    setInterval(checkAutoBattles, 5 * 60 * 1000);
+    setTimeout(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA initial poll error:', err)), 3000);
+    setInterval(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA poll error:', err)), 5000);
+    scheduleDailyAutoCheck();
+    setInterval(checkAndSendBanditAlerts, 60 * 1000);
+    preloadDailyIcons().catch(err => console.warn('⚠️ Daily icon preload failed:', err.message));
+});
+
+client.on('interactionCreate', async interaction => {
+    const contextGuildId = interaction.guildId ||
+        ((interaction.isButton() || interaction.isStringSelectMenu()) ? interaction.customId.split(':')[1] : null);
+    return guildContext.run({ guildId: contextGuildId }, async () => {
+    if (interaction.isStringSelectMenu() || interaction.isButton()) {
+        const parts = String(interaction.customId || '').split(':');
+        const action = parts[0];
+        if (['ava_select', 'ava_retry', 'ava_cancel'].includes(action)) {
+            const guildId = parts[1];
+            const token = parts[2];
+            const pending = avaPendingSelections.get(token);
+
+            if (!pending || String(pending.guildId) !== String(guildId)) {
+                return interaction.reply({ content: '⏰ รายการเลือกแมพนี้หมดอายุแล้ว กรุณาส่งรูป AVA ใหม่อีกครั้ง', ephemeral: true });
+            }
+
+            if (String(pending.userId || '') && String(interaction.user.id) !== String(pending.userId)) {
+                return interaction.reply({ content: '🔒 รายการเลือกแมพนี้เป็นของผู้ส่งรูปเท่านั้น', ephemeral: true });
+            }
+
+            if (action === 'ava_cancel') {
+                await interaction.update({
+                    content: '❌ ยกเลิกการเลือกชื่อแมพ AVA แล้ว',
+                    components: []
+                });
+                avaPendingSelections.delete(token);
+                return;
+            }
+
+            if (action === 'ava_retry') {
+                await interaction.deferUpdate();
+                try {
+                    const ocr = await detectAvaMapNameFromImage(pending.imageBuffer);
+                    const ocrCandidates = [ocr?.mapName, ...(ocr?.candidates || [])].filter(Boolean);
+                    const suggestions = await getAvaMapSuggestions(ocrCandidates, 5);
+
+                    pending.ocrName = ocr?.mapName || pending.ocrName;
+                    pending.ocrCandidates = ocrCandidates;
+                    pending.suggestions = suggestions;
+
+                    if (!suggestions.length) {
+                        return interaction.editReply({
+                            content: '❌ อ่านรูปใหม่แล้ว แต่ยังหาชื่อแมพที่ใกล้เคียงไม่พบ',
+                            components: []
+                        });
+                    }
+
+                    await interaction.editReply({
+                        content:
+                            '🔄 **อ่านรูป AVA ใหม่แล้ว**\n' +
+                            'OCR อ่านได้: \`' + String(pending.ocrName || 'ไม่พบ') + '\`\n\n' +
+                            'เลือกชื่อแมพที่ใกล้เคียงกับในรูป:',
+                        components: avaSelectionComponents(guildId, token, suggestions)
+                    });
+                } catch (err) {
+                    await interaction.editReply({
+                        content: '❌ อ่านรูป AVA ใหม่ไม่สำเร็จ: ' + err.message,
+                        components: []
+                    });
+                }
+                return;
+            }
+
+            if (action === 'ava_select') {
+                const selectedName = String(interaction.values?.[0] || '').trim();
+                const allowed = pending.suggestions.some(x => String(x.name) === selectedName);
+                if (!selectedName || !allowed) {
+                    return interaction.reply({ content: '❌ ตัวเลือกแมพไม่ถูกต้องหรือหมดอายุแล้ว', ephemeral: true });
+                }
+
+                await interaction.deferUpdate();
+                avaPendingSelections.delete(token);
+
+                try {
+                    await interaction.editReply({
+                        content: '🔎 เลือก **' + selectedName + '** แล้ว กำลังค้นหาข้อมูลแมพ...',
+                        components: []
+                    });
+
+                    const data = await fetchAvaMapDataWithFallback(selectedName, [selectedName, ...pending.ocrCandidates]);
+                    const card = await generateAvaRoadsCard(data, pending.ocrName);
+
+                    await interaction.editReply({
+                        content: '✅ เลือกแมพได้: **' + data.name + '** • **' + data.tier + '**',
+                        components: [],
+                        files: [card]
+                    });
+                } catch (err) {
+                    console.error('❌ AVA selected map lookup error:', err);
+                    await interaction.editReply({
+                        content: '❌ ค้นหาแมพ **' + selectedName + '** ไม่สำเร็จ: ' + err.message,
+                        components: []
+                    });
+                }
+                return;
+            }
+        }
+    }
+
+    if (interaction.isButton()) {
+        const [action, guildId] = interaction.customId.split(':');
+        if (action === 'bandit_toggle') {
+            const config = banditAutoConfigs.find(c => c.guildId === guildId);
+            if (!config) return interaction.reply({ content: '❌ ยังไม่ได้ตั้งค่า Bandit Assault สำหรับเซิร์ฟเวอร์นี้', ephemeral: true });
+            config.enabled = config.enabled === false;
+            saveData();
+            return interaction.reply({ content: config.enabled ? '✅ เปิดการแจ้งเตือน Bandit Assault แล้ว' : '🔕 ปิดการแจ้งเตือน Bandit Assault แล้ว', ephemeral: true });
+        }
+        if (action === 'bandit_status') {
+            const next = getNextBanditAssault(new Date());
+            const nextIct = next.start.toLocaleString('th-TH', { timeZone: 'Asia/Bangkok', dateStyle: 'short', timeStyle: 'short' });
+            return interaction.reply({ content: `⚔️ รอบถัดไป: **${nextIct} น.**\n🎲 โอกาสเกิด: **${next.chance}%**\n⏳ เหลือ **${banditCountdownText((next.start - Date.now()) / 60000)}**`, ephemeral: true });
+        }
+        return;
+    }
+    if (!interaction.isChatInputCommand()) return;
+    const { commandName } = interaction;
+
+    if (commandName === 'check') {
+        const sub = interaction.options.getSubcommand();
+        if (sub === 'guilds') {
+            if (!targetGuilds.length) return interaction.reply('🛡️ ไม่มีกิลด์ในระบบติดตาม');
+            const listFormatted = targetGuilds.map((g, i) => `${i + 1}. ${g.name} ${g.channelId ? `(ห้อง: <#${g.channelId}>)` : ''}`).join('\n');
+            return interaction.reply(`🛡️ **กิลด์ที่ติดตาม (${targetGuilds.length})**\n\`\`\`\n${listFormatted}\n\`\`\``);
+        }
+        if (sub === 'members') {
+            if (!targetPlayers.length) return interaction.reply('📋 ไม่มีผู้เล่นในระบบติดตาม');
+            return interaction.reply(`📋 **ผู้เล่นที่ติดตาม (${targetPlayers.length})**\n\`\`\`\n${targetPlayers.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\`\`\``);
+        }
+        if (sub === 'battles') {
+            await interaction.deferReply();
+            return processBattleReport(interaction.options.getString('link_or_id'), interaction);
+        }
+    }
+
+    if (commandName === 'add') {
+        const sub = interaction.options.getSubcommand();
+        if (sub === 'guild') {
+            const name = interaction.options.getString('name').trim();
+            const channel = interaction.options.getChannel('channel');
+
+            const existingIndex = targetGuilds.findIndex(x => x.name.toLowerCase() === name.toLowerCase());
+            if (existingIndex >= 0) {
+                targetGuilds[existingIndex].channelId = channel.id;
+                saveData();
+                return interaction.reply(`🛡️ อัปเดตห้องสำหรับกิลด์ **${name}** เป็น <#${channel.id}> เรียบร้อยแล้ว`);
+            }
+
+            targetGuilds.push({ name, channelId: channel.id });
+            saveData();
+            return interaction.reply(`🛡️ เพิ่มกิลด์ **${name}** และกำหนดให้ดึงข้อมูลอัตโนมัติเฉพาะในห้อง <#${channel.id}> เรียบร้อยแล้วครับ`);
+        }
+        if (sub === 'player') {
+            const name = interaction.options.getString('name').trim();
+            if (targetPlayers.some(x => x.toLowerCase() === name.toLowerCase())) return interaction.reply({ content: `⚠️ ผู้เล่น **${name}** มีอยู่แล้ว`, flags: 64 });
+            targetPlayers.push(name); saveData(); return interaction.reply(`✅ เพิ่มผู้เล่น **${name}** แล้ว`);
+        }
+    }
+
+    if (commandName === 'remove') {
+        const sub = interaction.options.getSubcommand(), name = interaction.options.getString('name').trim();
+        if (sub === 'guild') {
+            const before = targetGuilds.length; 
+            targetGuilds = targetGuilds.filter(x => x.name.toLowerCase() !== name.toLowerCase());
+            if (before === targetGuilds.length) return interaction.reply({ content: `❌ ไม่พบกิลด์ **${name}**`, flags: 64 });
+            saveData(); return interaction.reply(`🗑️ ลบกิลด์ **${name}** แล้ว`);
+        }
+        if (sub === 'player') {
+            const before = targetPlayers.length; targetPlayers = targetPlayers.filter(x => x.toLowerCase() !== name.toLowerCase());
+            if (before === targetPlayers.length) return interaction.reply({ content: `❌ ไม่พบผู้เล่น **${name}**`, flags: 64 });
+            saveData(); return interaction.reply(`🗑️ ลบผู้เล่น **${name}** แล้ว`);
+        }
+    }
+
+    if (commandName === 'autobattle') {
+        const sub = interaction.options.getSubcommand();
+
+        if (sub === 'set') {
+            await interaction.deferReply();
+            const channel = interaction.options.getChannel('channel');
+            const guildName = interaction.options.getString('guild').trim();
+            const minFramesInput = interaction.options.getString('min_frames');
+            const minFrames = parseFameValue(minFramesInput);
+
+            let existingConfigs = autoBattleConfigs.filter(c => c.guildId === interaction.guildId);
+            const duplicateIndex = existingConfigs.findIndex(c => c.targetGuild.toLowerCase() === guildName.toLowerCase());
+
+            const configData = {
+                guildId: interaction.guildId,
+                channelId: channel.id,
+                targetGuild: guildName,
+                minFrames: minFrames,
+                createdAt: new Date().toISOString()
+            };
+
+            if (duplicateIndex >= 0) {
+                const globalIndex = autoBattleConfigs.findIndex(c => c.guildId === interaction.guildId && c.targetGuild.toLowerCase() === guildName.toLowerCase());
+                if (globalIndex >= 0) autoBattleConfigs[globalIndex] = configData;
+            } else {
+                autoBattleConfigs.push(configData);
+            }
+            const baselineMatches = await fetchGuildRecentBattles(guildName);
+            baselineMatches.forEach(id => processedBattles.add(String(id)));
+            saveData();
+
+            return interaction.editReply(`✅ ตั้งค่า **Auto-Battle Tracker** สำเร็จเรียบร้อย!\n- 🌐 เซิร์ฟเวอร์: **EAST (ตายตัว)**\n- 📢 ห้องแจ้งเตือน: <#${channel.id}>\n- 🛡️ กิลด์ที่ติดตาม: **${guildName}**\n- ⚔️ ขั้นต่ำ: **${minFrames.toLocaleString()}**\n\n📌 *ระบบจะคอยตรวจสอบไฟต์การต่อสู้ใหม่ๆ ของกิลด์นี้ให้อัตโนมัติทุกๆ 5 นาทีครับ*`);
+        }
+
+        if (sub === 'list') {
+            const serverConfigs = autoBattleConfigs.filter(c => c.guildId === interaction.guildId);
+            if (!serverConfigs.length) return interaction.reply({ content: '🛡️ เซิร์ฟเวอร์นี้ยังไม่มีการตั้งค่า Auto-Battle สำหรับกิลด์ใดๆ', flags: 64 });
+
+            let listText = serverConfigs.map((c, i) => `${i + 1}. กิลด์: **${c.targetGuild}** | ห้อง: <#${c.channelId}> | ขั้นต่ำ: **${(c.minFrames || 0).toLocaleString()}**`).join('\n');
+            const embed = new EmbedBuilder()
+                .setColor(0x3498db)
+                .setTitle(`🛡️ รายชื่อกิลด์ที่ติดตาม Auto-Battle ในเซิร์ฟเวอร์นี้ (${serverConfigs.length})`)
+                .setDescription(listText)
+                .setTimestamp();
+            return interaction.reply({ embeds: [embed] });
+        }
+
+        if (sub === 'remove') {
+            const guildName = interaction.options.getString('guild').trim();
+            const beforeCount = autoBattleConfigs.length;
+            
+            autoBattleConfigs = autoBattleConfigs.filter(c => !(c.guildId === interaction.guildId && c.targetGuild.toLowerCase() === guildName.toLowerCase()));
+
+            if (beforeCount === autoBattleConfigs.length) {
+                return interaction.reply({ content: `❌ ไม่พบกิลด์ **${guildName}** ในระบบ Auto-Battle ของเซิร์ฟเวอร์นี้`, flags: 64 });
+            }
+
+            saveData();
+            return interaction.reply(`🗑️ ลบกิลด์ **${guildName}** ออกจากระบบ Auto-Battle เรียบร้อยแล้ว`);
+        }
+    }
+
+    if (commandName === 'daily') {
+        const sub = interaction.options.getSubcommand();
+
+        if (sub === 'confirm') {
+            const category = interaction.options.getString('category').trim();
+            const city = interaction.options.getString('city').trim();
+            const dailyBonus = interaction.options.getInteger('bonus');
+            const meta = Object.values(DAILY_CATEGORY_META).find(x => x.label.toLowerCase() === category.toLowerCase());
+            const normalizedCategory = meta?.label || category;
+            const normalizedCity = meta?.city || city;
+            dailyPlayerConfirmations = dailyPlayerConfirmations.filter(x => !(x.server === 'asia' && x.date === getExpectedDailyDate() && x.category.toLowerCase() === normalizedCategory.toLowerCase() && x.userId === interaction.user.id));
+            dailyPlayerConfirmations.push({ server: 'asia', date: getExpectedDailyDate(), category: normalizedCategory, city: normalizedCity, baseBonus: meta?.baseBonus || 15, dailyBonus, userId: interaction.user.id, userName: interaction.user.tag, confirmedAt: new Date().toISOString() });
+            saveData();
+            const total = dailyPlayerConfirmations.filter(x => x.server === 'asia' && x.date === getExpectedDailyDate()).length;
+            return interaction.reply(`✅ บันทึกการยืนยันโบนัส Asia แล้ว\n**${normalizedCategory}** +${dailyBonus}% — ${normalizedCity}\n👥 จำนวนการยืนยันวันนี้: **${total}** คน/รายการ`);
+        }
+
+        if (sub === 'status') {
+            const status = dailySourceStatus.asia || {};
+            const communityCount = dailyPlayerConfirmations.filter(x => x.server === 'asia' && x.date === getExpectedDailyDate()).length;
+            return interaction.reply({ ephemeral: true, content: `📊 **DAILY STATUS — ASIA**\nAO-SAGE: **${status.aoSage || 'ยังไม่ตรวจ'}**\nAODP: **${status.aodp || 'ยังไม่ตรวจ'}**\nCommunity: **${communityCount}** การยืนยันวันนี้\nตรวจล่าสุด: **${status.checkedAt ? formatIctTime(status.checkedAt) : 'ยังไม่มีข้อมูล'} น. ICT**\nสถานะ: **${status.aoSage === 'confirmed' || status.aodp === 'confirmed' ? 'CONFIRMED' : communityCount ? 'COMMUNITY CONFIRMED' : 'WAITING'}**` });
+        }
+
+        if (sub === 'refresh') {
+            await interaction.deferReply();
+            const refreshed = await generateDailyBonusCard('asia');
+            return refreshed ? interaction.editReply({ content: '✅ ดึง Daily Bonus Asia ใหม่แล้ว', files: [refreshed] }) : interaction.editReply('⏳ ยังไม่มีข้อมูลของวันนี้จากแหล่งข้อมูลที่เชื่อมต่ออยู่ และยังไม่มีการยืนยันจากผู้เล่น');
+        }
+
+        if (sub === 'get') {
+            await interaction.deferReply();
+            const targetChannel1 = interaction.options.getChannel('channel') || interaction.channel;
+
+            // /daily get: แสดงเฉพาะ Daily Bonus ของเซิร์ฟเวอร์ Asia (East) เท่านั้น
+            const cardAsia = await generateDailyBonusCard('asia');
+
+            if (!cardAsia) {
+                return interaction.editReply('❌ **เกิดข้อผิดพลาด:** ไม่สามารถดึง Daily Bonus ของเซิร์ฟเวอร์ **Asia (East)** ได้ในขณะนี้\n`ตรวจสอบ console log ของบอทเพื่อดูรายละเอียด`');
+            }
+
+            try {
+                if (targetChannel1.id === interaction.channel.id) {
+                    await interaction.editReply({ files: [cardAsia] });
+                } else {
+                    await targetChannel1.send({ files: [cardAsia] });
+                    await interaction.editReply(`✅ ส่งรายงานโบนัสประจำวันไปยังห้อง <#${targetChannel1.id}> เรียบร้อยแล้ว!`);
+                }
+
+            } catch (err) {
+                console.error('❌ Daily command response error:', err.message);
+                await interaction.editReply('❌ ไม่สามารถส่งข้อความไปยังห้องที่เลือกได้ โปรดตรวจสอบสิทธิ์การส่งข้อความของบอท');
+            }
+        }
+
+        if (sub === 'setup') {
+            await interaction.deferReply();
+            const channel = interaction.options.getChannel('channel');
+            const serverChoice = interaction.options.getString('server');
+
+            const existingIndex = dailyAutoConfigs.findIndex(c => c.guildId === interaction.guildId);
+            const configData = {
+                guildId: interaction.guildId,
+                channelId: channel.id,
+                serverChoice: serverChoice
+            };
+
+            if (existingIndex >= 0) {
+                dailyAutoConfigs[existingIndex] = configData;
+            } else {
+                dailyAutoConfigs.push(configData);
+            }
+            saveData();
+
+            const setupCard = await generateDailyBonusCard(serverChoice);
+            const setupMessage = `✅ **ตั้งค่ารายงานโบนัสรายวันอัตโนมัติสำเร็จ!**\n- 🌐 เซิร์ฟเวอร์: **${SERVER_NAMES[serverChoice]}**\n- 📢 ห้องแจ้งเตือน: <#${channel.id}>\n- ⏰ เวลาแจ้งเตือน: **หลัง ${getDailyResetText(serverChoice)}** ของทุกวันครับ`;
+            return setupCard
+                ? interaction.editReply({ content: setupMessage, files: [setupCard] })
+                : interaction.editReply(setupMessage);
+        }
+
+        if (sub === 'remove') {
+            const beforeCount = dailyAutoConfigs.length;
+            dailyAutoConfigs = dailyAutoConfigs.filter(c => c.guildId !== interaction.guildId);
+
+            if (beforeCount === dailyAutoConfigs.length) {
+                return interaction.reply({ content: '❌ เซิร์ฟเวอร์นี้ยังไม่ได้ตั้งค่ารายงานโบนัสรายวันอัตโนมัติไว้ครับ', flags: 64 });
+            }
+
+            saveData();
+            return interaction.reply('🗑️ ยกเลิกการตั้งค่ารายงานโบนัสรายวันอัตโนมัติสำหรับเซิร์ฟเวอร์นี้เรียบร้อยแล้ว');
+        }
+    }
+
+    if (commandName === 'ava') {
+        const sub = interaction.options.getSubcommand();
+        if (sub === 'check') {
+            await interaction.deferReply();
+            try {
+                const embed = await generateAvaCheckResponse(interaction.options.getString('map'));
+                return interaction.editReply({ embeds: [embed] });
+            } catch (err) {
+                console.error('❌ AVA check error:', err.message);
+                return interaction.editReply(`❌ เช็กแมพ AVA ไม่สำเร็จ: \`${err.message}\`\nตัวอย่าง: \`/ava check map:Sasitos-Umogaum\``);
+            }
+        }
+        if (sub === 'setup') {
+            const channel = interaction.options.getChannel('channel');
+            if (!channel?.isTextBased?.()) return interaction.reply({ content: '❌ ห้องที่เลือกไม่ใช่ห้องข้อความ', flags: 64 });
+            const me = interaction.guild?.members?.me || await interaction.guild?.members?.fetchMe?.().catch(() => null);
+            const permissions = channel.permissionsFor(me || client.user);
+            const requiredPermissions = [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.ReadMessageHistory, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.AttachFiles];
+            const missing = permissions ? permissions.missing(requiredPermissions) : requiredPermissions.map(String);
+            if (missing.length) return interaction.reply({ content: '❌ บอทไม่มีสิทธิ์ครบสำหรับ AVA Auto\nห้อง: <#' + channel.id + '>\nขาด: **' + missing.join(', ') + '**\n\nให้สิทธิ์ View Channel + Read Message History + Send Messages + Attach Files แล้วลองตั้งค่าใหม่', flags: 64 });
+            const setupGuildConfig = getGuildConfig(interaction.guildId);
+            const existing = setupGuildConfig.avaAuto.findIndex(x => String(x.guildId) === String(interaction.guildId));
+            const config = { guildId: interaction.guildId, channelId: channel.id, enabled: true };
+            if (existing >= 0) setupGuildConfig.avaAuto[existing] = config;
+            else setupGuildConfig.avaAuto.push(config);
+            avaPollState.delete(String(interaction.guildId) + ':' + String(channel.id));
+            saveData();
+            setTimeout(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA setup poll error:', err)), 500);
+            return interaction.reply(
+                '✅ ตั้งค่าตรวจรูป AVA อัตโนมัติแล้ว\n' +
+                '📢 ห้อง: <#' + channel.id + '>\n' +
+                '🟢 ระบบตรวจจับ: เปิด\n' +
+                '🔎 OCR: Tesseract System + Tesseract.js\n\n' +
+                'วางรูปแผนที่ AVA ในห้องนี้ได้เลย บอทจะอ่านชื่อแมพ → ค้นจาก Avalon Roads Tracker → สร้างรายงานเป็นรูปอัตโนมัติ\n\n' +
+                '⚠️ สำคัญ: ต้องเปิด Message Content Intent ใน Discord Developer Portal > Bot > Privileged Gateway Intents'
+            );
+        }
+        if (sub === 'status') {
+            const config = getGuildConfig(interaction.guildId, false)?.avaAuto?.find(x => String(x.guildId) === String(interaction.guildId));
+            if (!config) return interaction.reply({ ephemeral: true, content: '❌ ยังไม่ได้ตั้งค่าห้องตรวจรูป AVA อัตโนมัติ' });
+            const channel = await client.channels.fetch(String(config.channelId)).catch(() => null);
+            const me = interaction.guild?.members?.me || await interaction.guild?.members?.fetchMe?.().catch(() => null);
+            const permissions = channel?.permissionsFor?.(me || client.user);
+            const requiredPermissions = [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.ReadMessageHistory, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.AttachFiles];
+            const missing = permissions ? permissions.missing(requiredPermissions) : requiredPermissions.map(String);
+            const intentEnabledInCode = client.options.intents?.has?.(GatewayIntentBits.MessageContent) ? 'เปิด' : 'ปิด';
+            return interaction.reply({ ephemeral: true, content:
+                '🗺️ AVA AUTO CHECK\n' +
+                '📢 ห้อง: <#' + config.channelId + '>\n' +
+                '🟢 สถานะ: ' + (config.enabled === false ? 'ปิด' : 'เปิด') + '\n' +
+                '🔐 สิทธิ์ห้อง: ' + (missing.length ? '❌ ขาด ' + missing.join(', ') : '✅ ครบ') + '\n' +
+                '🧩 Message Content Intent ในโค้ด: ' + intentEnabledInCode + '\n' +
+                '⚠️ Developer Portal: ต้องเปิด Message Content Intent ที่ Bot > Privileged Gateway Intents\n' +
+                '⏱️ Polling fallback: ทุก 5 วินาที' });
+        }
+        if (sub === 'remove') {
+            const removeGuildConfig = getGuildConfig(interaction.guildId, false);
+            const before = removeGuildConfig?.avaAuto?.length || 0;
+            if (removeGuildConfig) removeGuildConfig.avaAuto = removeGuildConfig.avaAuto.filter(x => x.guildId !== interaction.guildId);
+            saveData();
+            return interaction.reply(before === (removeGuildConfig?.avaAuto?.length || 0) ? '❌ ยังไม่ได้ตั้งค่า AVA Auto Check' : '🗑️ ยกเลิก AVA Auto Check เรียบร้อยแล้ว');
+        }
+    }
+
+    if (commandName === 'bandit') {
+        const sub = interaction.options.getSubcommand();
+        const next = getNextBanditAssault(new Date());
+        if (!next) return interaction.reply('❌ ไม่พบตาราง Bandit Assault ในขณะนี้');
+
+        const nextIct = next.start.toLocaleString('th-TH', {
+            timeZone: 'Asia/Bangkok', dateStyle: 'short', timeStyle: 'short'
+        });
+        const nextChance = next.chance >= 60 ? `${next.chance}% (โอกาสสูง)` : `${next.chance}%`;
+
+        if (sub === 'status') {
+            return interaction.reply(
+                `⚔️ **BANDIT ASSAULT — ASIA**\n` +
+                `รอบถัดไป: **${nextIct} น. (ICT)**\n` +
+                `เวลาที่เหลือ: **${banditCountdownText((next.start - Date.now()) / 60000)}**\n` +
+                `🎲 โอกาสเกิด: **${nextChance}**`
+            );
+        }
+
+        if (sub === 'setup') {
+            const channel = interaction.options.getChannel('channel');
+            const server = interaction.options.getString('server') || 'asia';
+            const previousConfig = banditAutoConfigs.find(c => c.guildId === interaction.guildId);
+            const configData = {
+                guildId: interaction.guildId,
+                channelId: channel.id,
+                server,
+                enabled: true,
+                lastMessageId: previousConfig?.lastMessageId || null,
+                lastEventKey: previousConfig?.lastEventKey || null
+            };
+            const existingIndex = banditAutoConfigs.findIndex(c => c.guildId === interaction.guildId);
+            if (existingIndex >= 0) banditAutoConfigs[existingIndex] = configData;
+            else banditAutoConfigs.push(configData);
+            saveData();
+            return interaction.reply(
+                `✅ ตั้งค่าแจ้งเตือน **Bandit Assault** สำเร็จ\n` +
+                `📢 ห้องแจ้งเตือน: <#${channel.id}>\n` +
+                `🌐 เซิร์ฟเวอร์: **${BANDIT_SERVER_NAMES[server] || server}**\n` +
+                `⏰ บอทจะแจ้งก่อนเริ่ม 15 นาที\n` +
+                `🎲 รอบถัดไป: **${nextIct} น.** — โอกาสเกิด **${nextChance}**`
+            );
+        }
+
+        if (sub === 'remove') {
+            const before = banditAutoConfigs.length;
+            banditAutoConfigs = banditAutoConfigs.filter(c => c.guildId !== interaction.guildId);
+            if (before === banditAutoConfigs.length) return interaction.reply('❌ เซิร์ฟเวอร์นี้ยังไม่ได้ตั้งค่า Bandit Assault');
+            saveData();
+            return interaction.reply('🗑️ ยกเลิกการแจ้งเตือน Bandit Assault เรียบร้อยแล้ว');
+        }
+    }
+    });
+});
+
+
+// AVA fallback listener: inspect raw MESSAGE_CREATE payloads as well.
+// This keeps image detection working even when discord.js does not hydrate
+// Message.attachments/content from the gateway payload as expected.
+client.on('raw', async packet => {
+    if (packet?.t !== 'MESSAGE_CREATE') return;
+    const data = packet.d || {};
+    const guildId = String(data.guild_id || '');
+    const channelId = String(data.channel_id || '');
+    const messageId = String(data.id || '');
+    if (!guildId || !channelId || !messageId) return;
+
+    const cfg = getGuildConfig(guildId);
+    const avaConfig = Array.isArray(cfg?.avaAuto)
+        ? cfg.avaAuto.find(x => x?.enabled !== false && String(x?.channelId || '') === channelId)
+        : null;
+    if (!avaConfig) return;
+
+    console.log('🗺️ AVA raw MESSAGE_CREATE detected: guild=' + guildId +
+        ' channel=' + channelId + ' message=' + messageId +
+        ' attachments=' + (Array.isArray(data.attachments) ? data.attachments.length : 0));
+
+    const rawAttachments = Array.isArray(data.attachments)
+        ? data.attachments.map(a => ({ id: a?.id, name: a?.filename || a?.name || 'discord-image', url: a?.url || '', proxyURL: a?.proxy_url || a?.proxyURL || '', contentType: a?.content_type || a?.contentType || '' })).filter(a => a.url)
+        : [];
+
+    // MESSAGE_CREATE can arrive before the message is available through REST.
+    // Retry a few times instead of silently losing the image forever.
+    const attempt = async (retry = 0) => {
+        try {
+            const channel = await client.channels.fetch(channelId);
+            if (!channel?.messages?.fetch) return false;
+            const fetchedMessage = await channel.messages.fetch(messageId, { force: true }).catch(() => null);
+            if (!fetchedMessage) {
+                if (retry < 3) {
+                    const timer = setTimeout(() => {
+                        avaRawRetryTimers.delete(messageId);
+                        attempt(retry + 1).catch(err => console.error('❌ AVA raw retry error:', err.message));
+                    }, 750 * (retry + 1));
+                    avaRawRetryTimers.set(messageId, timer);
+                } else {
+                    console.warn('⚠️ AVA raw message fetch failed for ' + messageId + '. Check View Channel + Read Message History.');
+                }
+                return false;
+            }
+            return await guildContext.run({ guildId }, async () => processAvaImageMessage(fetchedMessage, rawAttachments));
+        } catch (err) {
+            if (retry < 3) {
+                const timer = setTimeout(() => {
+                    avaRawRetryTimers.delete(messageId);
+                    attempt(retry + 1).catch(retryErr => console.error('❌ AVA raw retry error:', retryErr.message));
+                }, 750 * (retry + 1));
+                avaRawRetryTimers.set(messageId, timer);
+                return false;
+            }
+            throw err;
+        }
+    };
+    if (avaRawRetryTimers.has(messageId)) return;
+    try {
+        await attempt(0);
+    } catch (err) {
+        console.error('❌ AVA raw message fetch/process error:', err.message);
+    }
+});
+
+client.on('messageCreate', async message => {
+    return guildContext.run({ guildId: message.guildId }, async () => {
+    if (message.author.bot) return;
+    console.log('📨 Discord messageCreate: guild=' + (message.guildId || 'DM') +
+        ' channel=' + (message.channelId || message.channel?.id || 'unknown') +
+        ' message=' + (message.id || 'unknown') +
+        ' attachments=' + (message.attachments?.size || 0));
+    if (message.attachments?.size) {
+        console.log('📎 Discord image/message attachment received: guild=' +
+            (message.guildId || 'DM') + ' channel=' +
+            (message.channelId || message.channel?.id || 'unknown') +
+            ' attachments=' + message.attachments.size);
+    }
+    try {
+        const handledAva = await processAvaImageMessage(message);
+        if (handledAva) return;
+    } catch (err) {
+        console.error('❌ AVA messageCreate error:', err.message);
+    }
+    const match = message.content.match(/https?:\/\/(?:east\.)?albionbb\.com\/battles\/[^\s]+/i);
+    if (!match) return;
+
+    const matchingGuildConfig = targetGuilds.find(g => g.channelId === message.channel.id);
+    if (targetGuilds.some(g => g.channelId) && !matchingGuildConfig) {
+        return; 
+    }
+
+    try {
+        const status = await message.reply('⏳ กำลังดึงสถิติและสร้างรายงานจาก Official Albion API...');
+        await processBattleReport(match[0], status, true);
+    } catch (err) { console.error('❌ messageCreate error:', err); }
+    });
+});
+
+client.on('error', err => console.error('❌ Discord client error:', err));
+process.on('unhandledRejection', err => console.error('❌ Unhandled rejection:', err));
+process.on('uncaughtException', err => console.error('❌ Uncaught exception:', err));
+
+console.log('🛡️ AUTO-BATTLE FIX V3 LOADED: Fully automated battle reports & /daily bonus feature enabled');
+
+client.login(BOT_TOKEN);
