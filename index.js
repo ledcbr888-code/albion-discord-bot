@@ -2886,17 +2886,44 @@ async function fetchBattleHubMapIndex() {
 }
 
 async function getAvaMapSuggestions(ocrCandidates = [], limit = 5) {
-    const inputs = [...new Set(ocrCandidates.filter(Boolean).map(value => normalizeAvaOcrMapName(value).replace(/\s+/g, '')).filter(Boolean))];
-    const canonicalNames = await fetchBattleHubMapIndex();
-    // Never present raw OCR text as a selectable map. Every option must be a
-    // canonical name collected from the real Battle Hub map index.
-    if (!canonicalNames.length) return [];
-    return canonicalNames.map(name => ({
-        name,
-        score: inputs.reduce((best, input) => Math.max(best, avaNameSimilarity(input, name)), 0)
-    })).sort((a, b) => b.score - a.score || a.name.localeCompare(b.name)).slice(0, limit);
-}
+    const rawInputs = [...new Set(ocrCandidates.filter(Boolean).map(String).filter(Boolean))];
+    const inputs = rawInputs
+        .map(value => normalizeAvaOcrMapName(value).replace(/\s+/g, ''))
+        .filter(Boolean);
 
+    const canonicalNames = await fetchBattleHubMapIndex();
+
+    // Normal path: rank against the canonical Avalon map index.
+    if (canonicalNames.length) {
+        return canonicalNames.map(name => ({
+            name,
+            score: inputs.reduce((best, input) => Math.max(best, avaNameSimilarity(input, name)), 0)
+        }))
+            .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
+            .slice(0, limit);
+    }
+
+    // Fallback: the map index can temporarily be unavailable (Cloudflare,
+    // sitemap changes, transient network errors, etc.). Do not fail OCR just
+    // because the index is empty. resolveAvaMapName() can verify an exact
+    // normalized OCR name directly against the real Battle Hub map page.
+    const verified = [];
+    for (const input of rawInputs) {
+        try {
+            const resolved = await resolveAvaMapName(input);
+            if (!resolved?.name || Number(resolved.score || 0) < 0.62) continue;
+            if (!verified.some(x => normalizeAvaLookupName(x.name) === normalizeAvaLookupName(resolved.name))) {
+                verified.push({ name: resolved.name, score: Number(resolved.score || 0) });
+            }
+        } catch (err) {
+            console.warn('⚠️ AVA direct map verification fallback failed for ' + input + ': ' + err.message);
+        }
+    }
+
+    return verified
+        .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
+        .slice(0, limit);
+}
 function avaSelectionComponents(guildId, token, suggestions) {
     const select = new StringSelectMenuBuilder()
         .setCustomId('ava_select:' + guildId + ':' + token)
