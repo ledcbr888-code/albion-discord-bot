@@ -2768,7 +2768,7 @@ const AVA_OCR_NAME_ALIASES = new Map([
     ['teros-auiusum', 'Teros-Auiusum'],
 
     // Confirmed OCR confusions seen in real AVA screenshots.
-    ['tynos-atatios', 'Tynos-Atatlos'],
+    ['tynos-atatios', 'Tynos-Atatlos'],,
     ['ollent-odesas', 'Qiient-Odesas'],
     ['olient-odesas', 'Qiient-Odesas'],
     ['qient-odesas', 'Qiient-Odesas'],
