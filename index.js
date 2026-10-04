@@ -3463,9 +3463,8 @@ async function fetchAlbionRoadsMapData(lookupName) {
 async function fetchAvaMapDataWithFallback(mapName, ocrCandidates = []) {
     const errors = [];
 
-    // When the caller already resolved the OCR result to a canonical map name
-    // (the normal /ava image path), do not resolve it again. Re-resolving causes
-    // another remote map lookup and was adding a large delay before the card.
+    // Avoid resolving the same OCR result twice. If mapName is already the
+    // corrected/canonical candidate, go straight to the data source.
     let lookupName = mapName;
     const normalizedMap = normalizeAvaLookupName(mapName);
     const normalizedCorrection = normalizeAvaLookupName(normalizeAvaOcrMapName(mapName));
@@ -3498,7 +3497,63 @@ async function fetchAvaMapDataWithFallback(mapName, ocrCandidates = []) {
         console.log('🗺️ AVA using already-resolved map name: ' + lookupName);
     }
 
+    // Primary: Battle Hub canonical page. It has the verified map title,
+    // POI counts and image in one request, so do not wait for a slow tracker
+    // endpoint before using it.
+    try {
+        const direct = normalizeAvaDataTotals(await fetchAvaMapData(lookupName));
+        if (direct?.name) direct.name = normalizeAvaOcrMapName(direct.name);
+        if (avaDataPointCount(direct) > 0 || direct.mapImage) {
+            console.log('🗺️ AVA direct canonical source used: ' + (direct.name || lookupName));
+            return direct;
+        }
+        errors.push('Battle Hub direct: พบหน้าแต่ไม่มีตัวเลข POI');
+    } catch (err) {
+        errors.push('Battle Hub direct: ' + err.message);
+        console.warn('⚠️ AVA direct canonical source failed for ' + mapName + ': ' + err.message);
+    }
 
+    // Secondary: Avalon Roads Tracker — dedicated Roads of Avalon map database.
+    try {
+        const primary = normalizeAvaDataTotals(await fetchAvalonTrackerMapData(lookupName));
+        if (avaDataPointCount(primary) > 0) {
+            if (primary?.name) primary.name = normalizeAvaOcrMapName(primary.name);
+            if (!primary.mapImage) {
+                try {
+                    const imageData = await fetchBattleHubMapData(lookupName);
+                    if (imageData?.mapImage) primary.mapImage = imageData.mapImage;
+                    if ((!primary.name || primary.name === lookupName) && imageData?.name) primary.name = imageData.name;
+                } catch (imageErr) {
+                    console.warn('⚠️ AVA map image enrichment failed: ' + imageErr.message);
+                }
+            }
+            return primary;
+        }
+        errors.push('Avalon Roads Tracker: พบหน้าแต่ไม่มีตัวเลข POI');
+    } catch (err) {
+        errors.push('Avalon Roads Tracker: ' + err.message);
+        console.warn('⚠️ AVA Avalon Roads Tracker unavailable for ' + mapName + ': ' + err.message);
+    }
+
+    // Fallbacks: other static Avalon map databases.
+    const fallbackSources = [
+        ['Albion Battle Hub', fetchBattleHubMapData],
+        ['Albion Online Builds', fetchAlbionOnlineBuildsAvaMapData],
+        ['Albion Roads', fetchAlbionRoadsMapData]
+    ];
+    for (const [sourceName, fetcher] of fallbackSources) {
+        try {
+            const data = normalizeAvaDataTotals(await fetcher(lookupName));
+            if (avaDataPointCount(data) > 0) return data;
+            errors.push(sourceName + ': พบหน้าแต่ไม่มีตัวเลข');
+        } catch (err) {
+            errors.push(sourceName + ': ' + err.message);
+            console.warn('⚠️ AVA ' + sourceName + ' fallback failed for ' + mapName + ': ' + err.message);
+        }
+    }
+
+    throw new Error('ไม่พบข้อมูล AVA สำหรับ "' + mapName + '"\n' + errors.join('\n'));
+}
 async function downloadImageForCanvas(url) {
     if (!url) return null;
     try { const response = await axios.get(url, { responseType: 'arraybuffer', timeout: 12000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'image/*,*/*;q=0.8' }, validateStatus: status => status >= 200 && status < 300 }); return await loadImage(Buffer.from(response.data)); } catch (_) { return null; }
