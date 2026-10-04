@@ -2887,33 +2887,54 @@ async function fetchBattleHubMapIndex() {
 
 async function getAvaMapSuggestions(ocrCandidates = [], limit = 5) {
     const rawInputs = [...new Set(ocrCandidates.filter(Boolean).map(String).filter(Boolean))];
-    const inputs = rawInputs
+    const normalizedInputs = rawInputs
         .map(value => normalizeAvaOcrMapName(value).replace(/\s+/g, ''))
         .filter(Boolean);
+
+    // Fast path for confirmed OCR aliases. These are curated corrections from
+    // real AVA screenshots, so they must not depend on the remote map index.
+    // Example: Tynos-Atatios -> Tynos-Atatlos.
+    const aliasVerified = [];
+    for (const raw of rawInputs) {
+        const normalized = normalizeAvaOcrMapName(raw).replace(/\s+/g, '');
+        const rawNormalized = normalizeAvaLookupName(raw);
+        const correctedNormalized = normalizeAvaLookupName(normalized);
+        if (normalized && correctedNormalized !== rawNormalized) {
+            if (!aliasVerified.some(x => normalizeAvaLookupName(x.name) === correctedNormalized)) {
+                aliasVerified.push({ name: normalized, score: 1, exact: true, source: 'OCR alias' });
+            }
+        }
+    }
+    if (aliasVerified.length) return aliasVerified.slice(0, limit);
 
     const canonicalNames = await fetchBattleHubMapIndex();
 
     // Normal path: rank against the canonical Avalon map index.
     if (canonicalNames.length) {
-        return canonicalNames.map(name => ({
+        const ranked = canonicalNames.map(name => ({
             name,
-            score: inputs.reduce((best, input) => Math.max(best, avaNameSimilarity(input, name)), 0)
+            score: normalizedInputs.reduce((best, input) => Math.max(best, avaNameSimilarity(input, name)), 0)
         }))
-            .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
-            .slice(0, limit);
+            .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+
+        // If the canonical index does not contain a sufficiently close match,
+        // verify the OCR name directly against the actual Battle Hub page.
+        // This handles transient/incomplete indexes and newly added zones.
+        if (ranked[0] && ranked[0].score >= 0.62) {
+            return ranked.slice(0, limit);
+        }
     }
 
-    // Fallback: the map index can temporarily be unavailable (Cloudflare,
-    // sitemap changes, transient network errors, etc.). Do not fail OCR just
-    // because the index is empty. resolveAvaMapName() can verify an exact
-    // normalized OCR name directly against the real Battle Hub map page.
+    // Fallback: the map index can temporarily be unavailable or incomplete.
+    // resolveAvaMapName() can verify an exact normalized OCR name directly
+    // against the real Battle Hub map page.
     const verified = [];
     for (const input of rawInputs) {
         try {
             const resolved = await resolveAvaMapName(input);
             if (!resolved?.name || Number(resolved.score || 0) < 0.62) continue;
             if (!verified.some(x => normalizeAvaLookupName(x.name) === normalizeAvaLookupName(resolved.name))) {
-                verified.push({ name: resolved.name, score: Number(resolved.score || 0) });
+                verified.push({ name: resolved.name, score: Number(resolved.score || 0), exact: Boolean(resolved.exact), source: 'Battle Hub direct' });
             }
         } catch (err) {
             console.warn('⚠️ AVA direct map verification fallback failed for ' + input + ': ' + err.message);
@@ -2947,6 +2968,13 @@ function avaSelectionComponents(guildId, token, suggestions) {
 async function resolveAvaMapName(input) {
     const normalizedInput = normalizeAvaOcrMapName(input);
     if (!normalizedInput) return { name: '', score: 0, exact: false };
+
+    // Confirmed OCR aliases are deterministic corrections. Accept them before
+    // touching the remote index so a temporary Battle Hub index outage cannot
+    // turn a known-good OCR result into "map not found".
+    if (normalizeAvaLookupName(normalizedInput) !== normalizeAvaLookupName(input)) {
+        return { name: normalizedInput, score: 1, exact: true, source: 'OCR alias' };
+    }
 
     // If the name is already in the preloaded canonical index, accept it
     // immediately. This avoids two extra page requests for every OCR token.
