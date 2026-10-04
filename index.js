@@ -3400,87 +3400,39 @@ async function fetchAlbionRoadsMapData(lookupName) {
 async function fetchAvaMapDataWithFallback(mapName, ocrCandidates = []) {
     const errors = [];
 
-    // Resolve OCR text against canonical Avalon map names before querying sources.
+    // When the caller already resolved the OCR result to a canonical map name
+    // (the normal /ava image path), do not resolve it again. Re-resolving causes
+    // another remote map lookup and was adding a large delay before the card.
     let lookupName = mapName;
-    try {
-        const inputs = [mapName, ...ocrCandidates].filter(Boolean);
-        const ranked = [];
-        for (const input of inputs) {
-            const resolved = await resolveAvaMapName(input);
-            if (resolved?.name) ranked.push({ input, ...resolved });
-        }
-        ranked.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
-        if (ranked[0] && Number(ranked[0].score || 0) >= 0.62) {
-            lookupName = ranked[0].name;
-            console.log('🗺️ AVA fuzzy map match: OCR=' + mapName +
-                ' candidates=' + JSON.stringify(ocrCandidates.slice(0, 8)) +
-                ' -> canonical=' + lookupName +
-                ' score=' + Number(ranked[0].score || 0).toFixed(3));
-        }
-    } catch (err) {
-        console.warn('⚠️ AVA fuzzy name resolver failed: ' + err.message);
-    }
+    const normalizedMap = normalizeAvaLookupName(mapName);
+    const candidateMatchesMap = ocrCandidates.some(candidate =>
+        normalizeAvaLookupName(candidate) === normalizedMap ||
+        normalizeAvaLookupName(normalizeAvaOcrMapName(candidate)) === normalizedMap
+    );
 
-    // Primary: Battle Hub canonical page. It has the verified map title,
-    // POI counts and image in one request, so do not wait for a slow tracker
-    // endpoint before using it.
-    try {
-        const direct = normalizeAvaDataTotals(await fetchAvaMapData(lookupName));
-        if (direct?.name) direct.name = normalizeAvaOcrMapName(direct.name);
-        if (avaDataPointCount(direct) > 0 || direct.mapImage) {
-            console.log('🗺️ AVA direct canonical source used: ' + (direct.name || lookupName));
-            return direct;
-        }
-        errors.push('Battle Hub direct: พบหน้าแต่ไม่มีตัวเลข POI');
-    } catch (err) {
-        errors.push('Battle Hub direct: ' + err.message);
-        console.warn('⚠️ AVA direct canonical source failed for ' + mapName + ': ' + err.message);
-    }
-
-    // Secondary: Avalon Roads Tracker — dedicated Roads of Avalon map database.
-    try {
-        const primary = normalizeAvaDataTotals(await fetchAvalonTrackerMapData(lookupName));
-        if (avaDataPointCount(primary) > 0) {
-            if (primary?.name) primary.name = normalizeAvaOcrMapName(primary.name);
-            // The tracker can provide POI counts but omit the actual map image.
-            // Enrich the result from Battle Hub so the generated Discord card
-            // always has a usable map image when the page exists.
-            if (!primary.mapImage) {
-                try {
-                    const imageData = await fetchBattleHubMapData(lookupName);
-                    if (imageData?.mapImage) primary.mapImage = imageData.mapImage;
-                    if ((!primary.name || primary.name === lookupName) && imageData?.name) primary.name = imageData.name;
-                } catch (imageErr) {
-                    console.warn('⚠️ AVA map image enrichment failed: ' + imageErr.message);
-                }
-            }
-            return primary;
-        }
-        errors.push('Avalon Roads Tracker: พบหน้าแต่ไม่มีตัวเลข POI');
-    } catch (err) {
-        errors.push('Avalon Roads Tracker: ' + err.message);
-        console.warn('⚠️ AVA Avalon Roads Tracker unavailable for ' + mapName + ': ' + err.message);
-    }
-
-    // Fallbacks: other static Avalon map databases.
-    const fallbackSources = [
-        ['Albion Battle Hub', fetchBattleHubMapData],
-        ['Albion Online Builds', fetchAlbionOnlineBuildsAvaMapData],
-        ['Albion Roads', fetchAlbionRoadsMapData]
-    ];
-    for (const [sourceName, fetcher] of fallbackSources) {
+    if (!candidateMatchesMap || !ocrCandidates.length) {
         try {
-            const data = normalizeAvaDataTotals(await fetcher(lookupName));
-            if (avaDataPointCount(data) > 0) return data;
-            errors.push(sourceName + ': พบหน้าแต่ไม่มีตัวเลข');
+            const inputs = [mapName, ...ocrCandidates].filter(Boolean);
+            const ranked = [];
+            for (const input of inputs) {
+                const resolved = await resolveAvaMapName(input);
+                if (resolved?.name) ranked.push({ input, ...resolved });
+            }
+            ranked.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+            if (ranked[0] && Number(ranked[0].score || 0) >= 0.62) {
+                lookupName = ranked[0].name;
+                console.log('🗺️ AVA fuzzy map match: OCR=' + mapName +
+                    ' candidates=' + JSON.stringify(ocrCandidates.slice(0, 8)) +
+                    ' -> canonical=' + lookupName + ' score=' + Number(ranked[0].score || 0).toFixed(3));
+            }
         } catch (err) {
-            errors.push(sourceName + ': ' + err.message);
-            console.warn('⚠️ AVA ' + sourceName + ' fallback failed for ' + mapName + ': ' + err.message);
+            console.warn('⚠️ AVA fuzzy name resolver failed: ' + err.message);
         }
+    } else {
+        console.log('🗺️ AVA using already-resolved map name: ' + lookupName);
     }
 
-    throw new Error('ไม่พบข้อมูล AVA สำหรับ "' + mapName + '"\n' + errors.join('\n'));
-}
+
 async function downloadImageForCanvas(url) {
     if (!url) return null;
     try { const response = await axios.get(url, { responseType: 'arraybuffer', timeout: 12000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'image/*,*/*;q=0.8' }, validateStatus: status => status >= 200 && status < 300 }); return await loadImage(Buffer.from(response.data)); } catch (_) { return null; }
