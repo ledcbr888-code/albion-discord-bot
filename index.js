@@ -3778,7 +3778,7 @@ async function processAvaImageMessage(message, fallbackAttachments = []) {
         const top = suggestions[0];
 
         // ถ้าความมั่นใจสูงมาก ให้ทำต่ออัตโนมัติ ไม่ต้องถามผู้ใช้
-        if (top && Number(top.score || 0) >= 0.94) {
+        if (top && (top.exact || Number(top.score || 0) >= 0.985)) {
             const data = await fetchAvaMapDataWithFallback(top.name, [top.name, ...ocrCandidates]);
             const card = await generateAvaRoadsCard(data, ocr.mapName);
             await status.edit({
