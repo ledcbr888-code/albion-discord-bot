@@ -2544,15 +2544,28 @@ async function ocrWithSystemTesseract(buffer, psm = 6) {
     finally { for (const file of [inputPath, outputPath]) { try { if (fs.existsSync(file)) fs.unlinkSync(file); } catch (_) {} } }
 }
 
+let avaTesseractWorkerPromise = null;
+
 async function ocrWithTesseractJs(buffer) {
-    let tesseract; try { tesseract = require('tesseract.js'); } catch (_) { return null; }
-    let worker;
+    let tesseract;
+    try { tesseract = require('tesseract.js'); } catch (_) { return null; }
+
+    // Reuse one worker. Creating/loading a new Tesseract.js worker for every
+    // crop is extremely expensive and can make AVA replies take tens of seconds.
     try {
-        worker = await tesseract.createWorker('eng');
+        if (!avaTesseractWorkerPromise) {
+            avaTesseractWorkerPromise = tesseract.createWorker('eng').catch(err => {
+                avaTesseractWorkerPromise = null;
+                throw err;
+            });
+        }
+        const worker = await avaTesseractWorkerPromise;
         const result = await worker.recognize(buffer);
         return result?.data?.text || null;
-    } catch (err) { console.warn('⚠️ Tesseract.js OCR failed:', err.message); return null; }
-    finally { try { if (worker) await worker.terminate(); } catch (_) {} }
+    } catch (err) {
+        console.warn('⚠️ Tesseract.js OCR failed:', err.message);
+        return null;
+    }
 }
 
 async function detectAvaMapNameFromImage(imageBuffer) {
@@ -2560,93 +2573,59 @@ async function detectAvaMapNameFromImage(imageBuffer) {
     if (avaOcrCache.has(cacheKey)) return avaOcrCache.get(cacheKey);
 
     const image = await loadImage(imageBuffer);
-    const crops = [];
 
-    // Map names are normally near the top of the AVA screenshot.
-    // Keep a full-ish crop as a fallback for alternate layouts.
-    const makeCrop = (sourceHeightRatio, scale) => {
-        const width = Math.max(1, Math.round(image.width * scale));
-        const height = Math.max(1, Math.round(Math.min(image.height * sourceHeightRatio, 1000) * scale));
-        const canvas = createCanvas(width, height);
-        const ctx = canvas.getContext('2d');
-        ctx.fillStyle = '#ffffff';
-        ctx.fillRect(0, 0, width, height);
-        ctx.drawImage(image, 0, 0, width, Math.round(image.height * scale));
-        return canvas.toBuffer('image/png');
-    };
-    const makeTitleCrop = () => {
-        const scale = 6;
-        const cropHeight = Math.max(1, Math.round(image.height * 0.88));
-        const width = Math.max(1, Math.round(image.width * scale));
-        const height = Math.max(1, Math.round(cropHeight * scale));
-        const canvas = createCanvas(width, height);
-        const ctx = canvas.getContext('2d');
-        ctx.drawImage(image, 0, 0, width, height);
-        const pixels = ctx.getImageData(0, 0, width, height);
-        // Convert the small Discord preview to high-contrast grayscale. This
-        // makes the beige title text readable against the dark game UI.
-        for (let i = 0; i < pixels.data.length; i += 4) {
-            const r = pixels.data[i], g = pixels.data[i + 1], b = pixels.data[i + 2];
-            const gray = Math.max(0, Math.min(255, Math.round((0.299 * r + 0.587 * g + 0.114 * b - 80) * 2.2)));
-            pixels.data[i] = pixels.data[i + 1] = pixels.data[i + 2] = gray;
-        }
-        ctx.putImageData(pixels, 0, 0);
-        return canvas.toBuffer('image/png');
-    };
-
-    // Keep the first OCR input small: the title banner is at the top and a
-    // 2x crop is enough. Larger 4x images make Tesseract very slow on hosts
-    // with limited CPU without improving title recognition.
-    crops.push(makeCrop(0.30, 2));
-    crops.push(makeCrop(0.45, 4));
-    crops.push(makeCrop(0.72, 3));
-    crops.push(makeCrop(1.00, 3));
+    // AVA map names are in the upper part of the screenshot. Keep the OCR
+    // input focused and small: large multi-crop OCR was the main source of
+    // the long "กำลังอ่านชื่อแมพ..." delay.
+    const scale = 3;
+    const sourceCropHeight = Math.max(1, Math.min(image.height * 0.55, 900));
+    const width = Math.max(1, Math.round(image.width * scale));
+    const height = Math.max(1, Math.round(sourceCropHeight * scale));
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(image, 0, 0, width, height);
 
     const texts = [];
     const candidates = [];
     const addCandidate = value => {
         const name = normalizeMapNameText(value).replace(/\s+/g, '');
         if (!name) return;
-        if (!candidates.some(x => normalizeAvaLookupName(x) === normalizeAvaLookupName(name))) candidates.push(name);
+        if (!candidates.some(x => normalizeAvaLookupName(x) === normalizeAvaLookupName(name))) {
+            candidates.push(name);
+        }
     };
 
-    // Fast path: the map title is normally in the top banner. Two focused
-    // system-Tesseract passes are much faster than running every crop through
-    // system Tesseract and Tesseract.js sequentially.
-    const fastCrop = makeTitleCrop();
-    const fastTexts = [await ocrWithSystemTesseract(fastCrop, 11)];
-    for (const text of fastTexts) {
+    // Fast path: one small system-Tesseract pass. If the host has system
+    // Tesseract this normally finishes in a few seconds or less.
+    const crop = canvas.toBuffer('image/png');
+    for (const psm of [11, 7]) {
+        const text = await ocrWithSystemTesseract(crop, psm);
         if (text) {
             texts.push(text);
             for (const name of extractMapNamesFromOcr(text)) addCandidate(name);
         }
-    }
-    if (candidates.length) {
-        const fastResult = { mapName: candidates[0], candidates: candidates.slice(0, 12), rawText: texts.join('\n') };
-        avaOcrCache.set(cacheKey, fastResult);
-        return fastResult;
+        if (candidates.length) {
+            const result = {
+                mapName: candidates[0],
+                candidates: candidates.slice(0, 12),
+                rawText: texts.join('\n')
+            };
+            avaOcrCache.set(cacheKey, result);
+            return result;
+        }
     }
 
-    // The focused passes above already covered crops[0] with PSM 7 and 6.
-    // Only run the remaining expensive passes when the fast path found nothing.
-    for (const [cropIndex, crop] of crops.entries()) {
-        const psms = cropIndex === 0 ? [11] : [7, 6, 11];
-        for (const psm of psms) {
-            const text = await ocrWithSystemTesseract(crop, psm);
-            if (text) {
-                texts.push(text);
-                for (const name of extractMapNamesFromOcr(text)) addCandidate(name);
-            }
-        }
-        const jsText = await ocrWithTesseractJs(crop);
-        if (jsText) {
-            texts.push(jsText);
-            for (const name of extractMapNamesFromOcr(jsText)) addCandidate(name);
-        }
+    // Hosting fallback: run Tesseract.js only once, using the same focused
+    // crop and a reusable worker. Do not create/terminate a worker per crop.
+    const jsText = await ocrWithTesseractJs(crop);
+    if (jsText) {
+        texts.push(jsText);
+        for (const name of extractMapNamesFromOcr(jsText)) addCandidate(name);
     }
 
     const combined = texts.join('\n');
     for (const name of extractMapNamesFromOcr(combined)) addCandidate(name);
+
     const result = {
         mapName: candidates[0] || null,
         candidates: candidates.slice(0, 12),
@@ -2893,50 +2872,61 @@ async function getAvaMapSuggestions(ocrCandidates = [], limit = 5) {
         .map(value => normalizeAvaOcrMapName(value).replace(/\s+/g, ''))
         .filter(Boolean);
 
-    // Fast path for confirmed OCR aliases. These are curated corrections from
-    // real AVA screenshots, so they must not depend on the remote map index.
-    // Example: Tynos-Atatios -> Tynos-Atatlos.
+    // Confirmed aliases never need the remote index.
     const aliasVerified = [];
     for (const raw of rawInputs) {
         const normalized = normalizeAvaOcrMapName(raw).replace(/\s+/g, '');
-        const rawNormalized = normalizeAvaLookupName(raw);
-        const correctedNormalized = normalizeAvaLookupName(normalized);
-        if (normalized && correctedNormalized !== rawNormalized) {
-            if (!aliasVerified.some(x => normalizeAvaLookupName(x.name) === correctedNormalized)) {
+        if (normalized && normalizeAvaLookupName(normalized) !== normalizeAvaLookupName(raw)) {
+            if (!aliasVerified.some(x => normalizeAvaLookupName(x.name) === normalizeAvaLookupName(normalized))) {
                 aliasVerified.push({ name: normalized, score: 1, exact: true, source: 'OCR alias' });
             }
         }
     }
     if (aliasVerified.length) return aliasVerified.slice(0, limit);
 
-    const canonicalNames = await fetchBattleHubMapIndex();
+    // Try the first OCR result directly before downloading the canonical index.
+    // For a correct map name this is normally the fastest path.
+    if (rawInputs.length) {
+        try {
+            const resolved = await resolveAvaMapName(rawInputs[0]);
+            if (resolved?.name && Number(resolved.score || 0) >= 0.94) {
+                return [{
+                    name: resolved.name,
+                    score: Number(resolved.score || 0),
+                    exact: Boolean(resolved.exact),
+                    source: resolved.source || 'Battle Hub direct'
+                }];
+            }
+        } catch (err) {
+            console.warn('⚠️ AVA fast direct map verification failed: ' + err.message);
+        }
+    }
 
-    // Normal path: rank against the canonical Avalon map index.
+    const canonicalNames = await fetchBattleHubMapIndex();
     if (canonicalNames.length) {
         const ranked = canonicalNames.map(name => ({
             name,
             score: normalizedInputs.reduce((best, input) => Math.max(best, avaNameSimilarity(input, name)), 0)
-        }))
-            .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+        })).sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
 
-        // If the canonical index does not contain a sufficiently close match,
-        // verify the OCR name directly against the actual Battle Hub page.
-        // This handles transient/incomplete indexes and newly added zones.
         if (ranked[0] && ranked[0].score >= 0.62) {
             return ranked.slice(0, limit);
         }
     }
 
-    // Fallback: the map index can temporarily be unavailable or incomplete.
-    // resolveAvaMapName() can verify an exact normalized OCR name directly
-    // against the real Battle Hub map page.
+    // Last fallback: verify other OCR candidates directly.
     const verified = [];
-    for (const input of rawInputs) {
+    for (const input of rawInputs.slice(1)) {
         try {
             const resolved = await resolveAvaMapName(input);
             if (!resolved?.name || Number(resolved.score || 0) < 0.62) continue;
             if (!verified.some(x => normalizeAvaLookupName(x.name) === normalizeAvaLookupName(resolved.name))) {
-                verified.push({ name: resolved.name, score: Number(resolved.score || 0), exact: Boolean(resolved.exact), source: 'Battle Hub direct' });
+                verified.push({
+                    name: resolved.name,
+                    score: Number(resolved.score || 0),
+                    exact: Boolean(resolved.exact),
+                    source: resolved.source || 'Battle Hub direct'
+                });
             }
         } catch (err) {
             console.warn('⚠️ AVA direct map verification fallback failed for ' + input + ': ' + err.message);
@@ -2947,6 +2937,7 @@ async function getAvaMapSuggestions(ocrCandidates = [], limit = 5) {
         .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
         .slice(0, limit);
 }
+
 function avaSelectionComponents(guildId, token, suggestions) {
     const select = new StringSelectMenuBuilder()
         .setCustomId('ava_select:' + guildId + ':' + token)
@@ -2972,20 +2963,14 @@ async function resolveAvaMapName(input) {
     if (!normalizedInput) return { name: '', score: 0, exact: false };
 
     // Confirmed OCR aliases are deterministic corrections. Accept them before
-    // touching the remote index so a temporary Battle Hub index outage cannot
-    // turn a known-good OCR result into "map not found".
+    // any network request.
     if (normalizeAvaLookupName(normalizedInput) !== normalizeAvaLookupName(input)) {
         return { name: normalizedInput, score: 1, exact: true, source: 'OCR alias' };
     }
 
-    // If the name is already in the preloaded canonical index, accept it
-    // immediately. This avoids two extra page requests for every OCR token.
-    const candidates = await fetchBattleHubMapIndex();
-    const exactCanonical = candidates.find(name => normalizeAvaLookupName(name) === normalizeAvaLookupName(normalizedInput));
-    if (exactCanonical) return { name: exactCanonical, score: 1, exact: true };
-
-    // First try the exact name against Battle Hub. This is important for OCR results
-    // such as "Sasitos-Umogaum", which is a valid T4 Avalon map.
+    // Try the exact Battle Hub page BEFORE downloading the large canonical
+    // map index. This makes normal valid OCR names resolve with one request
+    // instead of waiting for the sitemap/index first.
     const directSlug = normalizedInput.toLowerCase().replace(/\s+/g, '-');
     const directUrls = [
         `https://albionbattlehub.com/en/avalon-maps/${encodeURIComponent(directSlug)}`,
@@ -2993,21 +2978,30 @@ async function resolveAvaMapName(input) {
     ];
     for (const url of directUrls) {
         try {
-            const $ = cheerio.load(await requestBattleHubHtml(url, 10000));
+            const $ = cheerio.load(await requestBattleHubHtml(url, 6000));
             const h1 = $('h1').first().text().trim();
             if (h1 && normalizeAvaLookupName(h1) === normalizeAvaLookupName(normalizedInput)) {
-                return { name: h1, score: 1, exact: true };
+                return { name: h1, score: 1, exact: true, source: 'Battle Hub direct' };
             }
         } catch (_) {}
     }
 
+    // Only fall back to the canonical index when the exact page did not verify.
+    const candidates = await fetchBattleHubMapIndex();
+    const exactCanonical = candidates.find(name => normalizeAvaLookupName(name) === normalizeAvaLookupName(normalizedInput));
+    if (exactCanonical) return { name: exactCanonical, score: 1, exact: true };
+
     if (!candidates.length) return { name: normalizedInput, score: 0, exact: false };
-    const ranked = candidates.map(name => ({ name, score: avaNameSimilarity(normalizedInput, name) }))
-        .sort((a, b) => b.score - a.score);
+
+    const ranked = candidates.map(name => ({
+        name,
+        score: avaNameSimilarity(normalizedInput, name)
+    })).sort((a, b) => b.score - a.score);
+
     const best = ranked[0];
-    // OCR can be off by 1-2 characters. Require a reasonably strong fuzzy match,
-    // but do not reject a clear one-character OCR typo such as Aulusum -> Auiusum.
-    if (!best || best.score < 0.62) return { name: normalizedInput, score: best?.score || 0, exact: false };
+    if (!best || best.score < 0.62) {
+        return { name: normalizedInput, score: best?.score || 0, exact: false };
+    }
     return { name: best.name, score: best.score, exact: false };
 }
 
