@@ -3631,6 +3631,61 @@ async function fetchAvaMapDataWithFallback(mapName, ocrCandidates = []) {
         }
     }
 
+    // IMPORTANT: The selected name already came from the authoritative
+    // Avalon map index. A failure of the POI providers (403/404/timeout)
+    // must NOT turn a real map into "map not found".
+    //
+    // Example: Qiient-Odesas is a real T6 Roads of Avalon zone, but some
+    // providers can reject the bot request while the public map still exists.
+    // Return a verified identity-only record so the selector can finish and
+    // the map-card renderer can still try its image fallbacks.
+    try {
+        const canonicalNames = await fetchAuthoritativeAvaMapIndex();
+        const canonical = canonicalNames.find(name =>
+            normalizeAvaLookupName(name) === normalizeAvaLookupName(lookupName)
+        );
+
+        if (canonical) {
+            const verifiedName = normalizeAvaOcrMapName(canonical);
+            const slug = normalizeAvaSlug(verifiedName);
+            const emptyCounts = {
+                'Green chest': 0,
+                'Blue chest': 0,
+                'Gold chest': 0,
+                Stone: 0,
+                Wood: 0,
+                Ore: 0,
+                Hide: 0,
+                Fiber: 0,
+                'Solo dungeon': 0,
+                'Group dungeon': 0
+            };
+
+            console.warn(
+                '⚠️ AVA map is verified but POI providers are unavailable: ' +
+                verifiedName
+            );
+
+            return {
+                slug,
+                name: verifiedName,
+                tier: 'ยืนยันชื่อแล้ว • รอข้อมูล POI',
+                layout: 'ไม่พบข้อมูล',
+                connection: '',
+                counts: emptyCounts,
+                totalChests: 0,
+                totalResources: 0,
+                totalDungeons: 0,
+                mapImage: 'https://albionbattlehub.com/api/og/avalon?slug=' + encodeURIComponent(slug),
+                sourceUrl: 'https://albiononline.th.gl/db/locations/' + encodeURIComponent(slug),
+                verifiedOnly: true,
+                providerErrors: errors
+            };
+        }
+    } catch (err) {
+        console.warn('⚠️ AVA authoritative verification fallback failed: ' + err.message);
+    }
+
     throw new Error('ไม่พบข้อมูล AVA สำหรับ "' + mapName + '"\n' + errors.join('\n'));
 }
 async function downloadImageForCanvas(url) {
