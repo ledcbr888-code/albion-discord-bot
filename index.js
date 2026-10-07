@@ -983,6 +983,176 @@ async function generatePlayerWeaponReportImage(players, battleInfo = {}) {
     return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: 'battle-report.png' });
 }
 
+async function generateBattleReportFallbackImage(players, battleInfo = {}) {
+    try {
+        if (!Array.isArray(players) || !players.length) return null;
+
+        const width = 1600;
+        const playersPerRow = 7;
+        const cardWidth = 210;
+        const cardHeight = 214;
+        const gapX = 14;
+        const gapY = 14;
+        const padding = 30;
+        const headerHeight = 96;
+        const statsHeight = 92;
+        const gridOffsetY = padding + headerHeight + statsHeight + 20;
+        const rows = Math.ceil(players.length / playersPerRow);
+        const footerHeight = 58;
+        const height = gridOffsetY + rows * cardHeight + Math.max(0, rows - 1) * gapY + footerHeight + padding;
+
+        const canvas = createCanvas(width, height);
+        const ctx = canvas.getContext('2d');
+
+        ctx.fillStyle = '#02050a';
+        ctx.fillRect(0, 0, width, height);
+
+        const bg = ctx.createLinearGradient(0, 0, 0, height);
+        bg.addColorStop(0, '#17243b');
+        bg.addColorStop(0.45, '#0a1322');
+        bg.addColorStop(1, '#010409');
+        ctx.fillStyle = bg;
+        ctx.fillRect(0, 0, width, height);
+
+        ctx.fillStyle = '#dc2626';
+        ctx.fillRect(0, 0, width, 4);
+
+        ctx.fillStyle = '#f8fafc';
+        ctx.font = '900 38px Arial, sans-serif';
+        ctx.fillText('BATTLE REPORT', padding, padding + 37);
+
+        ctx.fillStyle = '#94a3b8';
+        ctx.font = 'bold 12px Arial, sans-serif';
+        ctx.fillText(
+            `EAST SERVER   |   ${formatUTCTime(battleInfo.battleTime || Date.now())}   |   MATCH ID: ${battleInfo.matchId || 'N/A'}`,
+            padding,
+            padding + 60
+        );
+
+        let totalKills = 0;
+        let totalDeaths = 0;
+        let totalFame = 0;
+        for (const p of players) {
+            totalKills += Number(p.kills) || 0;
+            totalDeaths += Number(p.deaths) || 0;
+            totalFame += Number(p.fame) || 0;
+        }
+
+        const statY = padding + headerHeight;
+        const statGap = 12;
+        const statW = (width - padding * 2 - statGap * 4) / 5;
+        const stats = [
+            ['TOTAL KILLS', String(totalKills), '#ef4444'],
+            ['TOTAL DEATHS', String(totalDeaths), '#f87171'],
+            ['TOTAL FAME', formatFame(totalFame), '#fbbf24'],
+            ['PLAYERS', String(players.length), '#60a5fa'],
+            ['SERVER', 'EAST', '#d946ef']
+        ];
+
+        stats.forEach((st, i) => {
+            const x = padding + i * (statW + statGap);
+            roundedFallback(ctx, x, statY, statW, 82, 13, '#08111f', '#1e3049');
+            ctx.fillStyle = st[2];
+            ctx.fillRect(x, statY, 4, 82);
+            ctx.fillStyle = '#64748b';
+            ctx.font = '900 9px Arial, sans-serif';
+            ctx.fillText(st[0], x + 18, statY + 24);
+            ctx.fillStyle = '#f8fafc';
+            ctx.font = '900 22px Arial, sans-serif';
+            ctx.fillText(st[1], x + 18, statY + 54);
+        });
+
+        players.forEach((p, i) => {
+            const col = i % playersPerRow;
+            const row = Math.floor(i / playersPerRow);
+            const x = padding + col * (cardWidth + gapX);
+            const y = gridOffsetY + row * (cardHeight + gapY);
+            const isTop = i === 0;
+            roundedFallback(ctx, x, y, cardWidth, cardHeight, 15, isTop ? '#111a2b' : '#07101c', isTop ? '#f59e0b' : '#22344d');
+
+            ctx.fillStyle = isTop ? '#f59e0b' : '#142238';
+            ctx.fillRect(x + 10, y + 10, 38, 23);
+
+            ctx.fillStyle = isTop ? '#111827' : '#cbd5e1';
+            ctx.font = '900 11px Arial, sans-serif';
+            ctx.fillText(String(i + 1).padStart(2, '0'), x + 21, y + 26);
+
+            const cx = x + cardWidth / 2;
+            const cy = y + 63;
+            ctx.fillStyle = '#030811';
+            ctx.beginPath();
+            ctx.arc(cx, cy, 45, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = isTop ? '#f59e0b' : '#60a5fa';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            ctx.fillStyle = '#94a3b8';
+            ctx.font = '900 22px Arial, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('⚔', cx, cy + 8);
+            ctx.textAlign = 'left';
+
+            let name = String(p.displayName || p.name || 'Unknown').trim();
+            if (name.length > 22) name = name.slice(0, 20) + '..';
+            ctx.fillStyle = '#f8fafc';
+            ctx.font = '900 15px Arial, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(name, cx, y + 145);
+
+            const guild = String(p.guild || '').trim();
+            if (guild) {
+                ctx.fillStyle = '#64748b';
+                ctx.font = 'bold 8px Arial, sans-serif';
+                ctx.fillText(guild.length > 21 ? guild.slice(0, 19) + '..' : guild, cx, y + 158);
+            }
+
+            ctx.fillStyle = '#ef4444';
+            ctx.font = '900 12px Arial, sans-serif';
+            ctx.fillText(String(Number(p.kills) || 0), cx - 28, y + 181);
+            ctx.fillStyle = '#475569';
+            ctx.fillText('/', cx, y + 181);
+            ctx.fillStyle = '#f87171';
+            ctx.fillText(String(Number(p.deaths) || 0), cx + 22, y + 181);
+
+            ctx.fillStyle = '#fbbf24';
+            ctx.font = '900 11px Arial, sans-serif';
+            ctx.fillText(formatFame(p.fame || 0), cx, y + 202);
+            ctx.textAlign = 'left';
+        });
+
+        ctx.fillStyle = '#64748b';
+        ctx.font = '900 9px Arial, sans-serif';
+        ctx.fillText('VICTORY BELONGS TO THOSE WHO FIGHT TOGETHER', padding, height - 20);
+        ctx.fillStyle = '#ef4444';
+        ctx.textAlign = 'right';
+        ctx.fillText('POWERED BY  •  BOTBOSS', width - padding, height - 20);
+        ctx.textAlign = 'left';
+
+        return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: 'battle-report.png' });
+    } catch (err) {
+        console.error('❌ Battle report fallback image error:', err.stack || err.message);
+        return null;
+    }
+}
+
+function roundedFallback(ctx, x, y, w, h, r, fill, stroke) {
+    ctx.beginPath();
+    ctx.moveTo(x + r, y);
+    ctx.arcTo(x + w, y, x + w, y + h, r);
+    ctx.arcTo(x + w, y + h, x, y + h, r);
+    ctx.arcTo(x, y + h, x, y, r);
+    ctx.arcTo(x, y, x + w, y, r);
+    ctx.closePath();
+    ctx.fillStyle = fill;
+    ctx.fill();
+    if (stroke) {
+        ctx.strokeStyle = stroke;
+        ctx.lineWidth = 1.2;
+        ctx.stroke();
+    }
+}
+
 async function generateTopPerformanceImage(players) {
     if (!players || !players.length) return null;
     const width = 760, cardHeight = 84, gap = 12, padding = 18;
@@ -1238,7 +1408,16 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
         });
         if (playerReport) attachments.push(playerReport);
     } catch (err) {
-        console.error('❌ Weapon report image error:', err.message);
+        console.error('❌ Weapon report image error:', err.stack || err.message);
+        try {
+            const fallbackReport = await generateBattleReportFallbackImage(reportRosterRows, {
+                matchId,
+                battleTime
+            });
+            if (fallbackReport) attachments.push(fallbackReport);
+        } catch (fallbackErr) {
+            console.error('❌ Battle report fallback error:', fallbackErr.stack || fallbackErr.message);
+        }
     }
 
     if (performancePlayers.length) {
