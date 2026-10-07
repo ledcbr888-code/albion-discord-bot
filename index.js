@@ -2755,7 +2755,14 @@ const AVA_OCR_NAME_ALIASES = new Map([
     ['qient-odesas', 'Qiient-Odesas'],
     ['fuyes-lzohun', 'Fuyes-Izohun'],
     ['fuyes-izohun', 'Fuyes-Izohun'],
-    ['coues-xakrom', 'Coues-Exakrom']
+    ['coues-xakrom', 'Coues-Exakrom'],
+
+    // Confirmed OCR confusions from AVA screenshots.
+    ['oasos-uromlium', 'Oasos-Uromlum'],
+    ['oasos-uromliun', 'Oasos-Uromlum'],
+    ['oasos-uroml1um', 'Oasos-Uromlum'],
+    ['siritos-avolirom', 'Siritos-Avoirom'],
+    ['siritos-avo1rom', 'Siritos-Avoirom']
 ]);
 
 function normalizeAvaOcrMapName(value) {
@@ -3845,6 +3852,52 @@ async function processAvaImageMessage(message, fallbackAttachments = []) {
         }
 
         if (!suggestions.length) {
+            // Final local fallback: confirmed OCR aliases are still valid map
+            // names even when every remote Avalon index is blocked/403/404.
+            // Show the selector instead of immediately returning an error.
+            const localAliasSuggestions = [];
+            for (const raw of ocrCandidates) {
+                const corrected = normalizeAvaOcrMapName(raw).replace(/\s+/g, '');
+                if (!corrected) continue;
+                if (normalizeAvaLookupName(corrected) === normalizeAvaLookupName(raw)) continue;
+                if (localAliasSuggestions.some(x => normalizeAvaLookupName(x.name) === normalizeAvaLookupName(corrected))) continue;
+                localAliasSuggestions.push({ name: corrected, score: 1, exact: true, source: 'OCR alias' });
+            }
+
+            if (localAliasSuggestions.length) {
+                const token = Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-6);
+                avaPendingSelections.set(token, {
+                    guildId: String(messageGuildId),
+                    channelId: String(messageChannelId),
+                    userId: String(message.author?.id || ''),
+                    messageId: String(message.id),
+                    statusMessage: status,
+                    imageBuffer,
+                    ocrName: ocr.mapName,
+                    ocrCandidates,
+                    suggestions: localAliasSuggestions.slice(0, 5),
+                    createdAt: Date.now()
+                });
+                await status.edit({
+                    content:
+                        '🗺️ **ตรวจพบภาพ AVA**\n' +
+                        'OCR อ่านได้: ' + String(ocr.mapName) + '\n\n' +
+                        '⚠️ ระบบแก้คำ OCR จากฐานข้อมูลที่ยืนยันแล้ว\n' +
+                        '**เลือกชื่อแมพที่ใกล้เคียงกับในรูป:**',
+                    components: avaSelectionComponents(messageGuildId, token, localAliasSuggestions.slice(0, 5))
+                });
+                setTimeout(() => {
+                    const pending = avaPendingSelections.get(token);
+                    if (!pending) return;
+                    avaPendingSelections.delete(token);
+                    pending.statusMessage.edit({
+                        content: '⏰ หมดเวลาการเลือกชื่อแมพ AVA แล้ว กรุณาส่งรูปอีกครั้ง',
+                        components: []
+                    }).catch(() => {});
+                }, 120000);
+                return true;
+            }
+
             // The suggestion index is only a helper for OCR disambiguation. It
             // must never block a valid map from being processed when the remote
             // Avalon index is unavailable. Try the real data-source fallback
