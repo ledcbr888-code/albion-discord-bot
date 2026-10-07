@@ -1214,7 +1214,17 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
         trackedPlayerNames.has(String(p.displayName || p.name || '').trim().toLowerCase())
     );
 
-    const performancePlayers = explicitlyTrackedRows
+    // Battle image roster rules:
+    // 1) /add guild  -> include EVERY player from the tracked guild.
+    // 2) /add player -> additionally include those explicitly tracked players,
+    //    even when they are outside the tracked guild.
+    // 3) Do not include unrelated players from the battle.
+    //
+    // "rows" is already filtered by the guild/player tracking rules above,
+    // so it is the authoritative roster for the image report.
+    const reportRosterRows = displayRows;
+
+    const performancePlayers = reportRosterRows
         .filter(p => p.damage > 0 || p.healing > 0)
         .sort((a, b) => (b.damage + b.healing) - (a.damage + a.healing))
         .slice(0, 5);
@@ -1222,9 +1232,7 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
     const attachments = [];
 
     try {
-        // IMPORTANT: /add guild does not implicitly add every guild member's
-        // weapon to this image. Only /add player entries are rendered here.
-        const playerReport = await generatePlayerWeaponReportImage(explicitlyTrackedRows, {
+        const playerReport = await generatePlayerWeaponReportImage(reportRosterRows, {
             matchId: matchId,
             battleTime: battleTime
         });
@@ -1306,12 +1314,18 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
         attachments.push(guildSummaryAttachment);
     }
 
+    // Prefer the image report whenever one was successfully generated.
+    // Keep the ANSI/text report as a fallback only when image generation fails.
+    const responseContent = attachments.length > 0
+        ? `🔗 **Battle Link:** <${battleUrl}>\n🖼️ **Battle Report:** รายงานแบบรูปภาพด้านล่าง`
+        : report;
+
     return {
         matchId,
         totalFame,
         guildTotalFrames,
         battleUrl,
-        payload: { content: report, files: attachments }
+        payload: { content: responseContent, files: attachments }
     };
 }
 
