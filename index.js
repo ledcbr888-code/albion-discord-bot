@@ -498,6 +498,17 @@ function getWeaponRenderUrls(weapon, quality = 1) {
     ];
 }
 
+function drawRoundRect(ctx, x, y, w, h, r) {
+    const radius = Math.max(0, Math.min(Number(r) || 0, Math.min(w, h) / 2));
+    ctx.beginPath();
+    ctx.moveTo(x + radius, y);
+    ctx.arcTo(x + w, y, x + w, y + h, radius);
+    ctx.arcTo(x + w, y + h, x, y + h, radius);
+    ctx.arcTo(x, y + h, x, y, radius);
+    ctx.arcTo(x, y, x + w, y, radius);
+    ctx.closePath();
+}
+
 async function loadAlbionWeaponIcon(weapon, quality = 1) {
     const id = normalizeAlbionItemId(weapon);
     if (!id) return null;
