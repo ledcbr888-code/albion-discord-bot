@@ -983,68 +983,6 @@ async function generatePlayerWeaponReportImage(players, battleInfo = {}) {
     return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: 'battle-report.png' });
 }
 
-async function generateBattleReportFallbackImage(players, battleInfo = {}) {
-    try {
-        if (!Array.isArray(players) || !players.length) return null;
-        const width = 1600;
-        const rowHeight = 72;
-        const header = 150;
-        const footer = 70;
-        const height = header + players.length * rowHeight + footer;
-        const canvas = createCanvas(width, height);
-        const ctx = canvas.getContext('2d');
-        ctx.fillStyle = '#050914';
-        ctx.fillRect(0, 0, width, height);
-        ctx.fillStyle = '#ef4444';
-        ctx.fillRect(0, 0, width, 6);
-
-        ctx.fillStyle = '#f8fafc';
-        ctx.font = '900 38px Arial, sans-serif';
-        ctx.fillText('BATTLE REPORT', 40, 58);
-        ctx.fillStyle = '#94a3b8';
-        ctx.font = 'bold 15px Arial, sans-serif';
-        ctx.fillText('EAST SERVER  |  MATCH ID: ' + String(battleInfo.matchId || 'N/A'), 40, 92);
-        ctx.fillText(formatUTCTime(battleInfo.battleTime || Date.now()), 40, 116);
-
-        ctx.fillStyle = '#334155';
-        ctx.fillRect(30, 135, width - 60, 1);
-        ctx.font = '900 14px Arial, sans-serif';
-        ctx.fillStyle = '#94a3b8';
-        ctx.fillText('PLAYER', 45, 160);
-        ctx.fillText('GUILD', 520, 160);
-        ctx.fillText('KILLS', 1040, 160);
-        ctx.fillText('DEATHS', 1160, 160);
-        ctx.fillText('FAME', 1300, 160);
-
-        players.forEach((p, i) => {
-            const y = header + i * rowHeight;
-            ctx.fillStyle = i % 2 ? '#0b1220' : '#0f172a';
-            ctx.fillRect(30, y, width - 60, rowHeight - 2);
-            ctx.fillStyle = '#f8fafc';
-            ctx.font = '900 18px Arial, sans-serif';
-            ctx.fillText(String(p.displayName || p.name || 'Unknown').slice(0, 38), 45, y + 30);
-            ctx.fillStyle = '#64748b';
-            ctx.font = 'bold 14px Arial, sans-serif';
-            ctx.fillText(String(p.guild || '-').slice(0, 42), 520, y + 30);
-            ctx.fillStyle = '#ef4444';
-            ctx.font = '900 18px Arial, sans-serif';
-            ctx.fillText(String(Number(p.kills) || 0), 1040, y + 30);
-            ctx.fillStyle = '#f87171';
-            ctx.fillText(String(Number(p.deaths) || 0), 1160, y + 30);
-            ctx.fillStyle = '#fbbf24';
-            ctx.fillText(formatFame(p.fame || 0), 1300, y + 30);
-        });
-
-        ctx.fillStyle = '#475569';
-        ctx.font = 'bold 12px Arial, sans-serif';
-        ctx.fillText('POWERED BY  •  BOTBOSS', 45, height - 25);
-        return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: 'battle-report.png' });
-    } catch (err) {
-        console.error('❌ Battle report fallback image error:', err.message);
-        return null;
-    }
-}
-
 async function generateTopPerformanceImage(players) {
     if (!players || !players.length) return null;
     const width = 760, cardHeight = 84, gap = 12, padding = 18;
@@ -1301,17 +1239,6 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
         if (playerReport) attachments.push(playerReport);
     } catch (err) {
         console.error('❌ Weapon report image error:', err.message);
-        // Never return a text-only battle report when the main renderer fails.
-        // Generate a dependency-light image fallback from the same filtered roster.
-        try {
-            const fallbackReport = await generateBattleReportFallbackImage(reportRosterRows, {
-                matchId: matchId,
-                battleTime: battleTime
-            });
-            if (fallbackReport) attachments.push(fallbackReport);
-        } catch (fallbackErr) {
-            console.error('❌ Battle report fallback error:', fallbackErr.message);
-        }
     }
 
     if (performancePlayers.length) {
@@ -1408,26 +1335,26 @@ async function processBattleReport(input, targetContext, isMessage = false) {
         const { payload } = await buildBattleReportPayload(matchId, targetGuilds, { guildId: currentGuildId() });
         const files = Array.isArray(payload.files) ? payload.files : [];
 
-        // Send the complete image report in one Discord response.
-        // This applies to /check battles as well as auto-battle/message reports.
-        // Keeping all attachments together avoids falling back to a text-only
-        // presentation or splitting the battle report across follow-up messages.
-        if (files.length > 0) {
-            const imagePayload = {
+        if (files.length > 1) {
+            const firstPayload = {
                 content: payload.content,
-                files
+                files: [files[0]]
             };
             if (isMessage) {
-                await targetContext.edit(imagePayload);
+                await targetContext.edit(firstPayload);
+                for (const file of files.slice(1)) {
+                    await targetContext.channel.send({ files: [file] });
+                }
             } else {
-                await targetContext.editReply(imagePayload);
+                await targetContext.editReply(firstPayload);
+                for (const file of files.slice(1)) {
+                    await targetContext.followUp({ files: [file] });
+                }
             }
             return;
         }
 
-        // Text is only a genuine fallback when every image generator failed.
-        if (isMessage) await targetContext.edit(payload);
-        else await targetContext.editReply(payload);
+        if (isMessage) await targetContext.edit(payload); else await targetContext.editReply(payload);
     } catch (err) {
         console.error('❌ Process battle report error:', err);
         const message = `❌ เกิดข้อผิดพลาดในการประมวลผลไฟต์: \`${err.message}\``;
