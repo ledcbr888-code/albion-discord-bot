@@ -3993,10 +3993,18 @@ function scheduleDailyAutoCheck() {
 // Source: user-provided Asia schedule reference image.
 // ----------------------------------------
 const BANDIT_ASSAULT_SCHEDULE_UTC = [
-    { hour: 5, chance: 30 }, { hour: 7, chance: 50 },
-    { hour: 9, chance: 60 }, { hour: 11, chance: 40 }, { hour: 13, chance: 60 },
-    { hour: 15, chance: 60 }, { hour: 17, chance: 60 }
+    { hour: 2, chance: 30 },
+    { hour: 5, chance: 30 },
+    { hour: 7, chance: 50 },
+    { hour: 9, chance: 60 },
+    { hour: 11, chance: 40 },
+    { hour: 13, chance: 60 },
+    { hour: 15, chance: 60 },
+    { hour: 17, chance: 60 },
+    { hour: 19, chance: 30 },
+    { hour: 21, chance: 20 }
 ];
+const BANDIT_ALERT_WINDOW_MINUTES = 20;
 const BANDIT_SERVER_NAMES = { asia: 'Asia (East)' };
 
 function getNextBanditAssault(now = new Date()) {
@@ -4174,7 +4182,7 @@ async function checkAndSendBanditAlertsForGuild() {
     const minutesUntil = (event.start - now) / 60000;
     // Alert at the 15-minute mark; if the bot was restarted later, alert once
     // immediately while still showing the accurate remaining countdown.
-    if (minutesUntil <= 15 && minutesUntil > 0) {
+    if (minutesUntil <= BANDIT_ALERT_WINDOW_MINUTES && minutesUntil > 0) {
         const key = banditEventKey(event);
         for (const config of banditAutoConfigs) {
             if ((config.server || 'asia') !== 'asia') continue;
@@ -4256,7 +4264,7 @@ const commands = [
         .addSubcommand(s => s.setName('status').setDescription('ดูห้องที่ตั้งค่าตรวจรูป AVA อัตโนมัติ'))
         .addSubcommand(s => s.setName('remove').setDescription('ยกเลิกการตรวจรูป AVA อัตโนมัติ'))
      ,new SlashCommandBuilder().setName('bandit').setDescription('แจ้งเตือนกิจกรรม Bandit Assault เซิร์ฟเวอร์ Asia')
-        .addSubcommand(s => s.setName('setup').setDescription('ตั้งค่าการแจ้งเตือน Bandit Assault ล่วงหน้า 15 นาที')
+        .addSubcommand(s => s.setName('setup').setDescription('ตั้งค่าการแจ้งเตือน Bandit Assault ล่วงหน้า 20 นาที')
             .addChannelOption(o => o.setName('channel').setDescription('ห้องที่ต้องการให้แจ้งเตือน').addChannelTypes(ChannelType.GuildText).setRequired(true))
             .addStringOption(o => o.setName('server').setDescription('เซิร์ฟเวอร์ของตาราง Bandit Assault').setRequired(true)
                 .addChoices({ name: '🌏 Asia (East)', value: 'asia' })))
@@ -4341,7 +4349,8 @@ client.once('clientReady', async () => {
         .then(names => console.log('🗺️ AVA canonical map cache ready: ' + names.length + ' maps'))
         .catch(err => console.warn('⚠️ AVA canonical map cache preload failed: ' + err.message));
     scheduleDailyAutoCheck();
-    setInterval(checkAndSendBanditAlerts, 60 * 1000);
+    setTimeout(() => checkAndSendBanditAlerts().catch(err => console.error('❌ Initial Bandit check error:', err)), 5000);
+    setInterval(() => checkAndSendBanditAlerts().catch(err => console.error('❌ Bandit scheduler error:', err)), 60 * 1000);
     preloadDailyIcons().catch(err => console.warn('⚠️ Daily icon preload failed:', err.message));
 });
 
@@ -4773,11 +4782,12 @@ client.on('interactionCreate', async interaction => {
             if (existingIndex >= 0) banditAutoConfigs[existingIndex] = configData;
             else banditAutoConfigs.push(configData);
             saveData();
+            await checkAndSendBanditAlertsForGuild();
             return interaction.reply(
                 `✅ ตั้งค่าแจ้งเตือน **Bandit Assault** สำเร็จ\n` +
                 `📢 ห้องแจ้งเตือน: <#${channel.id}>\n` +
                 `🌐 เซิร์ฟเวอร์: **${BANDIT_SERVER_NAMES[server] || server}**\n` +
-                `⏰ บอทจะแจ้งก่อนเริ่ม 15 นาที\n` +
+                `⏰ บอทจะแจ้งก่อนเริ่ม ${BANDIT_ALERT_WINDOW_MINUTES} นาที\n` +
                 `🎲 รอบถัดไป: **${nextIct} น.** — โอกาสเกิด **${nextChance}**`
             );
         }
