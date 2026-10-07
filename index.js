@@ -2873,6 +2873,70 @@ async function fetchBattleHubMapIndex() {
     return avaCanonicalMapCache.loading;
 }
 
+async function fetchAuthoritativeAvaMapIndex() {
+    // Primary canonical name source for OCR suggestions. This database currently
+    // lists exactly 400 Roads of Avalon zones. We only extract links from the
+    // "Roads of Avalon" section, so suggestions can never be invented names.
+    const urls = [
+        'https://albiononline.th.gl/db/locations',
+        'https://guildmanifesto.github.io/albionmaps/',
+        'https://lucioreyli.github.io/ava-maps/'
+    ];
+
+    for (const url of urls) {
+        try {
+            const response = await axios.get(url, {
+                timeout: 10000,
+                headers: {
+                    'User-Agent': 'Mozilla/5.0',
+                    Accept: 'text/html,application/xhtml+xml'
+                },
+                validateStatus: status => status >= 200 && status < 400
+            });
+            const html = String(response.data || '');
+            const $ = cheerio.load(html);
+            const names = [];
+
+            if (/albiononline\.th\.gl\/db\/locations/i.test(url)) {
+                let inRoads = false;
+                $('body a[href]').each((_, el) => {
+                    const name = $(el).text().replace(/\s+/g, ' ').trim();
+                    if (/^Roads of Avalon\s+400$/i.test(name)) {
+                        inRoads = true;
+                        return;
+                    }
+                    if (!inRoads || !/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/.test(name)) return;
+                    if (!names.some(x => normalizeAvaLookupName(x) === normalizeAvaLookupName(name))) {
+                        names.push(name);
+                    }
+                });
+            } else {
+                const source = html + ' ' + $('body').text().replace(/\s+/g, ' ');
+                for (const match of source.matchAll(/\b([A-Za-z]{3,18}-[A-Za-z]{3,18})\s*(?:\(|<[^>]*>)?\s*T?([468]|IV|VI|VIII)\b/gi)) {
+                    const name = normalizeMapNameText(match[1]).replace(/\s+/g, '');
+                    if (!/^[A-Za-z]{3,18}-[A-Za-z]{3,18}$/.test(name)) continue;
+                    if (!names.some(x => normalizeAvaLookupName(x) === normalizeAvaLookupName(name))) names.push(name);
+                }
+                if (!names.length) {
+                    for (const match of source.matchAll(/\b([A-Za-z]{3,18}-[A-Za-z]{3,18})\b/g)) {
+                        const name = normalizeMapNameText(match[1]).replace(/\s+/g, '');
+                        if (!/^[A-Za-z]{3,18}-[A-Za-z]{3,18}$/.test(name)) continue;
+                        if (!names.some(x => normalizeAvaLookupName(x) === normalizeAvaLookupName(name))) names.push(name);
+                    }
+                }
+            }
+
+            if (names.length >= 20) {
+                console.log('🗺️ Authoritative Avalon name index loaded: ' + names.length + ' names from ' + url);
+                return names;
+            }
+        } catch (err) {
+            console.warn('⚠️ Authoritative Avalon name index failed (' + url + '): ' + err.message);
+        }
+    }
+    return [];
+}
+
 async function fetchAlternativeAvaMapIndex() {
     const urls = [
         'https://guildmanifesto.github.io/albionmaps/',
@@ -2933,81 +2997,68 @@ async function getAvaMapSuggestions(ocrCandidates = [], limit = 5) {
         .map(value => normalizeAvaOcrMapName(value).replace(/\s+/g, ''))
         .filter(Boolean);
 
-    // Confirmed aliases never need the remote index.
-    const aliasVerified = [];
-    for (const raw of rawInputs) {
-        const normalized = normalizeAvaOcrMapName(raw).replace(/\s+/g, '');
-        if (normalized && normalizeAvaLookupName(normalized) !== normalizeAvaLookupName(raw)) {
-            if (!aliasVerified.some(x => normalizeAvaLookupName(x.name) === normalizeAvaLookupName(normalized))) {
-                aliasVerified.push({ name: normalized, score: 1, exact: true, source: 'OCR alias' });
-            }
-        }
-    }
-    if (aliasVerified.length) return aliasVerified.slice(0, limit);
+    // IMPORTANT: this function is only for selecting a real map name.
+    // Never auto-accept OCR. Always return a selector with the best real
+    // Avalon names from the authoritative 400-zone index.
+    let canonicalNames = await fetchAuthoritativeAvaMapIndex();
 
-    // Try the first OCR result directly before downloading the canonical index.
-    // For a correct map name this is normally the fastest path.
-    if (rawInputs.length) {
-        try {
-            const resolved = await resolveAvaMapName(rawInputs[0]);
-            if (resolved?.name && Number(resolved.score || 0) >= 0.94) {
-                return [{
-                    name: resolved.name,
-                    score: Number(resolved.score || 0),
-                    exact: Boolean(resolved.exact),
-                    source: resolved.source || 'Battle Hub direct'
-                }];
-            }
-        } catch (err) {
-            console.warn('⚠️ AVA fast direct map verification failed: ' + err.message);
-        }
-    }
+    // If the authoritative index is temporarily unavailable, use the existing
+    // Battle Hub/static indexes before falling back to a confirmed OCR alias.
+    if (!canonicalNames.length) canonicalNames = await fetchBattleHubMapIndex();
+    if (!canonicalNames.length) canonicalNames = await fetchAlternativeAvaMapIndex();
 
-    let canonicalNames = await fetchBattleHubMapIndex();
-
-    // Battle Hub can return 403 from some hosting providers even though the
-    // public map itself exists. Use a static Avalon index as the suggestion
-    // database in that case, so OCR mistakes such as i/l can still be offered
-    // as selectable real map names.
+    // Confirmed aliases are allowed only when the canonical web indexes are
+    // unavailable. They are still real names, not raw OCR strings.
     if (!canonicalNames.length) {
-        canonicalNames = await fetchAlternativeAvaMapIndex();
-    }
-
-    if (canonicalNames.length) {
-        const ranked = canonicalNames.map(name => ({
-            name,
-            score: normalizedInputs.reduce((best, input) => Math.max(best, avaNameSimilarity(input, name)), 0)
-        })).sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
-
-        if (ranked[0] && ranked[0].score >= 0.62) {
-            return ranked.slice(0, limit);
-        }
-    }
-
-    // Last fallback: verify other OCR candidates directly.
-    const verified = [];
-    for (const input of rawInputs.slice(1)) {
-        try {
-            const resolved = await resolveAvaMapName(input);
-            if (!resolved?.name || Number(resolved.score || 0) < 0.62) continue;
-            if (!verified.some(x => normalizeAvaLookupName(x.name) === normalizeAvaLookupName(resolved.name))) {
-                verified.push({
-                    name: resolved.name,
-                    score: Number(resolved.score || 0),
-                    exact: Boolean(resolved.exact),
-                    source: resolved.source || 'Battle Hub direct'
-                });
+        const aliasNames = [];
+        for (const raw of rawInputs) {
+            const corrected = normalizeAvaOcrMapName(raw).replace(/\s+/g, '');
+            if (!corrected) continue;
+            if (normalizeAvaLookupName(corrected) === normalizeAvaLookupName(raw)) continue;
+            if (!aliasNames.some(x => normalizeAvaLookupName(x) === normalizeAvaLookupName(corrected))) {
+                aliasNames.push(corrected);
             }
-        } catch (err) {
-            console.warn('⚠️ AVA direct map verification fallback failed for ' + input + ': ' + err.message);
         }
+        return aliasNames.slice(0, limit).map((name, index) => ({
+            name,
+            score: 1,
+            exact: true,
+            source: 'OCR alias fallback',
+            rank: index + 1
+        }));
     }
 
-    return verified
-        .sort((a, b) => b.score - a.score || a.name.localeCompare(b.name))
-        .slice(0, limit);
-}
+    const ranked = canonicalNames.map(name => {
+        const normalizedName = normalizeAvaLookupName(name);
+        let score = 0;
 
+        for (const input of normalizedInputs) {
+            score = Math.max(score, avaNameSimilarity(input, name));
+        }
+
+        // Put a confirmed OCR correction at the top when it exists in the
+        // real web index. This is still a selectable option, never auto-run.
+        for (const raw of rawInputs) {
+            const corrected = normalizeAvaOcrMapName(raw).replace(/\s+/g, '');
+            if (corrected && normalizeAvaLookupName(corrected) === normalizedName) {
+                score = Math.max(score, 1);
+            }
+        }
+
+        return { name, score, exact: normalizedInputs.some(input => input === normalizedName) };
+    }).sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+
+    // Always provide a selection when we have real Avalon names, even if OCR
+    // confidence is low. The user can visually compare the five closest names.
+    const selected = [];
+    for (const item of ranked) {
+        if (selected.some(x => normalizeAvaLookupName(x.name) === normalizeAvaLookupName(item.name))) continue;
+        selected.push(item);
+        if (selected.length >= limit) break;
+    }
+
+    return selected;
+}
 function avaSelectionComponents(guildId, token, suggestions) {
     const select = new StringSelectMenuBuilder()
         .setCustomId('ava_select:' + guildId + ':' + token)
@@ -3839,85 +3890,24 @@ async function processAvaImageMessage(message, fallbackAttachments = []) {
         const suggestions = await getAvaMapSuggestions(ocrCandidates, 5);
         const top = suggestions[0];
 
-        // ถ้าความมั่นใจสูงมาก ให้ทำต่ออัตโนมัติ ไม่ต้องถามผู้ใช้
-        if (top && top.source !== 'OCR alias' && (top.exact || Number(top.score || 0) >= 0.985)) {
-            const data = await fetchAvaMapDataWithFallback(top.name, [top.name, ...ocrCandidates]);
-            const card = await generateAvaRoadsCard(data, ocr.mapName);
-            await status.edit({
-                content: '✅ อ่านแมพได้: **' + data.name + '** • **' + data.tier + '**',
-                components: [],
-                files: [card]
-            });
-            return true;
-        }
-
+        // Never auto-process here. The user must always choose a real map name
+        // from the selector, even when OCR is an exact/high-confidence match.
         if (!suggestions.length) {
-            // Final local fallback: confirmed OCR aliases are still valid map
-            // names even when every remote Avalon index is blocked/403/404.
-            // Show the selector instead of immediately returning an error.
             const localAliasSuggestions = [];
             for (const raw of ocrCandidates) {
                 const corrected = normalizeAvaOcrMapName(raw).replace(/\s+/g, '');
                 if (!corrected) continue;
                 if (normalizeAvaLookupName(corrected) === normalizeAvaLookupName(raw)) continue;
                 if (localAliasSuggestions.some(x => normalizeAvaLookupName(x.name) === normalizeAvaLookupName(corrected))) continue;
-                localAliasSuggestions.push({ name: corrected, score: 1, exact: true, source: 'OCR alias' });
+                localAliasSuggestions.push({ name: corrected, score: 1, exact: true, source: 'OCR alias fallback' });
             }
 
             if (localAliasSuggestions.length) {
-                const token = Math.random().toString(36).slice(2, 10) + Date.now().toString(36).slice(-6);
-                avaPendingSelections.set(token, {
-                    guildId: String(messageGuildId),
-                    channelId: String(messageChannelId),
-                    userId: String(message.author?.id || ''),
-                    messageId: String(message.id),
-                    statusMessage: status,
-                    imageBuffer,
-                    ocrName: ocr.mapName,
-                    ocrCandidates,
-                    suggestions: localAliasSuggestions.slice(0, 5),
-                    createdAt: Date.now()
-                });
-                await status.edit({
-                    content:
-                        '🗺️ **ตรวจพบภาพ AVA**\n' +
-                        'OCR อ่านได้: ' + String(ocr.mapName) + '\n\n' +
-                        '⚠️ ระบบแก้คำ OCR จากฐานข้อมูลที่ยืนยันแล้ว\n' +
-                        '**เลือกชื่อแมพที่ใกล้เคียงกับในรูป:**',
-                    components: avaSelectionComponents(messageGuildId, token, localAliasSuggestions.slice(0, 5))
-                });
-                setTimeout(() => {
-                    const pending = avaPendingSelections.get(token);
-                    if (!pending) return;
-                    avaPendingSelections.delete(token);
-                    pending.statusMessage.edit({
-                        content: '⏰ หมดเวลาการเลือกชื่อแมพ AVA แล้ว กรุณาส่งรูปอีกครั้ง',
-                        components: []
-                    }).catch(() => {});
-                }, 120000);
-                return true;
-            }
-
-            // The suggestion index is only a helper for OCR disambiguation. It
-            // must never block a valid map from being processed when the remote
-            // Avalon index is unavailable. Try the real data-source fallback
-            // pipeline directly with the OCR name/candidates.
-            console.warn('⚠️ AVA suggestion index returned no match; trying direct data-source fallback for OCR=' + ocr.mapName);
-            try {
-                const data = await fetchAvaMapDataWithFallback(ocr.mapName, ocrCandidates);
-                const card = await generateAvaRoadsCard(data, ocr.mapName);
-                await status.edit({
-                    content: '✅ อ่านแมพได้: **' + data.name + '** • **' + data.tier + '**',
-                    components: [],
-                    files: [card]
-                });
-                return true;
-            } catch (fallbackErr) {
-                console.warn('⚠️ AVA direct fallback after empty suggestions failed: ' + fallbackErr.message);
+                suggestions.push(...localAliasSuggestions);
+            } else {
                 throw new Error(
-                    'ไม่พบชื่อแมพที่ใกล้เคียงจากฐานข้อมูล Avalon\n' +
-                    'OCR: ' + String(ocr.mapName || '') + '\n' +
-                    'Fallback: ' + String(fallbackErr.message || '')
+                    'ไม่สามารถโหลดรายชื่อแมพ Avalon จากฐานข้อมูลจริงได้\n' +
+                    'กรุณาลองกด 🔄 อ่านรูปใหม่อีกครั้ง'
                 );
             }
         }
