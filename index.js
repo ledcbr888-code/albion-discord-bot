@@ -1335,26 +1335,26 @@ async function processBattleReport(input, targetContext, isMessage = false) {
         const { payload } = await buildBattleReportPayload(matchId, targetGuilds, { guildId: currentGuildId() });
         const files = Array.isArray(payload.files) ? payload.files : [];
 
-        if (files.length > 1) {
-            const firstPayload = {
+        // Send the complete image report in one Discord response.
+        // This applies to /check battles as well as auto-battle/message reports.
+        // Keeping all attachments together avoids falling back to a text-only
+        // presentation or splitting the battle report across follow-up messages.
+        if (files.length > 0) {
+            const imagePayload = {
                 content: payload.content,
-                files: [files[0]]
+                files
             };
             if (isMessage) {
-                await targetContext.edit(firstPayload);
-                for (const file of files.slice(1)) {
-                    await targetContext.channel.send({ files: [file] });
-                }
+                await targetContext.edit(imagePayload);
             } else {
-                await targetContext.editReply(firstPayload);
-                for (const file of files.slice(1)) {
-                    await targetContext.followUp({ files: [file] });
-                }
+                await targetContext.editReply(imagePayload);
             }
             return;
         }
 
-        if (isMessage) await targetContext.edit(payload); else await targetContext.editReply(payload);
+        // Text is only a genuine fallback when every image generator failed.
+        if (isMessage) await targetContext.edit(payload);
+        else await targetContext.editReply(payload);
     } catch (err) {
         console.error('❌ Process battle report error:', err);
         const message = `❌ เกิดข้อผิดพลาดในการประมวลผลไฟต์: \`${err.message}\``;
