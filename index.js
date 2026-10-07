@@ -2898,18 +2898,39 @@ async function fetchAuthoritativeAvaMapIndex() {
             const names = [];
 
             if (/albiononline\.th\.gl\/db\/locations/i.test(url)) {
-                let inRoads = false;
-                $('body a[href]').each((_, el) => {
-                    const name = $(el).text().replace(/\s+/g, ' ').trim();
-                    if (/^Roads of Avalon\s+400$/i.test(name)) {
-                        inRoads = true;
-                        return;
-                    }
-                    if (!inRoads || !/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/.test(name)) return;
-                    if (!names.some(x => normalizeAvaLookupName(x) === normalizeAvaLookupName(name))) {
+                // The "Roads of Avalon 400" heading is not an <a>, so do not
+                // rely on walking anchors to detect the section. Slice the
+                // HTML between the Roads and Static Dungeon headings instead.
+                const bodyHtml = $('body').html() || '';
+                const roadsMatch = bodyHtml.match(/Roads of Avalon\s*400[\\s\\S]*?(?=Static Dungeon\s*156|$)/i);
+                const roadsHtml = roadsMatch ? roadsMatch[0] : bodyHtml;
+                const roadsText = cheerio.load(roadsHtml)('body').text().replace(/\\s+/g, ' ');
+                const seen = new Set();
+
+                // Prefer actual link labels from this section.
+                const section$ = cheerio.load(roadsHtml);
+                section$('a[href]').each((_, el) => {
+                    const name = section$(el).text().replace(/\\s+/g, ' ').trim();
+                    if (!/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/.test(name)) return;
+                    const key = normalizeAvaLookupName(name);
+                    if (!seen.has(key)) {
+                        seen.add(key);
                         names.push(name);
                     }
                 });
+
+                // Fallback for page markup changes where links are not present.
+                if (names.length < 20) {
+                    for (const match of roadsText.matchAll(/\\b([A-Za-z0-9]+(?:-[A-Za-z0-9]+)+)\\b/g)) {
+                        const name = normalizeMapNameText(match[1]).replace(/\\s+/g, '');
+                        if (!/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/.test(name)) continue;
+                        const key = normalizeAvaLookupName(name);
+                        if (!seen.has(key)) {
+                            seen.add(key);
+                            names.push(name);
+                        }
+                    }
+                }
             } else {
                 const source = html + ' ' + $('body').text().replace(/\s+/g, ' ');
                 for (const match of source.matchAll(/\b([A-Za-z]{3,18}-[A-Za-z]{3,18})\s*(?:\(|<[^>]*>)?\s*T?([468]|IV|VI|VIII)\b/gi)) {
