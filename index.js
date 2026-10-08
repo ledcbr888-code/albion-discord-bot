@@ -509,17 +509,20 @@ function drawRoundRect(ctx, x, y, w, h, r) {
     ctx.closePath();
 }
 
+const weaponIconCache = new Map();
+
 async function loadAlbionWeaponIcon(weapon, quality = 1) {
     const id = normalizeAlbionItemId(weapon);
     if (!id) return null;
 
     const baseId = id.replace(/@\d+$/, '');
     const q = Math.max(1, Math.min(5, Number(quality) || 1));
+    const cacheKey = `${baseId}|Q${q}`;
+
+    if (weaponIconCache.has(cacheKey)) return weaponIconCache.get(cacheKey);
+
     const encoded = encodeURIComponent(id);
     const encodedBase = encodeURIComponent(baseId);
-
-    // Prefer the Albion render service directly. Some hosting/proxy environments
-    // return a non-image response when axios requests the render endpoint.
     const urls = [
         `https://render.albiononline.com/v1/item/${encoded}.png?quality=${q}&size=128`,
         `https://render.albiononline.com/v1/item/${encodedBase}.png?quality=${q}&size=128`,
@@ -530,18 +533,12 @@ async function loadAlbionWeaponIcon(weapon, quality = 1) {
     ];
 
     for (const url of urls) {
-        try {
-            const img = await Promise.race([
-                loadImage(url),
-                new Promise((_, reject) => setTimeout(() => reject(new Error('weapon icon timeout')), 7000))
-            ]);
-            if (img && img.width > 0 && img.height > 0) return img;
-        } catch (_) {}
-
+        // Download bytes ourselves first. This is more reliable on Render and
+        // accepts PNG/WebP image responses instead of requiring a PNG signature.
         try {
             const response = await axios.get(url, {
                 responseType: 'arraybuffer',
-                timeout: 7000,
+                timeout: 6000,
                 headers: {
                     'User-Agent': 'Mozilla/5.0',
                     'Accept': 'image/png,image/webp,image/*,*/*;q=0.8',
@@ -550,9 +547,26 @@ async function loadAlbionWeaponIcon(weapon, quality = 1) {
                 validateStatus: status => status >= 200 && status < 300
             });
             const buffer = Buffer.from(response.data);
-            if (buffer.length > 100 && buffer[0] === 0x89 && buffer[1] === 0x50) {
-                const img = await loadImage(buffer);
-                if (img && img.width > 0 && img.height > 0) return img;
+            if (buffer.length > 100) {
+                try {
+                    const img = await loadImage(buffer);
+                    if (img && img.width > 0 && img.height > 0) {
+                        weaponIconCache.set(cacheKey, img);
+                        return img;
+                    }
+                } catch (_) {}
+            }
+        } catch (_) {}
+
+        // Direct canvas fetch is the final fallback.
+        try {
+            const img = await Promise.race([
+                loadImage(url),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('weapon icon timeout')), 4000))
+            ]);
+            if (img && img.width > 0 && img.height > 0) {
+                weaponIconCache.set(cacheKey, img);
+                return img;
             }
         } catch (_) {}
     }
@@ -1340,8 +1354,11 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
 
     const guildNamesList = customTargetGuilds.map(g => typeof g === 'string' ? g : g.name);
 
+    const hasTrackedPlayers = targetPlayers.length > 0;
+    const hasTrackedGuilds = guildNamesList.length > 0;
+
     const rows = allSortedRows.filter(p => {
-        if (guildNamesList.length === 0 && targetPlayers.length === 0) return true;
+        if (!hasTrackedPlayers && !hasTrackedGuilds) return true;
 
         const isExplicitPlayer = targetPlayers.some(
             pl => pl.trim().toLowerCase() === p.displayName.trim().toLowerCase()
@@ -1349,6 +1366,10 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
 
         const isGuildMatch = isExactGuildMatch(p.guild, guildNamesList);
 
+        // When only /add player is configured, the report must contain ONLY
+        // those explicitly tracked players. A tracked guild may still include
+        // its full roster, plus any explicitly tracked players.
+        if (hasTrackedPlayers && !hasTrackedGuilds) return isExplicitPlayer;
         return isGuildMatch || isExplicitPlayer;
     });
 
