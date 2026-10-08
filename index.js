@@ -588,8 +588,10 @@ async function loadFameIcon() {
 
 async function generateGuildSummaryImage(guildsData) {
     if (!guildsData || !guildsData.length) return null;
-    
-    const topGuilds = [...guildsData];
+
+    // The caller may provide more data for other commands, but AUTO-BATTLE
+    // is intentionally limited to the top 4 before this renderer is called.
+    const topGuilds = [...guildsData].slice(0, 4);
 
     const width = 760;
     const rowHeight = 56;
@@ -1528,19 +1530,17 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
                 };
             });
 
-            if (options.autoBattle && guildNamesList.length > 0) {
-                const tracked = guildsData.filter(g => isExactGuildMatch(g.name, guildNamesList));
-                const trackedNames = new Set(tracked.map(g => g.name.trim().toLowerCase()));
-
-                const topOthers = guildsData
-                    .filter(g => !trackedNames.has(g.name.trim().toLowerCase()))
+            if (options.autoBattle) {
+                // AUTO-BATTLE guild summary: keep the image compact.
+                // Show ONLY the 4 guilds with the highest combined battle impact,
+                // ranked primarily by Fame, then Kills, then Deaths.
+                guildsData = guildsData
                     .sort((a, b) =>
                         (b.killFame || 0) - (a.killFame || 0) ||
-                        (b.kills || 0) - (a.kills || 0)
+                        (b.kills || 0) - (a.kills || 0) ||
+                        (b.deaths || 0) - (a.deaths || 0)
                     )
-                    .slice(0, 3);
-
-                guildsData = [...tracked, ...topOthers];
+                    .slice(0, 4);
             } else if (guildNamesList.length > 0) {
                 guildsData = guildsData.filter(g => isExactGuildMatch(g.name, guildNamesList));
             } else {
