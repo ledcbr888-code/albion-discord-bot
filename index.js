@@ -4220,22 +4220,34 @@ async function generateAvaRoadsCard(data, ocrText = '') {
     ctx.fillText('AVA MAP POINTS OF INTEREST', 56, panelY + 82);
 
     const counts = data?.counts || {};
-    const items = [
-        { key: 'Green', label: 'Green chest', count: Number(counts['Green chest']) || 0 },
-        { key: 'Blue', label: 'Blue chest', count: Number(counts['Blue chest']) || 0 },
-        { key: 'Gold', label: 'Gold chest', count: Number(counts['Gold chest']) || 0 },
-        { key: 'Hide', label: 'Hide', count: Number(counts.Hide) || 0 },
-        { key: 'SoloDungeon', label: 'Solo dungeon', count: Number(counts['Solo dungeon']) || 0 },
-        { key: 'Stone', label: 'Stone', count: Number(counts.Stone) || 0 },
-        { key: 'Ore', label: 'Ore', count: Number(counts.Ore) || 0 },
-        { key: 'Wood', label: 'Wood', count: Number(counts.Wood) || 0 },
-        { key: 'Fiber', label: 'Fiber', count: Number(counts.Fiber) || 0 },
-        { key: 'GroupDungeon', label: 'Group dungeon', count: Number(counts['Group dungeon']) || 0 }
-    ];
-    const visibleItems = items.filter(item => item.count > 0);
+    // Keep the report focused on chests and dungeons only. If the source has no
+    // category-level counts, show an explicit N/A instead of leaving a blank panel.
+    const chestCategoryTotal =
+        (Number(counts['Green chest']) || 0) +
+        (Number(counts['Blue chest']) || 0) +
+        (Number(counts['Gold chest']) || 0);
+    const dungeonCategoryTotal =
+        (Number(counts['Solo dungeon']) || 0) +
+        (Number(counts['Group dungeon']) || 0);
+    const hasCategoryCounts = chestCategoryTotal + dungeonCategoryTotal > 0;
+    const hasAnyVerifiedCounts = Number(data?.countsAvailable) === 1 ||
+        data?.countsAvailable === true || hasCategoryCounts ||
+        Number.isFinite(data?.recordedChestTotal) || Number.isFinite(data?.recordedDungeonTotal);
+    const items = hasCategoryCounts
+        ? [
+            { key: 'Green', label: 'Green chest', count: Number(counts['Green chest']) || 0, kind: 'chest', accent: '#22c55e' },
+            { key: 'Blue', label: 'Blue chest', count: Number(counts['Blue chest']) || 0, kind: 'chest', accent: '#3b82f6' },
+            { key: 'Gold', label: 'Gold chest', count: Number(counts['Gold chest']) || 0, kind: 'chest', accent: '#fbbf24' },
+            { key: 'SoloDungeon', label: 'Solo dungeon', count: Number(counts['Solo dungeon']) || 0, kind: 'dungeon', accent: '#a78bfa' },
+            { key: 'GroupDungeon', label: 'Group dungeon', count: Number(counts['Group dungeon']) || 0, kind: 'dungeon', accent: '#f87171' }
+        ]
+        : [
+            { key: 'Chest', label: 'Total chests', count: Number.isFinite(data?.recordedChestTotal) ? Number(data.recordedChestTotal) : Number(data?.totalChests) || 0, kind: 'chest', accent: '#fbbf24' },
+            { key: 'Dungeon', label: 'Total dungeons', count: Number.isFinite(data?.recordedDungeonTotal) ? Number(data.recordedDungeonTotal) : Number(data?.totalDungeons) || 0, kind: 'dungeon', accent: '#a78bfa' }
+        ];
     const cols = 5, gap = 18, left = 56, itemW = 440, itemH = 126;
-    for (let i = 0; i < visibleItems.length; i++) {
-        const item = visibleItems[i];
+    for (let i = 0; i < items.length; i++) {
+        const item = items[i];
         const col = i % cols;
         const row = Math.floor(i / cols);
         const x = left + col * (itemW + gap);
@@ -4243,19 +4255,46 @@ async function generateAvaRoadsCard(data, ocrText = '') {
         drawRoundRect(ctx, x, y, itemW, itemH, 16);
         ctx.fillStyle = '#151e2b';
         ctx.fill();
-        ctx.strokeStyle = '#34465c';
+        ctx.strokeStyle = item.accent || '#34465c';
         ctx.lineWidth = 2;
         ctx.stroke();
-        const icon = await loadAvaCardIcon(item.key);
-        if (icon) {
-            try { ctx.drawImage(icon, x + 18, y + 20, 82, 82); } catch (_) {}
+
+        // Draw simple vector icons instead of relying on optional image files
+        // or emoji fonts, which can render as empty squares on hosting.
+        const ix = x + 26, iy = y + 28;
+        ctx.save();
+        ctx.strokeStyle = item.accent || '#cbd5e1';
+        ctx.fillStyle = item.accent || '#cbd5e1';
+        ctx.lineWidth = 5;
+        if (item.kind === 'chest') {
+            ctx.strokeRect(ix, iy + 14, 68, 42);
+            ctx.strokeRect(ix, iy + 2, 68, 18);
+            ctx.beginPath();
+            ctx.moveTo(ix + 34, iy + 3);
+            ctx.lineTo(ix + 34, iy + 56);
+            ctx.stroke();
+            ctx.fillRect(ix + 27, iy + 24, 14, 12);
+        } else {
+            ctx.strokeRect(ix + 8, iy, 52, 62);
+            ctx.beginPath();
+            ctx.arc(ix + 34, iy + 34, 11, Math.PI, 0);
+            ctx.lineTo(ix + 45, iy + 52);
+            ctx.lineTo(ix + 23, iy + 52);
+            ctx.closePath();
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.arc(ix + 42, iy + 34, 2, 0, Math.PI * 2);
+            ctx.fill();
         }
+        ctx.restore();
+
         ctx.fillStyle = '#cbd5e1';
         ctx.font = '700 24px Arial, sans-serif';
         ctx.fillText(item.label, x + 116, y + 48, itemW - 132);
-        ctx.fillStyle = item.count > 0 ? '#f8fafc' : '#64748b';
+        ctx.fillStyle = '#f8fafc';
         ctx.font = '900 42px Arial, sans-serif';
-        ctx.fillText('×' + item.count, x + 116, y + 96);
+        const value = !hasAnyVerifiedCounts && !hasCategoryCounts ? 'N/A' : String(item.count);
+        ctx.fillText(value, x + 116, y + 96);
     }
     return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: 'ava-map-' + normalizeAvaSlug(data.name) + '.png' });
 }
