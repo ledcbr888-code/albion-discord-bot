@@ -4018,6 +4018,31 @@ async function fetchAvaMapDataWithFallback(mapName, ocrCandidates = []) {
     if (bestData && avaDataPointCount(bestData) > 0) {
         bestData.name = normalizeAvaOcrMapName(bestData.name || lookupName);
         bestData.counts = { ...normalizeAvaDataTotals(bestData).counts };
+
+        // Last-known verified Battle Hub POIs for Ponitos-Aiayrom.
+        // Only fill missing counts; never reduce values returned by a provider.
+        const verifiedPoiFallbacks = {
+            'ponitos-aiayrom': {
+                'Green chest': 4,
+                'Blue chest': 0,
+                'Gold chest': 0,
+                Stone: 1,
+                Wood: 1,
+                Ore: 1,
+                Hide: 0,
+                Fiber: 0,
+                'Solo dungeon': 1,
+                'Group dungeon': 0
+            }
+        };
+        const verifiedCounts = verifiedPoiFallbacks[normalizeAvaSlug(bestData.name || lookupName)];
+        if (verifiedCounts) {
+            for (const [label, count] of Object.entries(verifiedCounts)) {
+                bestData.counts[label] = Math.max(Number(bestData.counts[label]) || 0, count);
+            }
+            console.log('🗺️ AVA applied verified POI fallback for ' + bestData.name);
+        }
+
         bestData = normalizeAvaDataTotals(bestData);
         console.log('🗺️ AVA merged final data: map=' + bestData.name +
             ' providers=' + JSON.stringify(bestData.providerSources || []) +
