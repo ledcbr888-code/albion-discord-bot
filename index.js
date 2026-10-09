@@ -4141,14 +4141,18 @@ async function generateAvaRoadsCard(data, ocrText = '') {
     ctx.font = '700 20px Arial, sans-serif';
     ctx.fillText('AVA MAP POINTS OF INTEREST', 56, panelY + 82);
 
-    const counts = data?.counts || {};
-    const items = [
-        { key: 'Green', label: 'Green chest', count: Number(data?.counts?.['Green chest']) || 0 },
-        { key: 'Blue', label: 'Blue chest', count: Number(data?.counts?.['Blue chest']) || 0 },
-        { key: 'Gold', label: 'Gold chest', count: Number(data?.counts?.['Gold chest']) || 0 },
-        { key: 'SoloDungeon', label: 'Solo dungeon', count: Number(data?.counts?.['Solo dungeon']) || 0 },
-        { key: 'GroupDungeon', label: 'Group dungeon', count: Number(data?.counts?.['Group dungeon']) || 0 }
-    ];
+    const items = data?.categoryCountsAvailable === false
+        ? [
+            { key: '', label: 'Total chest', count: Number(data?.totalChests) || 0 },
+            { key: '', label: 'Total dungeon', count: Number(data?.totalDungeons) || 0 }
+        ]
+        : [
+            { key: 'Green', label: 'Green chest', count: Number(data?.counts?.['Green chest']) || 0 },
+            { key: 'Blue', label: 'Blue chest', count: Number(data?.counts?.['Blue chest']) || 0 },
+            { key: 'Gold', label: 'Gold chest', count: Number(data?.counts?.['Gold chest']) || 0 },
+            { key: 'SoloDungeon', label: 'Solo dungeon', count: Number(data?.counts?.['Solo dungeon']) || 0 },
+            { key: 'GroupDungeon', label: 'Group dungeon', count: Number(data?.counts?.['Group dungeon']) || 0 }
+        ];
     if (data?.countsAvailable === false) {
         ctx.fillStyle = '#f1f5f9';
         ctx.font = '700 30px Arial, sans-serif';
