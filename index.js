@@ -3770,7 +3770,7 @@ async function fetchAvalonTrackerMapData(lookupName) {
         'Gold chest': findCount(['Gold Chest', 'Gold chest', 'gold-chest', 'goldChest']),
         'Blue chest': findCount(['Blue Chest', 'Blue chest', 'blue-chest', 'blueChest']),
         'Green chest': findCount(['Green Chest', 'Green chest', 'green-chest', 'greenChest']),
-        'Group dungeon': findCount(['Avalonian Dungeon', 'Group dungeon', 'Group Dungeon', 'dg-group', 'dgGroup']),
+        'Group dungeon': findCount(['Group dungeon', 'Group Dungeon', 'Group Dungeon Entrance', 'dg-group', 'dgGroup']),
         'Solo dungeon': findCount(['Solo dungeon', 'Solo Dungeon', 'dg-solo', 'dgSolo']),
         Wood: findCount(['Wood', 'wood', 'LOGS']),
         Ore: findCount(['Ore', 'ore', 'ORE']),
@@ -4032,6 +4032,18 @@ async function fetchAvaMapDataWithFallback(mapName, ocrCandidates = []) {
                 Hide: 0,
                 Fiber: 0,
                 'Solo dungeon': 1,
+                'Group dungeon': 0
+            },
+            'puros-amayam': {
+                'Green chest': 4,
+                'Blue chest': 1,
+                'Gold chest': 0,
+                Stone: 0,
+                Wood: 0,
+                Ore: 0,
+                Hide: 0,
+                Fiber: 0,
+                'Solo dungeon': 2,
                 'Group dungeon': 0
             }
         };
