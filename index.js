@@ -4220,8 +4220,6 @@ async function generateAvaRoadsCard(data, ocrText = '') {
     ctx.fillText('AVA MAP POINTS OF INTEREST', 56, panelY + 82);
 
     const counts = data?.counts || {};
-    // Keep the report focused on chests and dungeons only. If the source has no
-    // category-level counts, show an explicit N/A instead of leaving a blank panel.
     const chestCategoryTotal =
         (Number(counts['Green chest']) || 0) +
         (Number(counts['Blue chest']) || 0) +
@@ -4230,21 +4228,17 @@ async function generateAvaRoadsCard(data, ocrText = '') {
         (Number(counts['Solo dungeon']) || 0) +
         (Number(counts['Group dungeon']) || 0);
     const hasCategoryCounts = chestCategoryTotal + dungeonCategoryTotal > 0;
-    const hasAnyVerifiedCounts = Number(data?.countsAvailable) === 1 ||
-        data?.countsAvailable === true || hasCategoryCounts ||
-        Number.isFinite(data?.recordedChestTotal) || Number.isFinite(data?.recordedDungeonTotal);
-    const items = hasCategoryCounts
-        ? [
-            { key: 'Green', label: 'Green chest', count: Number(counts['Green chest']) || 0, kind: 'chest', accent: '#22c55e' },
-            { key: 'Blue', label: 'Blue chest', count: Number(counts['Blue chest']) || 0, kind: 'chest', accent: '#3b82f6' },
-            { key: 'Gold', label: 'Gold chest', count: Number(counts['Gold chest']) || 0, kind: 'chest', accent: '#fbbf24' },
-            { key: 'SoloDungeon', label: 'Solo dungeon', count: Number(counts['Solo dungeon']) || 0, kind: 'dungeon', accent: '#a78bfa' },
-            { key: 'GroupDungeon', label: 'Group dungeon', count: Number(counts['Group dungeon']) || 0, kind: 'dungeon', accent: '#f87171' }
-        ]
-        : [
-            { key: 'Chest', label: 'Total chests', count: Number.isFinite(data?.recordedChestTotal) ? Number(data.recordedChestTotal) : Number(data?.totalChests) || 0, kind: 'chest', accent: '#fbbf24' },
-            { key: 'Dungeon', label: 'Total dungeons', count: Number.isFinite(data?.recordedDungeonTotal) ? Number(data.recordedDungeonTotal) : Number(data?.totalDungeons) || 0, kind: 'dungeon', accent: '#a78bfa' }
-        ];
+    const hasVerifiedTotals = data?.countsAvailable === true ||
+        Number(data?.countsAvailable) === 1 ||
+        Number.isFinite(data?.recordedChestTotal) ||
+        Number.isFinite(data?.recordedDungeonTotal);
+    const items = [
+        { key: 'Green', label: 'Green chest', count: Number(counts['Green chest']) || 0, kind: 'chest', accent: '#22c55e', known: hasCategoryCounts },
+        { key: 'Blue', label: 'Blue chest', count: Number(counts['Blue chest']) || 0, kind: 'chest', accent: '#3b82f6', known: hasCategoryCounts },
+        { key: 'Gold', label: 'Gold chest', count: Number(counts['Gold chest']) || 0, kind: 'chest', accent: '#fbbf24', known: hasCategoryCounts },
+        { key: 'SoloDungeon', label: 'Solo dungeon', count: Number(counts['Solo dungeon']) || 0, kind: 'dungeon', accent: '#a78bfa', known: hasCategoryCounts },
+        { key: 'GroupDungeon', label: 'Group dungeon', count: Number(counts['Group dungeon']) || 0, kind: 'dungeon', accent: '#f87171', known: hasCategoryCounts }
+    ];
     const cols = 5, gap = 18, left = 56, itemW = 440, itemH = 126;
     for (let i = 0; i < items.length; i++) {
         const item = items[i];
@@ -4255,45 +4249,46 @@ async function generateAvaRoadsCard(data, ocrText = '') {
         drawRoundRect(ctx, x, y, itemW, itemH, 16);
         ctx.fillStyle = '#151e2b';
         ctx.fill();
-        ctx.strokeStyle = item.accent || '#34465c';
+        ctx.strokeStyle = item.accent;
         ctx.lineWidth = 2;
         ctx.stroke();
 
-        // Draw simple vector icons instead of relying on optional image files
-        // or emoji fonts, which can render as empty squares on hosting.
-        const ix = x + 26, iy = y + 28;
-        ctx.save();
-        ctx.strokeStyle = item.accent || '#cbd5e1';
-        ctx.fillStyle = item.accent || '#cbd5e1';
-        ctx.lineWidth = 5;
-        if (item.kind === 'chest') {
-            ctx.strokeRect(ix, iy + 14, 68, 42);
-            ctx.strokeRect(ix, iy + 2, 68, 18);
-            ctx.beginPath();
-            ctx.moveTo(ix + 34, iy + 3);
-            ctx.lineTo(ix + 34, iy + 56);
-            ctx.stroke();
-            ctx.fillRect(ix + 27, iy + 24, 14, 12);
+        // Use the actual PNG assets committed in /ava-icons; never depend on emoji fonts.
+        const icon = await loadAvaCardIcon(item.key);
+        if (icon) {
+            const iconSize = 76;
+            const scale = Math.min(iconSize / icon.width, iconSize / icon.height);
+            const iw = Math.round(icon.width * scale);
+            const ih = Math.round(icon.height * scale);
+            ctx.drawImage(icon, x + 22 + Math.round((iconSize - iw) / 2), y + 25 + Math.round((iconSize - ih) / 2), iw, ih);
         } else {
-            ctx.strokeRect(ix + 8, iy, 52, 62);
-            ctx.beginPath();
-            ctx.arc(ix + 34, iy + 34, 11, Math.PI, 0);
-            ctx.lineTo(ix + 45, iy + 52);
-            ctx.lineTo(ix + 23, iy + 52);
-            ctx.closePath();
-            ctx.stroke();
-            ctx.beginPath();
-            ctx.arc(ix + 42, iy + 34, 2, 0, Math.PI * 2);
-            ctx.fill();
+            // Visible fallback if a PNG is missing from the deployed checkout.
+            ctx.save();
+            ctx.strokeStyle = item.accent;
+            ctx.lineWidth = 5;
+            if (item.kind === 'chest') {
+                ctx.strokeRect(x + 28, y + 49, 64, 38);
+                ctx.strokeRect(x + 28, y + 37, 64, 17);
+                ctx.beginPath();
+                ctx.moveTo(x + 60, y + 38);
+                ctx.lineTo(x + 60, y + 86);
+                ctx.stroke();
+            } else {
+                ctx.strokeRect(x + 34, y + 34, 52, 58);
+                ctx.beginPath();
+                ctx.moveTo(x + 43, y + 60);
+                ctx.lineTo(x + 77, y + 60);
+                ctx.stroke();
+            }
+            ctx.restore();
         }
-        ctx.restore();
 
         ctx.fillStyle = '#cbd5e1';
         ctx.font = '700 24px Arial, sans-serif';
         ctx.fillText(item.label, x + 116, y + 48, itemW - 132);
         ctx.fillStyle = '#f8fafc';
         ctx.font = '900 42px Arial, sans-serif';
-        const value = !hasAnyVerifiedCounts && !hasCategoryCounts ? 'N/A' : String(item.count);
+        const value = item.known || hasVerifiedTotals ? String(item.count) : 'N/A';
         ctx.fillText(value, x + 116, y + 96);
     }
     return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: 'ava-map-' + normalizeAvaSlug(data.name) + '.png' });
