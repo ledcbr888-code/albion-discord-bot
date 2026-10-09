@@ -3665,6 +3665,62 @@ async function fetchAlbionOnlineBuildsAvaMapData(lookupName) {
     };
 }
 
+
+/**
+ * Local Roadinator map catalogue.
+ * The bundled dataset is a static fallback; it is not fetched on every request.
+ * Resource component names represent combined map markers, so this reports marker
+ * counts by resource family rather than claiming exact individual gatherable nodes.
+ */
+function fetchRoadinatorAvaMapData(lookupName) {
+    const key = String(lookupName || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const maps = require('./data/ava-roadinator-maps.json');
+    const road = maps.find(item =>
+        String(item.name || '').toLowerCase().replace(/[^a-z0-9]/g, '') === key
+    );
+    if (!road) throw new Error('Roadinator local database: ไม่พบชื่อแมพตรงกัน');
+
+    const counts = {
+        'Gold chest': 0, 'Blue chest': 0, 'Green chest': 0,
+        'Group dungeon': 0, 'Solo dungeon': 0,
+        Wood: 0, Ore: 0, Stone: 0, Hide: 0, Fiber: 0
+    };
+    let dungeonMarkers = 0;
+    const resourceMarkerMap = {
+        WoodFiber: ['Wood', 'Fiber'],
+        OreRock: ['Ore', 'Stone'],
+        FiberHide: ['Fiber', 'Hide'],
+        HideOre: ['Hide', 'Ore'],
+        RockWood: ['Stone', 'Wood']
+    };
+    for (const component of (road.data?.components || [])) {
+        if (component.type === 'chest') {
+            const color = String(component.bgcolor || '').toLowerCase();
+            if (color === 'gold') counts['Gold chest'] += 1;
+            else if (color === 'blue') counts['Blue chest'] += 1;
+            else if (color === 'green') counts['Green chest'] += 1;
+        } else if (component.type === 'dungeon') {
+            dungeonMarkers += 1;
+        } else {
+            for (const resource of (resourceMarkerMap[component.type] || [])) {
+                counts[resource] += 1;
+            }
+        }
+    }
+
+    return {
+        name: road.name,
+        tier: road.data?.tier ? 'T' + road.data.tier : 'ไม่พบข้อมูล',
+        layout: road.data?.type || '',
+        connection: '',
+        counts,
+        countMeta: { source: 'Roadinator local map catalogue', dungeonMarkers },
+        mapImage: '',
+        sourceUrl: 'https://obxd.github.io/roadinator-web/#' + encodeURIComponent(road.name),
+        source: 'Roadinator local database'
+    };
+}
+
 async function fetchAvalonTrackerMapData(lookupName) {
     const correctedName = normalizeAvaOcrMapName(lookupName);
     const slug = normalizeMapNameText(correctedName).toLowerCase().replace(/\s+/g, '-');
@@ -3968,6 +4024,18 @@ async function fetchAvaMapDataWithFallback(mapName, ocrCandidates = []) {
     } catch (err) {
         errors.push('Battle Hub direct: ' + err.message);
         console.warn('⚠️ AVA direct canonical source failed for ' + mapName + ': ' + err.message);
+    }
+
+    // Local static catalogue: avoids tracker 403/404 and works without a live request.
+    // It supplies chest/resource component counts; Battle Hub remains the map-image source.
+    try {
+        const roadinator = normalizeAvaDataTotals(fetchRoadinatorAvaMapData(lookupName));
+        mergeCandidate(roadinator, 'Roadinator local database');
+        console.log('🗺️ AVA Roadinator local data found: ' + roadinator.name +
+            ' counts=' + JSON.stringify(roadinator.counts));
+    } catch (err) {
+        errors.push('Roadinator local database: ' + err.message);
+        console.warn('⚠️ AVA Roadinator local fallback unavailable for ' + lookupName + ': ' + err.message);
     }
 
     // Secondary: Avalon Roads Tracker — dedicated Roads of Avalon map database.
