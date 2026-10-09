@@ -2660,7 +2660,8 @@ function normalizeAvaDataTotals(data) {
         ...data, counts,
         totalChests: counts['Gold chest'] + counts['Blue chest'] + counts['Green chest'],
         totalResources: counts.Wood + counts.Ore + counts.Stone + counts.Hide + counts.Fiber,
-        totalDungeons: counts['Group dungeon'] + counts['Solo dungeon']
+        totalDungeons: counts['Group dungeon'] + counts['Solo dungeon'],
+        totalDungeonMarkers: Number(data?.countMeta?.dungeonMarkers) || 0
     };
 }
 
@@ -2799,7 +2800,9 @@ async function generateAvaCheckResponse(input) {
                 value: avaCountLine([
                     ['🟣 ดันเดี่ยว', data.counts['Solo dungeon']],
                     ['🔴 ดันกลุ่ม', data.counts['Group dungeon']]
-                ]),
+                ]) + ((Number(data.totalDungeonMarkers) || 0) > 0
+                    ? `\n🧭 จุดดันเจี้ยนจาก Roadinator (ยังไม่แยกประเภท): **${data.totalDungeonMarkers}**`
+                    : ''),
                 inline: false
             },
             {
@@ -4327,7 +4330,8 @@ async function generateAvaRoadsCard(data, ocrText = '') {
         { key: 'Ore', label: 'Ore', count: Number(counts.Ore) || 0 },
         { key: 'Wood', label: 'Wood', count: Number(counts.Wood) || 0 },
         { key: 'Fiber', label: 'Fiber', count: Number(counts.Fiber) || 0 },
-        { key: 'GroupDungeon', label: 'Group dungeon', count: Number(counts['Group dungeon']) || 0 }
+        { key: 'GroupDungeon', label: 'Group dungeon', count: Number(counts['Group dungeon']) || 0 },
+        { key: '', label: 'Dungeon marker (unclassified)', count: Number(data?.countMeta?.dungeonMarkers) || 0 }
     ];
     const visibleItems = items.filter(item => item.count > 0);
     const cols = 5, gap = 18, left = 56, itemW = 440, itemH = 126;
@@ -4343,7 +4347,7 @@ async function generateAvaRoadsCard(data, ocrText = '') {
         ctx.strokeStyle = '#34465c';
         ctx.lineWidth = 2;
         ctx.stroke();
-        const icon = await loadAvaCardIcon(item.key);
+        const icon = item.key ? await loadAvaCardIcon(item.key) : null;
         if (icon) {
             try { ctx.drawImage(icon, x + 18, y + 20, 82, 82); } catch (_) {}
         }
