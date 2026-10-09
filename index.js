@@ -2702,15 +2702,20 @@ async function fetchAvaMapData(input) {
                 const itemText = item.text().replace(/\s+/g, ' ').trim();
                 if (alts || itemText) poiTextParts.push(alts + ' ' + itemText);
             });
-            const searchableText = bodyText + ' ' + poiTextParts.join(' ');
+            const imageMetaText = $('img').map((_, el) => {
+                const node = $(el);
+                return [node.attr('alt'), node.attr('title'), node.attr('aria-label'), node.attr('data-label')].filter(Boolean).join(' ');
+            }).get().join(' ');
+            const scriptText = $('script').map((_, el) => $(el).html() || '').get().join(' ');
+            const searchableText = [bodyText, poiTextParts.join(' '), imageMetaText, scriptText].join(' ').replace(/\s+/g, ' ');
             const title = $('h1').first().text().trim() || slug;
 
-            if (!/Avalon|Road Layout|Green chest|หีบเขียว/i.test(bodyText + html)) {
+            if (!/Avalon|Road Layout|Green chest|หีบเขียว/i.test(bodyText + ' ' + imageMetaText + ' ' + html)) {
                 throw new Error('ไม่ใช่หน้า Avalon map');
             }
 
             const tierMatch =
-                bodyText.match(/\bT\s*([468])\b/i) ||
+                searchableText.match(/\bT\s*([468])\b/i) ||
                 title.match(/\bT\s*([468])\b/i);
             const layoutMatch = bodyText.match(/Road Layout\s*([A-Z])/i);
             const mapImageRaw =
@@ -3495,11 +3500,11 @@ function parseBattleHubAvaData(html, url, requestedName) {
     const imageLabels = [];
     $('img').each((_, el) => {
         const node = $(el);
-        imageLabels.push(node.attr('alt') || '', node.attr('title') || '', node.attr('aria-label') || '');
+        imageLabels.push(node.attr('alt') || '', node.attr('title') || '', node.attr('aria-label') || '', node.attr('data-label') || '');
     });
     const scriptText = $('script').map((_, el) => $(el).html() || '').get().join(' ');
     const searchableText = [bodyText, h1, imageLabels.join(' '), scriptText, html.replace(/<[^>]+>/g, ' ')].join(' ').replace(/\s+/g, ' ');
-    const tierMatch = searchableText.match(/\bT\s*([468])\b/i) || h1.match(/\bT\s*([468])\b/i);
+    const tierMatch = searchableText.match(/(?:\(|\[|\b)T\s*([468])(?:\)|\]|\b)/i) || h1.match(/T\s*([468])/i);
     const layoutMatch = searchableText.match(/Road Layout\s+([A-Z])/i) || searchableText.match(/Layout\s*[:#-]?\s*([A-Z])\b/i);
     const getCount = labels => extractAvaCountFromPageText(searchableText, labels);
     const counts = {
@@ -3910,12 +3915,13 @@ async function fetchAvaMapDataWithFallback(mapName, ocrCandidates = []) {
         const incomingPoints = avaDataPointCount(incoming);
         bestData = normalizeAvaDataTotals({
             ...bestData,
-            ...((incomingPoints > currentPoints) ? {
-                name: incoming.name || bestData.name,
-                tier: incoming.tier && incoming.tier !== 'ไม่พบข้อมูล' ? incoming.tier : bestData.tier,
-                layout: incoming.layout && incoming.layout !== 'ไม่พบข้อมูล' ? incoming.layout : bestData.layout,
-                connection: incoming.connection || bestData.connection
-            } : {}),
+            // Merge map identity metadata even when this source has fewer POI counts.
+            name: incoming.name || bestData.name,
+            tier: (incoming.tier && incoming.tier !== 'ไม่พบข้อมูล' && incoming.tier !== 'TIER UNKNOWN')
+                ? incoming.tier : (bestData.tier || ''),
+            layout: (incoming.layout && incoming.layout !== 'ไม่พบข้อมูล')
+                ? incoming.layout : (bestData.layout || ''),
+            connection: incoming.connection || bestData.connection,
             counts: mergedCounts,
             mapImage: bestData.mapImage || incoming.mapImage,
             sourceUrl: bestData.sourceUrl || incoming.sourceUrl,
@@ -5080,7 +5086,7 @@ client.on('interactionCreate', async interaction => {
                     const card = await generateAvaRoadsCard(data, pending.ocrName);
 
                     await interaction.editReply({
-                        content: '✅ เลือกแมพได้: **' + data.name + '** • **' + data.tier + '**',
+                        content: '✅ เลือกแมพได้: **' + data.name + '** • **' + ((String(data.tier || '').match(/\\bT\\s*([468])\\b/i) || [])[0] || 'Tier unavailable') + '**',
                         components: [],
                         files: [card]
                     });
