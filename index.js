@@ -2131,8 +2131,8 @@ function extractDailyPageDate(html, serverKey) {
     if (!label) return '';
     const source = String(html || '');
     const patterns = [
-        new RegExp('region:["\\']' + serverKey + '["\\'][^}]{0,300}?date:["\\'](\\d{4}-\\d{2}-\\d{2})["\\']', 'i'),
-        new RegExp('["\\']' + serverKey + '["\\']\\s*:\\s*\\{[^}]{0,300}?["\\']date["\\']\\s*:\\s*["\\'](\\d{4}-\\d{2}-\\d{2})["\\']', 'i')
+        new RegExp("region:[\\"']" + serverKey + "[\\"'][^}]{0,300}?date:[\\"'](\\d{4}-\\d{2}-\\d{2})[\\"']", 'i'),
+        new RegExp("[\\"']" + serverKey + "[\\"']\\s*:\\s*\\{[^}]{0,300}?[\\\"']date[\\\"']\\s*:\\s*[\\\"'](\\d{4}-\\d{2}-\\d{2})[\\\"']", 'i')
     ];
     for (const re of patterns) {
         const match = source.match(re);
