@@ -2766,15 +2766,10 @@ function avaCountLine(items) {
 
 async function generateAvaCheckResponse(input) {
     const data = await fetchAvaMapDataWithFallback(input);
-    const chestValue = data.countsAvailable === false ? 'ยังดึงจำนวนจากเว็บไม่ได้' : avaCountLine([
-        ['🟢 เขียว', data.counts['Green chest']],
-        ['🔵 น้ำเงิน', data.counts['Blue chest']],
-        ['🟡 ทอง', data.counts['Gold chest']]
-    ]);
-    const dungeonValue = data.countsAvailable === false ? 'ยังดึงจำนวนจากเว็บไม่ได้' : avaCountLine([
-        ['🟣 ดันเดี่ยว', data.counts['Solo dungeon']],
-        ['🔴 ดันกลุ่ม', data.counts['Group dungeon']]
-    ]);
+    const chestValue = data.countsAvailable === false ? 'ยังดึงจำนวนจากเว็บไม่ได้' :
+        `🟢 เขียว **${data.counts['Green chest']}**  •  🔵 น้ำเงิน **${data.counts['Blue chest']}**  •  🟡 ทอง **${data.counts['Gold chest']}**`;
+    const dungeonValue = data.countsAvailable === false ? 'ยังดึงจำนวนจากเว็บไม่ได้' :
+        `🟣 ดันเดี่ยว **${data.counts['Solo dungeon']}**  •  🔴 ดันกลุ่ม **${data.counts['Group dungeon']}**`;
     const embed = new EmbedBuilder()
         .setColor(0x2dd4bf)
         .setTitle(`🗺️ AVA CHECK — ${data.name}`)
@@ -4142,7 +4137,7 @@ async function generateAvaRoadsCard(data, ocrText = '') {
         ctx.font = '700 30px Arial, sans-serif';
         ctx.fillText('Chest / Dungeon counts unavailable from Albion Battle Hub', 56, panelY + 78);
     }
-    const visibleItems = data?.countsAvailable === false ? [] : items.filter(item => item.count > 0);
+    const visibleItems = data?.countsAvailable === false ? [] : items;
     const cols = 5, gap = 18, left = 56, itemW = 440, itemH = 126;
     for (let i = 0; i < visibleItems.length; i++) {
         const item = visibleItems[i];
