@@ -4174,14 +4174,12 @@ function drawAvaStatBox(ctx, x, y, w, title, rows, accent) {
 }
 
 async function generateAvaRoadsCard(data, ocrText = '') {
-    const width = 2400, height = 1800;
-    const mapHeight = 1320, panelY = 1340, panelHeight = 420;
-    const canvas = createCanvas(width, height);
-    const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#05070b';
-    ctx.fillRect(0, 0, width, height);
-
+    const width = 2400;
+    const panelHeight = 420;
     const canonicalDisplayName = normalizeAvaOcrMapName(data?.name || ocrText);
+
+    // Download the map first so the report canvas can match its real aspect ratio.
+    // This avoids black side gutters caused by forcing every map into a fixed-height box.
     let mapImage = await downloadImageForCanvas(data.mapImage);
     if (!mapImage) {
         const slug = normalizeAvaSlug(canonicalDisplayName);
@@ -4197,6 +4195,18 @@ async function generateAvaRoadsCard(data, ocrText = '') {
             }
         }
     }
+
+    // Fill the entire report width while preserving the map's original proportions.
+    const mapHeight = mapImage && mapImage.width > 0
+        ? Math.max(1, Math.round(width * mapImage.height / mapImage.width))
+        : 1320;
+    const panelY = mapHeight + 20;
+    const height = panelY + panelHeight;
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#05070b';
+    ctx.fillRect(0, 0, width, height);
+
     if (!mapImage) {
         ctx.fillStyle = '#f1f5f9';
         ctx.font = '900 52px Arial, sans-serif';
@@ -4206,14 +4216,9 @@ async function generateAvaRoadsCard(data, ocrText = '') {
         ctx.textAlign = 'left';
         ctx.textBaseline = 'alphabetic';
     } else {
-        const scale = Math.min(width / mapImage.width, mapHeight / mapImage.height);
-        const dw = Math.round(mapImage.width * scale);
-        const dh = Math.round(mapImage.height * scale);
-        const dx = Math.round((width - dw) / 2);
-        const dy = Math.round((mapHeight - dh) / 2);
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
-        ctx.drawImage(mapImage, dx, dy, dw, dh);
+        ctx.drawImage(mapImage, 0, 0, width, mapHeight);
     }
 
     ctx.fillStyle = '#0d121b';
