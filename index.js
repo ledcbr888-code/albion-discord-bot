@@ -1792,7 +1792,7 @@ async function checkAutoBattlesForGuild() {
 // Albion's public GameInfo API does NOT expose a /dailyactivity endpoint.
 // Daily production bonuses are published/recorded by third-party trackers.
 // AO-SAGE publicly shows the current bonus for all three live servers.
-const DAILY_BONUS_SOURCE = 'https://ao-sage.com/';
+const DAILY_BONUS_SOURCE = 'https://ao-sage.com/today';
 const DAILY_CACHE_FILE = path.join(__dirname, 'daily-bonus-cache.json');
 
 // Albion Data Project confirms live festivities from multiple game clients.
@@ -2129,9 +2129,22 @@ function parseDailyBonusBlock(block) {
 function extractDailyPageDate(html, serverKey) {
     const label = DAILY_SERVER_LABELS[serverKey];
     if (!label) return '';
-    const re = new RegExp(`region:["']${serverKey}["'][^}]{0,180}?date:["'](\\d{4}-\\d{2}-\\d{2})["']`, 'i');
-    const match = String(html || '').match(re);
-    return match ? match[1] : '';
+    const source = String(html || '');
+    const patterns = [
+        new RegExp('region:["\\']' + serverKey + '["\\'][^}]{0,300}?date:["\\'](\\d{4}-\\d{2}-\\d{2})["\\']', 'i'),
+        new RegExp('["\\']' + serverKey + '["\\']\\s*:\\s*\\{[^}]{0,300}?["\\']date["\\']\\s*:\\s*["\\'](\\d{4}-\\d{2}-\\d{2})["\\']', 'i')
+    ];
+    for (const re of patterns) {
+        const match = source.match(re);
+        if (match) return match[1];
+    }
+    // AO-SAGE /today can render current cards without the legacy embedded date.
+    // Accept today's date only when the requested server block contains parsed bonus data.
+    const $ = cheerio.load(source);
+    const block = extractDailyServerBlock($('body').text(), serverKey);
+    const parsed = parseDailyBonusBlock(block);
+    if (parsed.entries.length >= 1) return getExpectedDailyDate();
+    return '';
 }
 
 function getExpectedDailyDate() {
@@ -2560,14 +2573,31 @@ function normalizeAvaSlug(input) {
 }
 
 function extractAvaCount(bodyText, label) {
-    const escaped = label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-    const patterns = [
-        new RegExp(`${escaped}\\s*[×x*:]?\\s*(\\d+)`, 'i'),
-        new RegExp(`${escaped}[\\s\\S]{0,24}?[×x*:]\\s*(\\d+)`, 'i')
-    ];
-    for (const re of patterns) {
-        const m = bodyText.match(re);
-        if (m) return Number(m[1]) || 0;
+    const aliases = {
+        'Green chest': ['Green chest', 'Green chests', 'หีบเขียว'],
+        'Blue chest': ['Blue chest', 'Blue chests', 'หีบน้ำเงิน'],
+        'Gold chest': ['Gold chest', 'Gold chests', 'หีบทอง'],
+        Stone: ['Stone', 'Rock', 'หินใหญ่', 'หิน'],
+        Wood: ['Wood', 'ไม้'],
+        Ore: ['Ore', 'แร่'],
+        Hide: ['Hide', 'หนัง'],
+        Fiber: ['Fiber', 'เส้นใย'],
+        'Solo dungeon': ['Solo dungeon', 'Solo dungeons', 'ดันเจี้ยนเดี่ยว', 'ดันเดี่ยว'],
+        'Group dungeon': ['Group dungeon', 'Group dungeons', 'ดันเจี้ยนกลุ่ม', 'ดันกลุ่ม']
+    };
+    const candidates = aliases[label] || [label];
+    const escapeRegExp = value => value.replace(/[.*+?^()|[\]\\]/g, '\\$&');
+    const text = String(bodyText || '');
+    for (const candidate of candidates) {
+        const escaped = escapeRegExp(candidate);
+        const patterns = [
+            new RegExp(escaped + '\\s*(?:[×x*:]\\s*)?(\\d+)\\b', 'i'),
+            new RegExp('(\\d+)\\s*[×x*]?\\s*' + escaped + '\\b', 'i')
+        ];
+        for (const re of patterns) {
+            const match = text.match(re);
+            if (match) return Number(match[1]) || 0;
+        }
     }
     return 0;
 }
@@ -2630,8 +2660,8 @@ function avaDataPointCount(data) {
 async function fetchAvaMapData(input) {
     const slug = normalizeAvaSlug(input);
     const urls = [
-        `${AVA_MAP_SOURCE}${encodeURIComponent(slug)}`,
-        `${AVA_MAP_SOURCE_TH}${encodeURIComponent(slug)}`
+        `${AVA_MAP_SOURCE_TH}${encodeURIComponent(slug)}`,
+        `${AVA_MAP_SOURCE}${encodeURIComponent(slug)}`
     ];
 
     let lastError = null;
@@ -3993,10 +4023,11 @@ const AVA_CARD_ICON_FILES = {
     Blue: path.join(__dirname, 'ava-icons', 'Blue.png'),
     Green: path.join(__dirname, 'ava-icons', 'Green.png'),
     GroupDungeon: path.join(__dirname, 'ava-icons', 'GroupDungeon.png'),
+    SoloDungeon: path.join(__dirname, 'ava-icons', 'SoloDungeon.png'),
     Fiber: path.join(__dirname, 'ava-icons', 'Fiber.png'),
     Hide: path.join(__dirname, 'ava-icons', 'Hide.png'),
     Ore: path.join(__dirname, 'ava-icons', 'Ore.png'),
-    Stone: path.join(__dirname, 'ava-icons', 'S.png'),
+    Stone: path.join(__dirname, 'ava-icons', 'Stone.png'),
     Wood: path.join(__dirname, 'ava-icons', 'Wood.png')
 };
 const avaCardIconCache = new Map();
@@ -4027,12 +4058,10 @@ function drawAvaStatBox(ctx, x, y, w, title, rows, accent) {
 }
 
 async function generateAvaRoadsCard(data, ocrText = '') {
-    // AVA report is map-only: no stats/header/footer. Render the source map
-    // as large as possible so the map itself uses the entire report.
-    const width = 2400, height = 1600;
+    const width = 2400, height = 1800;
+    const mapHeight = 1320, panelY = 1340, panelHeight = 420;
     const canvas = createCanvas(width, height);
     const ctx = canvas.getContext('2d');
-
     ctx.fillStyle = '#05070b';
     ctx.fillRect(0, 0, width, height);
 
@@ -4041,8 +4070,8 @@ async function generateAvaRoadsCard(data, ocrText = '') {
     if (!mapImage) {
         const slug = normalizeAvaSlug(canonicalDisplayName);
         const fallbackImageUrls = [
-            `https://albionbattlehub.com/images/avalon/${encodeURIComponent(slug)}.webp`,
-            `https://albionbattlehub.com/api/og/avalon?slug=${encodeURIComponent(slug)}`
+            'https://albionbattlehub.com/images/avalon/' + encodeURIComponent(slug) + '.webp',
+            'https://albionbattlehub.com/api/og/avalon?slug=' + encodeURIComponent(slug)
         ];
         for (const imageUrl of fallbackImageUrls) {
             mapImage = await downloadImageForCanvas(imageUrl);
@@ -4057,21 +4086,73 @@ async function generateAvaRoadsCard(data, ocrText = '') {
         ctx.font = '900 52px Arial, sans-serif';
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
-        ctx.fillText('MAP IMAGE NOT AVAILABLE', width / 2, height / 2);
+        ctx.fillText('MAP IMAGE NOT AVAILABLE', width / 2, mapHeight / 2);
         ctx.textAlign = 'left';
         ctx.textBaseline = 'alphabetic';
     } else {
-        const scale = Math.min(width / mapImage.width, height / mapImage.height);
+        const scale = Math.min(width / mapImage.width, mapHeight / mapImage.height);
         const dw = Math.round(mapImage.width * scale);
         const dh = Math.round(mapImage.height * scale);
         const dx = Math.round((width - dw) / 2);
-        const dy = Math.round((height - dh) / 2);
+        const dy = Math.round((mapHeight - dh) / 2);
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
         ctx.drawImage(mapImage, dx, dy, dw, dh);
     }
 
-    return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: `ava-map-${data.name}.png` });
+    ctx.fillStyle = '#0d121b';
+    ctx.fillRect(0, panelY, width, panelHeight);
+    ctx.strokeStyle = '#263447';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(36, panelY);
+    ctx.lineTo(width - 36, panelY);
+    ctx.stroke();
+    ctx.fillStyle = '#f1f5f9';
+    ctx.font = '900 34px Arial, sans-serif';
+    ctx.fillText(canonicalDisplayName + '  •  ' + String(data?.tier || ''), 56, panelY + 48);
+    ctx.fillStyle = '#94a3b8';
+    ctx.font = '700 20px Arial, sans-serif';
+    ctx.fillText('AVA MAP POINTS OF INTEREST', 56, panelY + 82);
+
+    const counts = data?.counts || {};
+    const items = [
+        { key: 'Green', label: 'หีบเขียว', count: Number(counts['Green chest']) || 0 },
+        { key: 'Blue', label: 'หีบน้ำเงิน', count: Number(counts['Blue chest']) || 0 },
+        { key: 'Gold', label: 'หีบทอง', count: Number(counts['Gold chest']) || 0 },
+        { key: 'Hide', label: 'หนัง', count: Number(counts.Hide) || 0 },
+        { key: 'SoloDungeon', label: 'ดันเจี้ยนเดี่ยว', count: Number(counts['Solo dungeon']) || 0 },
+        { key: 'Stone', label: 'หินใหญ่', count: Number(counts.Stone) || 0 },
+        { key: 'Ore', label: 'แร่', count: Number(counts.Ore) || 0 },
+        { key: 'Wood', label: 'ไม้', count: Number(counts.Wood) || 0 },
+        { key: 'Fiber', label: 'เส้นใย', count: Number(counts.Fiber) || 0 },
+        { key: 'GroupDungeon', label: 'ดันเจี้ยนกลุ่ม', count: Number(counts['Group dungeon']) || 0 }
+    ];
+    const cols = 5, gap = 18, left = 56, itemW = 440, itemH = 126;
+    for (let i = 0; i < items.length; i++) {
+        const item = items[i];
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        const x = left + col * (itemW + gap);
+        const y = panelY + 106 + row * 138;
+        drawRoundRect(ctx, x, y, itemW, itemH, 16);
+        ctx.fillStyle = '#151e2b';
+        ctx.fill();
+        ctx.strokeStyle = '#34465c';
+        ctx.lineWidth = 2;
+        ctx.stroke();
+        const icon = await loadAvaCardIcon(item.key);
+        if (icon) {
+            try { ctx.drawImage(icon, x + 18, y + 20, 82, 82); } catch (_) {}
+        }
+        ctx.fillStyle = '#cbd5e1';
+        ctx.font = '700 24px Arial, sans-serif';
+        ctx.fillText(item.label, x + 116, y + 48, itemW - 132);
+        ctx.fillStyle = item.count > 0 ? '#f8fafc' : '#64748b';
+        ctx.font = '900 42px Arial, sans-serif';
+        ctx.fillText('×' + item.count, x + 116, y + 96);
+    }
+    return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: 'ava-map-' + normalizeAvaSlug(data.name) + '.png' });
 }
 
 async function processAvaImageMessage(message, fallbackAttachments = []) {
@@ -4380,7 +4461,7 @@ function getDailyRetryDelayMs(serverKey = 'asia') {
     const minutesSinceReset = ((now.getUTCHours() - resetHour + 24) % 24) * 60 + now.getUTCMinutes();
     if (minutesSinceReset < 60) return 30 * 1000;
     if (minutesSinceReset < 180) return 60 * 1000;
-    return 5 * 60 * 1000;
+    return 60 * 1000;
 }
 
 function scheduleDailyAutoCheck() {
