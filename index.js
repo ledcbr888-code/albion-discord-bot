@@ -2141,7 +2141,12 @@ function extractDailyPageDate(html, serverKey) {
     // AO-SAGE /today can render current cards without the legacy embedded date.
     // Accept today's date only when the requested server block contains parsed bonus data.
     const $ = cheerio.load(source);
-    const block = extractDailyServerBlock($('body').text(), serverKey);
+    $('img').each((_, element) => {
+        const image = $(element);
+        const alt = image.attr('alt') || image.attr('title') || '';
+        if (alt) image.replaceWith(' ' + alt.replace(/^Image\\s*/i, '') + ' ');
+    });
+    const block = extractDailyServerBlock($('body').text().replace(/\\s+/g, ' ').trim(), serverKey);
     const parsed = parseDailyBonusBlock(block);
     if (parsed.entries.length >= 1) return getExpectedDailyDate();
     return '';
@@ -2186,7 +2191,14 @@ async function fetchDailyBonus(serverKey) {
     if (aoResult.status === 'fulfilled') {
         const html = aoResult.value.data;
         const $ = cheerio.load(html);
-        const block = extractDailyServerBlock($('body').text(), serverKey);
+        // AO-SAGE stores category names in image alt text; .text() drops those labels.
+        $('img').each((_, element) => {
+            const image = $(element);
+            const alt = image.attr('alt') || image.attr('title') || '';
+            if (alt) image.replaceWith(' ' + alt.replace(/^Image\\s*/i, '') + ' ');
+        });
+        const pageText = $('body').text().replace(/\\s+/g, ' ').trim();
+        const block = extractDailyServerBlock(pageText, serverKey);
         const parsed = parseDailyBonusBlock(block);
         const pageDate = extractDailyPageDate(html, serverKey);
         if (pageDate === getExpectedDailyDate() && parsed.entries.length) {
@@ -2679,6 +2691,18 @@ async function fetchAvaMapData(input) {
             const html = String(response.data || '');
             const $ = cheerio.load(html);
             const bodyText = $('body').text().replace(/\s+/g, ' ').trim();
+            // POI names are in image alt text; pair them with adjacent list counts.
+            const poiTextParts = [];
+            $('li').each((_, element) => {
+                const item = $(element);
+                const alts = item.find('img').map((__, img) => {
+                    const node = $(img);
+                    return node.attr('alt') || node.attr('title') || '';
+                }).get().filter(Boolean).join(' ').replace(/\bImage\s*/gi, '');
+                const itemText = item.text().replace(/\s+/g, ' ').trim();
+                if (alts || itemText) poiTextParts.push(alts + ' ' + itemText);
+            });
+            const searchableText = bodyText + ' ' + poiTextParts.join(' ');
             const title = $('h1').first().text().trim() || slug;
 
             if (!/Avalon|Road Layout|Green chest|หีบเขียว/i.test(bodyText + html)) {
@@ -2702,7 +2726,7 @@ async function fetchAvaMapData(input) {
 
             const counts = {};
             for (const label of Object.keys(AVA_LABELS_TH)) {
-                counts[label] = extractAvaCount(bodyText, label);
+                counts[label] = extractAvaCount(searchableText, label);
             }
 
             const connection = extractAvaConnection(html, bodyText);
@@ -4117,20 +4141,21 @@ async function generateAvaRoadsCard(data, ocrText = '') {
 
     const counts = data?.counts || {};
     const items = [
-        { key: 'Green', label: 'หีบเขียว', count: Number(counts['Green chest']) || 0 },
-        { key: 'Blue', label: 'หีบน้ำเงิน', count: Number(counts['Blue chest']) || 0 },
-        { key: 'Gold', label: 'หีบทอง', count: Number(counts['Gold chest']) || 0 },
-        { key: 'Hide', label: 'หนัง', count: Number(counts.Hide) || 0 },
-        { key: 'SoloDungeon', label: 'ดันเจี้ยนเดี่ยว', count: Number(counts['Solo dungeon']) || 0 },
-        { key: 'Stone', label: 'หินใหญ่', count: Number(counts.Stone) || 0 },
-        { key: 'Ore', label: 'แร่', count: Number(counts.Ore) || 0 },
-        { key: 'Wood', label: 'ไม้', count: Number(counts.Wood) || 0 },
-        { key: 'Fiber', label: 'เส้นใย', count: Number(counts.Fiber) || 0 },
-        { key: 'GroupDungeon', label: 'ดันเจี้ยนกลุ่ม', count: Number(counts['Group dungeon']) || 0 }
+        { key: 'Green', label: 'Green chest', count: Number(counts['Green chest']) || 0 },
+        { key: 'Blue', label: 'Blue chest', count: Number(counts['Blue chest']) || 0 },
+        { key: 'Gold', label: 'Gold chest', count: Number(counts['Gold chest']) || 0 },
+        { key: 'Hide', label: 'Hide', count: Number(counts.Hide) || 0 },
+        { key: 'SoloDungeon', label: 'Solo dungeon', count: Number(counts['Solo dungeon']) || 0 },
+        { key: 'Stone', label: 'Stone', count: Number(counts.Stone) || 0 },
+        { key: 'Ore', label: 'Ore', count: Number(counts.Ore) || 0 },
+        { key: 'Wood', label: 'Wood', count: Number(counts.Wood) || 0 },
+        { key: 'Fiber', label: 'Fiber', count: Number(counts.Fiber) || 0 },
+        { key: 'GroupDungeon', label: 'Group dungeon', count: Number(counts['Group dungeon']) || 0 }
     ];
+    const visibleItems = items.filter(item => item.count > 0);
     const cols = 5, gap = 18, left = 56, itemW = 440, itemH = 126;
-    for (let i = 0; i < items.length; i++) {
-        const item = items[i];
+    for (let i = 0; i < visibleItems.length; i++) {
+        const item = visibleItems[i];
         const col = i % cols;
         const row = Math.floor(i / cols);
         const x = left + col * (itemW + gap);
