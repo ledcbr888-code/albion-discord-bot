@@ -2766,56 +2766,29 @@ function avaCountLine(items) {
 
 async function generateAvaCheckResponse(input) {
     const data = await fetchAvaMapDataWithFallback(input);
-
+    const chestValue = data.countsAvailable === false ? 'ยังดึงจำนวนจากเว็บไม่ได้' : avaCountLine([
+        ['🟢 เขียว', data.counts['Green chest']],
+        ['🔵 น้ำเงิน', data.counts['Blue chest']],
+        ['🟡 ทอง', data.counts['Gold chest']]
+    ]);
+    const dungeonValue = data.countsAvailable === false ? 'ยังดึงจำนวนจากเว็บไม่ได้' : avaCountLine([
+        ['🟣 ดันเดี่ยว', data.counts['Solo dungeon']],
+        ['🔴 ดันกลุ่ม', data.counts['Group dungeon']]
+    ]);
     const embed = new EmbedBuilder()
         .setColor(0x2dd4bf)
         .setTitle(`🗺️ AVA CHECK — ${data.name}`)
-        .setDescription(
-            `🛡️ **Tier:** ${data.tier}  •  🧭 **Layout:** ${data.layout}\n` +
-            `🌀 **Connection:** ${formatAvaConnection(data.connection)}`
-        )
+        .setDescription(data.countsAvailable === false
+            ? 'แสดงรูปแมพและข้อมูลจาก Albion Battle Hub เท่านั้น\n⚠️ เว็บไม่ส่งตัวเลข Chest/Dungeon ที่อ่านยืนยันได้'
+            : `📦 **Chest รวม:** ${data.totalChests}  •  🏰 **Dungeon รวม:** ${data.totalDungeons}`)
         .addFields(
-            {
-                name: '📦 กล่อง',
-                value: avaCountLine([
-                    ['🟢 เขียว', data.counts['Green chest']],
-                    ['🔵 น้ำเงิน', data.counts['Blue chest']],
-                    ['🟡 ทอง', data.counts['Gold chest']]
-                ]),
-                inline: false
-            },
-            {
-                name: '⛏️ ทรัพยากร',
-                value: avaCountLine([
-                    ['🪨 หินใหญ่', data.counts.Stone],
-                    ['⛏️ แร่', data.counts.Ore],
-                    ['🪵 ไม้', data.counts.Wood],
-                    ['🦌 หนัง', data.counts.Hide],
-                    ['🌿 เส้นใย', data.counts.Fiber]
-                ]),
-                inline: false
-            },
-            {
-                name: '🏰 ดันเจี้ยน',
-                value: avaCountLine([
-                    ['🟣 ดันเดี่ยว', data.counts['Solo dungeon']],
-                    ['🔴 ดันกลุ่ม', data.counts['Group dungeon']]
-                ]) + ((Number(data.totalDungeonMarkers) || 0) > 0
-                    ? `\n🧭 จุดดันเจี้ยนจาก Roadinator (ยังไม่แยกประเภท): **${data.totalDungeonMarkers}**`
-                    : ''),
-                inline: false
-            },
-            {
-                name: '📊 รวม',
-                value: `กล่อง **${data.totalChests}** • ทรัพยากร **${data.totalResources}** • ดันเจี้ยน **${data.totalDungeons}**`,
-                inline: false
-            }
+            { name: '📦 Chest', value: chestValue, inline: true },
+            { name: '🏰 Dungeon', value: dungeonValue, inline: true }
         )
-        .setFooter({ text: `ข้อมูลแผนที่จาก ${data.source || 'AVA sources'}` })
+        .setFooter({ text: 'Source: Albion Battle Hub' })
         .setTimestamp();
-
     if (data.mapImage) embed.setImage(data.mapImage);
-    embed.setURL(data.sourceUrl);
+    if (data.sourceUrl) embed.setURL(data.sourceUrl);
     return embed;
 }
 
@@ -3938,270 +3911,105 @@ async function fetchAlbionRoadsMapData(lookupName) {
 }
 
 async function fetchAvaMapDataWithFallback(mapName, ocrCandidates = []) {
-    const errors = [];
-
-    let bestData = null;
-    const mergeCandidate = (candidate, sourceName) => {
-        if (!candidate) return;
-        const incoming = normalizeAvaDataTotals(candidate);
-        if (!bestData) {
-            bestData = incoming;
-            bestData.providerSources = [sourceName];
-            return;
-        }
-        const mergedCounts = { ...normalizeAvaDataTotals(bestData).counts };
-        for (const key of Object.keys(mergedCounts)) {
-            mergedCounts[key] = Math.max(
-                Number(mergedCounts[key]) || 0,
-                Number(incoming.counts?.[key]) || 0
-            );
-        }
-        const currentPoints = avaDataPointCount(bestData);
-        const incomingPoints = avaDataPointCount(incoming);
-        bestData = normalizeAvaDataTotals({
-            ...bestData,
-            ...((incomingPoints > currentPoints) ? {
-                name: incoming.name || bestData.name,
-                tier: incoming.tier && incoming.tier !== 'ไม่พบข้อมูล' ? incoming.tier : bestData.tier,
-                layout: incoming.layout && incoming.layout !== 'ไม่พบข้อมูล' ? incoming.layout : bestData.layout,
-                connection: incoming.connection || bestData.connection
-            } : {}),
-            counts: mergedCounts,
-            mapImage: bestData.mapImage || incoming.mapImage,
-            sourceUrl: bestData.sourceUrl || incoming.sourceUrl,
-            providerSources: [...new Set([...(bestData.providerSources || []), sourceName])]
-        });
-        console.log('🗺️ AVA merged POI source ' + sourceName +
-            ': total=' + avaDataPointCount(bestData) +
-            ' counts=' + JSON.stringify(bestData.counts));
-    };
-
-    // Avoid resolving the same OCR result twice. If mapName is already the
-    // corrected/canonical candidate, go straight to the data source.
-    let lookupName = mapName;
-    const normalizedMap = normalizeAvaLookupName(mapName);
-    const normalizedCorrection = normalizeAvaLookupName(normalizeAvaOcrMapName(mapName));
-    const candidateMatchesMap =
-        normalizedCorrection === normalizedMap &&
-        ocrCandidates.some(candidate =>
-            normalizeAvaLookupName(candidate) === normalizedMap ||
-            normalizeAvaLookupName(normalizeAvaOcrMapName(candidate)) === normalizedMap
-        );
-
-    if (!candidateMatchesMap || !ocrCandidates.length) {
-        try {
-            const inputs = [mapName, ...ocrCandidates].filter(Boolean);
-            const ranked = [];
-            for (const input of inputs) {
-                const resolved = await resolveAvaMapName(input);
-                if (resolved?.name) ranked.push({ input, ...resolved });
-            }
-            ranked.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
-            if (ranked[0] && Number(ranked[0].score || 0) >= 0.62) {
-                lookupName = ranked[0].name;
-                console.log('🗺️ AVA fuzzy map match: OCR=' + mapName +
-                    ' candidates=' + JSON.stringify(ocrCandidates.slice(0, 8)) +
-                    ' -> canonical=' + lookupName + ' score=' + Number(ranked[0].score || 0).toFixed(3));
-            }
-        } catch (err) {
-            console.warn('⚠️ AVA fuzzy name resolver failed: ' + err.message);
-        }
-    } else {
-        console.log('🗺️ AVA using already-resolved map name: ' + lookupName);
-    }
-
-    // Primary: Battle Hub canonical page. It has the verified map title,
-    // POI counts and image in one request, so do not wait for a slow tracker
-    // endpoint before using it.
+    // Albion Battle Hub is the single source of truth for AVA chest/dungeon counts.
+    // Do not merge Roadinator or other sites: their resource marker counts can disagree.
+    let lookupName = normalizeAvaOcrMapName(mapName);
     try {
-        const direct = normalizeAvaDataTotals(await fetchAvaMapData(lookupName));
-        if (direct?.name) direct.name = normalizeAvaOcrMapName(direct.name);
-        if (avaDataPointCount(direct) > 0 || direct.mapImage) {
-            mergeCandidate(direct, 'Battle Hub direct');
-            if (avaDataPointCount(direct) > 0) {
-                console.log('🗺️ AVA direct canonical source found POIs; checking other sources for missing counts');
-            }
+        const normalizedMap = normalizeAvaLookupName(lookupName);
+        const candidates = [mapName, ...ocrCandidates].filter(Boolean);
+        const ranked = [];
+        for (const input of candidates) {
+            const resolved = await resolveAvaMapName(input);
+            if (resolved?.name) ranked.push({ input, ...resolved });
+        }
+        ranked.sort((a, b) => Number(b.score || 0) - Number(a.score || 0));
+        if (ranked[0] && Number(ranked[0].score || 0) >= 0.62) {
+            lookupName = ranked[0].name;
+            console.log('🗺️ AVA Battle Hub map resolved: OCR=' + mapName +
+                ' -> canonical=' + lookupName + ' score=' + Number(ranked[0].score || 0).toFixed(3));
         } else {
-            errors.push('Battle Hub direct: พบหน้าแต่ไม่มีตัวเลข POI');
+            console.log('🗺️ AVA using supplied map name for Battle Hub: ' + lookupName +
+                (normalizedMap ? '' : ' (OCR name normalization applied)'));
         }
     } catch (err) {
-        errors.push('Battle Hub direct: ' + err.message);
-        console.warn('⚠️ AVA direct canonical source failed for ' + mapName + ': ' + err.message);
+        console.warn('⚠️ AVA map-name resolution failed; using normalized OCR name: ' + err.message);
     }
 
-    // Local static catalogue: avoids tracker 403/404 and works without a live request.
-    // It supplies chest/resource component counts; Battle Hub remains the map-image source.
     try {
-        const roadinator = normalizeAvaDataTotals(fetchRoadinatorAvaMapData(lookupName));
-        mergeCandidate(roadinator, 'Roadinator local database');
-        console.log('🗺️ AVA Roadinator local data found: ' + roadinator.name +
-            ' counts=' + JSON.stringify(roadinator.counts));
-    } catch (err) {
-        errors.push('Roadinator local database: ' + err.message);
-        console.warn('⚠️ AVA Roadinator local fallback unavailable for ' + lookupName + ': ' + err.message);
-    }
-
-    // Secondary: Avalon Roads Tracker — dedicated Roads of Avalon map database.
-    try {
-        const primary = normalizeAvaDataTotals(await fetchAvalonTrackerMapData(lookupName));
-        if (avaDataPointCount(primary) > 0) {
-            if (primary?.name) primary.name = normalizeAvaOcrMapName(primary.name);
-            mergeCandidate(primary, 'Avalon Roads Tracker');
-            if (!bestData.mapImage) {
-                try {
-                    const imageData = await fetchBattleHubMapData(lookupName);
-                    if (imageData?.mapImage) bestData.mapImage = imageData.mapImage;
-                    if ((!bestData.name || bestData.name === lookupName) && imageData?.name) bestData.name = imageData.name;
-                } catch (imageErr) {
-                    console.warn('⚠️ AVA map image enrichment failed: ' + imageErr.message);
-                }
-            }
-        } else {
-            errors.push('Avalon Roads Tracker: พบหน้าแต่ไม่มีตัวเลข POI');
-        }
-    } catch (err) {
-        errors.push('Avalon Roads Tracker: ' + err.message);
-        console.warn('⚠️ AVA Avalon Roads Tracker unavailable for ' + mapName + ': ' + err.message);
-    }
-
-    // Fallbacks: other static Avalon map databases.
-    const fallbackSources = [
-        ['Albion Battle Hub', fetchBattleHubMapData],
-        ['Albion Online Builds', fetchAlbionOnlineBuildsAvaMapData],
-        ['Albion Roads', fetchAlbionRoadsMapData]
-    ];
-    for (const [sourceName, fetcher] of fallbackSources) {
-        try {
-            const data = normalizeAvaDataTotals(await fetcher(lookupName));
-            if (avaDataPointCount(data) > 0) {
-                if (data?.name) data.name = normalizeAvaOcrMapName(data.name);
-                mergeCandidate(data, sourceName);
-            } else {
-                errors.push(sourceName + ': พบหน้าแต่ไม่มีตัวเลข');
-            }
-        } catch (err) {
-            errors.push(sourceName + ': ' + err.message);
-            console.warn('⚠️ AVA ' + sourceName + ' fallback failed for ' + mapName + ': ' + err.message);
-        }
-    }
-
-    // Merge partial POI counts across providers before falling back to identity-only.
-    if (bestData && avaDataPointCount(bestData) > 0) {
-        bestData.name = normalizeAvaOcrMapName(bestData.name || lookupName);
-        bestData.counts = { ...normalizeAvaDataTotals(bestData).counts };
-
-        // Last-known verified Battle Hub POIs for Ponitos-Aiayrom.
-        // Only fill missing counts; never reduce values returned by a provider.
-        const verifiedPoiFallbacks = {
-            'ponitos-aiayrom': {
-                'Green chest': 4,
-                'Blue chest': 0,
-                'Gold chest': 0,
-                Stone: 1,
-                Wood: 1,
-                Ore: 1,
-                Hide: 0,
-                Fiber: 0,
-                'Solo dungeon': 1,
-                'Group dungeon': 0
-            },
-            'puros-amayam': {
-                'Green chest': 4,
-                'Blue chest': 1,
-                'Gold chest': 0,
-                Stone: 0,
-                Wood: 0,
-                Ore: 0,
-                Hide: 0,
-                Fiber: 0,
-                'Solo dungeon': 2,
-                'Group dungeon': 0
-            },
-            'fouitos-aiuttum': {
-                'Green chest': 2,
-                'Blue chest': 0,
-                'Gold chest': 3,
-                Stone: 0,
-                Wood: 0,
-                Ore: 1,
-                Hide: 1,
-                Fiber: 0,
-                'Solo dungeon': 0,
-                'Group dungeon': 0
-            }
+        const data = await fetchBattleHubMapData(lookupName);
+        const counts = {
+            'Gold chest': Number(data.counts?.['Gold chest']) || 0,
+            'Blue chest': Number(data.counts?.['Blue chest']) || 0,
+            'Green chest': Number(data.counts?.['Green chest']) || 0,
+            'Solo dungeon': Number(data.counts?.['Solo dungeon']) || 0,
+            'Group dungeon': Number(data.counts?.['Group dungeon']) || 0,
+            Wood: 0, Ore: 0, Stone: 0, Hide: 0, Fiber: 0
         };
-        const verifiedCounts = verifiedPoiFallbacks[normalizeAvaSlug(bestData.name || lookupName)];
-        if (verifiedCounts) {
-            for (const [label, count] of Object.entries(verifiedCounts)) {
-                bestData.counts[label] = Math.max(Number(bestData.counts[label]) || 0, count);
-            }
-            console.log('🗺️ AVA applied verified POI fallback for ' + bestData.name);
+        const hasPoiCounts = counts['Gold chest'] + counts['Blue chest'] + counts['Green chest'] +
+            counts['Solo dungeon'] + counts['Group dungeon'] > 0;
+        const slug = normalizeAvaSlug(data.name || lookupName);
+        const result = {
+            ...data,
+            slug,
+            name: normalizeAvaOcrMapName(data.name || lookupName),
+            counts,
+            totalChests: counts['Gold chest'] + counts['Blue chest'] + counts['Green chest'],
+            totalResources: 0,
+            totalDungeons: counts['Solo dungeon'] + counts['Group dungeon'],
+            totalDungeonMarkers: 0,
+            countsAvailable: hasPoiCounts,
+            source: 'Albion Battle Hub',
+            sourceUrl: data.sourceUrl || ('https://albionbattlehub.com/en/avalon-maps/' + encodeURIComponent(slug)),
+            mapImage: data.mapImage || ('https://albionbattlehub.com/api/og/avalon?slug=' + encodeURIComponent(slug))
+        };
+        if (!hasPoiCounts) {
+            console.warn('⚠️ AVA Battle Hub page loaded but chest/dungeon counts could not be parsed: ' + result.name);
         }
-
-        bestData = normalizeAvaDataTotals(bestData);
-        console.log('🗺️ AVA merged final data: map=' + bestData.name +
-            ' providers=' + JSON.stringify(bestData.providerSources || []) +
-            ' counts=' + JSON.stringify(bestData.counts));
-        return bestData;
-    }
-
-    // IMPORTANT: The selected name already came from the authoritative
-    // Avalon map index. A failure of the POI providers (403/404/timeout)
-    // must NOT turn a real map into "map not found".
-    //
-    // Example: Qiient-Odesas is a real T6 Roads of Avalon zone, but some
-    // providers can reject the bot request while the public map still exists.
-    // Return a verified identity-only record so the selector can finish and
-    // the map-card renderer can still try its image fallbacks.
-    try {
-        const canonicalNames = await fetchAuthoritativeAvaMapIndex();
+        console.log('🗺️ AVA Battle Hub only counts: map=' + result.name +
+            ' counts=' + JSON.stringify({
+                'Gold chest': counts['Gold chest'],
+                'Blue chest': counts['Blue chest'],
+                'Green chest': counts['Green chest'],
+                'Solo dungeon': counts['Solo dungeon'],
+                'Group dungeon': counts['Group dungeon']
+            }) + ' countsAvailable=' + hasPoiCounts);
+        return result;
+    } catch (err) {
+        // Keep a useful map image when the canonical zone name can be verified,
+        // but never substitute counts from a different site or show unknown as zero.
+        console.warn('⚠️ AVA Battle Hub primary lookup failed for ' + lookupName + ': ' + err.message);
+        const canonicalNames = await fetchAuthoritativeAvaMapIndex().catch(() => []);
         const canonical = canonicalNames.find(name =>
             normalizeAvaLookupName(name) === normalizeAvaLookupName(lookupName)
         );
-
-        if (canonical) {
-            const verifiedName = normalizeAvaOcrMapName(canonical);
-            const slug = normalizeAvaSlug(verifiedName);
-            const emptyCounts = {
-                'Green chest': 0,
-                'Blue chest': 0,
-                'Gold chest': 0,
-                Stone: 0,
-                Wood: 0,
-                Ore: 0,
-                Hide: 0,
-                Fiber: 0,
-                'Solo dungeon': 0,
-                'Group dungeon': 0
-            };
-
-            console.warn(
-                '⚠️ AVA map is verified but POI providers are unavailable: ' +
-                verifiedName
-            );
-
-            return {
-                slug,
-                name: verifiedName,
-                tier: 'ยืนยันชื่อแล้ว • รอข้อมูล POI',
-                layout: 'ไม่พบข้อมูล',
-                connection: '',
-                counts: emptyCounts,
-                totalChests: 0,
-                totalResources: 0,
-                totalDungeons: 0,
-                mapImage: 'https://albionbattlehub.com/api/og/avalon?slug=' + encodeURIComponent(slug),
-                sourceUrl: 'https://albiononline.th.gl/db/locations/' + encodeURIComponent(slug),
-                verifiedOnly: true,
-                providerErrors: errors
-            };
+        if (!canonical) {
+            throw new Error('Albion Battle Hub ไม่สามารถดึงข้อมูล Chest/Dungeon ของ "' + lookupName + '" ได้: ' + err.message);
         }
-    } catch (err) {
-        console.warn('⚠️ AVA authoritative verification fallback failed: ' + err.message);
+        const verifiedName = normalizeAvaOcrMapName(canonical);
+        const slug = normalizeAvaSlug(verifiedName);
+        return {
+            name: verifiedName,
+            slug,
+            tier: 'ไม่พบข้อมูล',
+            layout: '',
+            connection: '',
+            counts: {
+                'Gold chest': 0, 'Blue chest': 0, 'Green chest': 0,
+                'Solo dungeon': 0, 'Group dungeon': 0,
+                Wood: 0, Ore: 0, Stone: 0, Hide: 0, Fiber: 0
+            },
+            totalChests: 0,
+            totalResources: 0,
+            totalDungeons: 0,
+            totalDungeonMarkers: 0,
+            countsAvailable: false,
+            mapImage: 'https://albionbattlehub.com/api/og/avalon?slug=' + encodeURIComponent(slug),
+            sourceUrl: 'https://albionbattlehub.com/en/avalon-maps/' + encodeURIComponent(slug),
+            source: 'Albion Battle Hub (ยืนยันชื่อแมพแล้ว แต่ไม่มีตัวเลข POI)'
+        };
     }
-
-    throw new Error('ไม่พบข้อมูล AVA สำหรับ "' + mapName + '"\n' + errors.join('\n'));
 }
+
 async function downloadImageForCanvas(url) {
     if (!url) return null;
     try { const response = await axios.get(url, { responseType: 'arraybuffer', timeout: 12000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'image/*,*/*;q=0.8' }, validateStatus: status => status >= 200 && status < 300 }); return await loadImage(Buffer.from(response.data)); } catch (_) { return null; }
@@ -4260,8 +4068,7 @@ async function generateAvaRoadsCard(data, ocrText = '') {
     const width = 2400;
     // Reserve a third row when Roadinator exposes an unclassified dungeon marker.
     // The report can show up to 11 POI categories, which otherwise clips the last row.
-    const hasUnclassifiedDungeonMarker = Number(data?.totalDungeonMarkers ?? data?.countMeta?.dungeonMarkers) > 0;
-    const panelHeight = hasUnclassifiedDungeonMarker ? 560 : 420;
+    const panelHeight = 420;
     const canonicalDisplayName = normalizeAvaOcrMapName(data?.name || ocrText);
 
     // Download the map first so the report canvas can match its real aspect ratio.
@@ -4324,19 +4131,18 @@ async function generateAvaRoadsCard(data, ocrText = '') {
 
     const counts = data?.counts || {};
     const items = [
-        { key: 'Green', label: 'Green chest', count: Number(counts['Green chest']) || 0 },
-        { key: 'Blue', label: 'Blue chest', count: Number(counts['Blue chest']) || 0 },
-        { key: 'Gold', label: 'Gold chest', count: Number(counts['Gold chest']) || 0 },
-        { key: 'Hide', label: 'Hide', count: Number(counts.Hide) || 0 },
-        { key: 'SoloDungeon', label: 'Solo dungeon', count: Number(counts['Solo dungeon']) || 0 },
-        { key: 'Stone', label: 'Stone', count: Number(counts.Stone) || 0 },
-        { key: 'Ore', label: 'Ore', count: Number(counts.Ore) || 0 },
-        { key: 'Wood', label: 'Wood', count: Number(counts.Wood) || 0 },
-        { key: 'Fiber', label: 'Fiber', count: Number(counts.Fiber) || 0 },
-        { key: 'GroupDungeon', label: 'Group dungeon', count: Number(counts['Group dungeon']) || 0 },
-        { key: '', label: 'Dungeon marker (unclassified)', count: Number(data?.countMeta?.dungeonMarkers) || 0 }
+        { key: 'Green', label: 'Green chest', count: Number(data?.counts?.['Green chest']) || 0 },
+        { key: 'Blue', label: 'Blue chest', count: Number(data?.counts?.['Blue chest']) || 0 },
+        { key: 'Gold', label: 'Gold chest', count: Number(data?.counts?.['Gold chest']) || 0 },
+        { key: 'SoloDungeon', label: 'Solo dungeon', count: Number(data?.counts?.['Solo dungeon']) || 0 },
+        { key: 'GroupDungeon', label: 'Group dungeon', count: Number(data?.counts?.['Group dungeon']) || 0 }
     ];
-    const visibleItems = items.filter(item => item.count > 0);
+    if (data?.countsAvailable === false) {
+        ctx.fillStyle = '#f1f5f9';
+        ctx.font = '700 30px Arial, sans-serif';
+        ctx.fillText('Chest / Dungeon counts unavailable from Albion Battle Hub', 56, panelY + 78);
+    }
+    const visibleItems = data?.countsAvailable === false ? [] : items.filter(item => item.count > 0);
     const cols = 5, gap = 18, left = 56, itemW = 440, itemH = 126;
     for (let i = 0; i < visibleItems.length; i++) {
         const item = visibleItems[i];
