@@ -4045,6 +4045,18 @@ async function fetchAvaMapDataWithFallback(mapName, ocrCandidates = []) {
                 Fiber: 0,
                 'Solo dungeon': 2,
                 'Group dungeon': 0
+            },
+            'fouitos-aiuttum': {
+                'Green chest': 2,
+                'Blue chest': 0,
+                'Gold chest': 3,
+                Stone: 0,
+                Wood: 0,
+                Ore: 1,
+                Hide: 1,
+                Fiber: 0,
+                'Solo dungeon': 0,
+                'Group dungeon': 0
             }
         };
         const verifiedCounts = verifiedPoiFallbacks[normalizeAvaSlug(bestData.name || lookupName)];
