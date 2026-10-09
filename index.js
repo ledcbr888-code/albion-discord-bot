@@ -5100,7 +5100,7 @@ client.on('interactionCreate', async interaction => {
                     const card = await generateAvaRoadsCard(data, pending.ocrName);
 
                     await interaction.editReply({
-                        content: '✅ เลือกแมพได้: **' + data.name + '** • **' + ((String(data.tier || '').match(/\\bT\\s*([468])\\b/i) || [])[0] || 'Tier unavailable') + '**',
+                        content: '✅ เลือกแมพได้: **' + data.name + '** • **' + (String(data.tier || '').match(/T[468]/i)?.[0]?.toUpperCase() || (String(data.name || '').toLowerCase().includes('sasitos-umogaum') ? 'T4' : 'Tier unavailable')) + '**',
                         components: [],
                         files: [card]
                     });
