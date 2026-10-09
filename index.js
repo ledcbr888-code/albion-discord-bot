@@ -3464,8 +3464,12 @@ async function resolveAvaMapName(input) {
 function parseBattleHubAvaData(html, url, requestedName) {
     const $ = cheerio.load(html);
     const bodyText = $('body').text().replace(/\s+/g, ' ').trim();
-    const h1 = $('h1').first().text().trim() || requestedName;
-    const tierMatch = bodyText.match(/\bT\s*([468])\b/i);
+    // Battle Hub titles can include a tier suffix, e.g. "Sasitos-Umogaum (T4)".
+    // Compare the actual zone name, not the decorated heading, against the requested slug.
+    const rawH1 = $('h1').first().text().replace(/\s+/g, ' ').trim() || requestedName;
+    const h1MapName = rawH1.match(/([A-Za-z]{3,18}-[A-Za-z]{3,18})/);
+    const h1 = h1MapName ? h1MapName[1] : rawH1;
+    const tierMatch = (rawH1 + ' ' + bodyText).match(/\bT\s*([468])\b/i);
     const layoutMatch = bodyText.match(/Road Layout\s+([A-Z])/i) || bodyText.match(/เส้นทางรูปแบบ\s+([A-Z])/i);
     const getCount = labels => extractAvaCountFromPageText(bodyText, labels);
     const counts = {
