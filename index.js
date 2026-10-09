@@ -3471,7 +3471,7 @@ function parseBattleHubAvaData(html, url, requestedName) {
     const counts = {
         'Gold chest': getCount(['Gold chest', 'Gold Chest', 'หีบทอง', 'Peti emas', 'Cofre dorado', 'صندوق ذهبي']),
         'Blue chest': getCount(['Blue chest', 'Blue Chest', 'หีบน้ำเงิน', 'หีบฟ้า', 'Peti biru', 'Cofre azul', 'صندوق أزرق']),
-        'Green chest': getCount(['Green chest', 'Green Chest', 'หีบเขียว', 'Peti hijau', 'Cofre verde', 'صندوق أخเขียว']),
+        'Green chest': getCount(['Green chest', 'Green Chest', 'หีบเขียว', 'Peti hijau', 'Cofre verde', 'صندوق أخضر']),
         'Group dungeon': getCount(['Group dungeon', 'ดันเจี้ยนกลุ่ม', 'ดันเจี้ยนกลุ่ม×', 'Dungeon Group']),
         'Solo dungeon': getCount(['Solo dungeon', 'ดันเจี้ยนเดี่ยว', 'Dungeon solo']),
         Wood: 0, Ore: 0, Stone: 0, Hide: 0, Fiber: 0
@@ -3479,8 +3479,8 @@ function parseBattleHubAvaData(html, url, requestedName) {
     // Aggregate totals from the "Recorded content" section are a fallback
     // when category-specific labels change.
     const recordedSection = bodyText.split(/Recorded content/i)[1]?.split(/Reading the name/i)[0] || '';
-    const chestTotalMatch = recordedSection.match(/Chests\\s*(\\d+)/i);
-    const dungeonTotalMatch = recordedSection.match(/Dungeons\\s*(\\d+)/i);
+    const chestTotalMatch = recordedSection.match(/Chests\s*(\d+)/i);
+    const dungeonTotalMatch = recordedSection.match(/Dungeons\s*(\d+)/i);
     const recordedChestTotal = chestTotalMatch ? Number(chestTotalMatch[1]) : null;
     const recordedDungeonTotal = dungeonTotalMatch ? Number(dungeonTotalMatch[1]) : null;
     const mapImage = extractBattleHubMapImage($, url, h1) || extractAlbionRoadsImage($, url, h1);
