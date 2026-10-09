@@ -4258,7 +4258,10 @@ function drawAvaStatBox(ctx, x, y, w, title, rows, accent) {
 
 async function generateAvaRoadsCard(data, ocrText = '') {
     const width = 2400;
-    const panelHeight = 420;
+    // Reserve a third row when Roadinator exposes an unclassified dungeon marker.
+    // The report can show up to 11 POI categories, which otherwise clips the last row.
+    const hasUnclassifiedDungeonMarker = Number(data?.totalDungeonMarkers ?? data?.countMeta?.dungeonMarkers) > 0;
+    const panelHeight = hasUnclassifiedDungeonMarker ? 560 : 420;
     const canonicalDisplayName = normalizeAvaOcrMapName(data?.name || ocrText);
 
     // Download the map first so the report canvas can match its real aspect ratio.
