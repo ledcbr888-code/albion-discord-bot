@@ -2144,9 +2144,9 @@ function extractDailyPageDate(html, serverKey) {
     $('img').each((_, element) => {
         const image = $(element);
         const alt = image.attr('alt') || image.attr('title') || '';
-        if (alt) image.replaceWith(' ' + alt.replace(/^Image\\s*/i, '') + ' ');
+        if (alt) image.replaceWith(' ' + alt.replace(/^Image\s*/i, '') + ' ');
     });
-    const block = extractDailyServerBlock($('body').text().replace(/\\s+/g, ' ').trim(), serverKey);
+    const block = extractDailyServerBlock($('body').text().replace(/\s+/g, ' ').trim(), serverKey);
     const parsed = parseDailyBonusBlock(block);
     if (parsed.entries.length >= 1) return getExpectedDailyDate();
     return '';
@@ -2195,9 +2195,9 @@ async function fetchDailyBonus(serverKey) {
         $('img').each((_, element) => {
             const image = $(element);
             const alt = image.attr('alt') || image.attr('title') || '';
-            if (alt) image.replaceWith(' ' + alt.replace(/^Image\\s*/i, '') + ' ');
+            if (alt) image.replaceWith(' ' + alt.replace(/^Image\s*/i, '') + ' ');
         });
-        const pageText = $('body').text().replace(/\\s+/g, ' ').trim();
+        const pageText = $('body').text().replace(/\s+/g, ' ').trim();
         const block = extractDailyServerBlock(pageText, serverKey);
         const parsed = parseDailyBonusBlock(block);
         const pageDate = extractDailyPageDate(html, serverKey);
@@ -3243,13 +3243,13 @@ async function fetchAuthoritativeAvaMapIndex() {
                 const bodyHtml = $('body').html() || '';
                 const roadsMatch = bodyHtml.match(/Roads of Avalon\s*400[\\s\\S]*?(?=Static Dungeon\s*156|$)/i);
                 const roadsHtml = roadsMatch ? roadsMatch[0] : bodyHtml;
-                const roadsText = cheerio.load(roadsHtml)('body').text().replace(/\\s+/g, ' ');
+                const roadsText = cheerio.load(roadsHtml)('body').text().replace(/\s+/g, ' ');
                 const seen = new Set();
 
                 // Prefer actual link labels from this section.
                 const section$ = cheerio.load(roadsHtml);
                 section$('a[href]').each((_, el) => {
-                    const name = section$(el).text().replace(/\\s+/g, ' ').trim();
+                    const name = section$(el).text().replace(/\s+/g, ' ').trim();
                     if (!/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/.test(name)) return;
                     const key = normalizeAvaLookupName(name);
                     if (!seen.has(key)) {
