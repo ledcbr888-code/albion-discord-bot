@@ -4094,6 +4094,20 @@ async function fetchAvaMapDataWithFallback(mapName, ocrCandidates = []) {
                 'Solo dungeon': 0,
                 'Group dungeon': 0
             };
+            // Verified Battle Hub snapshot retained for this map in case all
+            // live POI providers reject requests (e.g. HTTP 403).
+            const verifiedMapSnapshots = {
+                'sasitos-umogaum': {
+                    tier: 'T4',
+                    counts: {
+                        'Green chest': 1, 'Blue chest': 1, 'Gold chest': 0,
+                        Stone: 1, Wood: 2, Ore: 1, Hide: 0, Fiber: 0,
+                        'Solo dungeon': 1, 'Group dungeon': 0
+                    }
+                }
+            };
+            const snapshot = verifiedMapSnapshots[slug];
+            const finalCounts = snapshot ? { ...emptyCounts, ...snapshot.counts } : emptyCounts;
 
             console.warn(
                 '⚠️ AVA map is verified but POI providers are unavailable: ' +
@@ -4103,13 +4117,13 @@ async function fetchAvaMapDataWithFallback(mapName, ocrCandidates = []) {
             return {
                 slug,
                 name: verifiedName,
-                tier: '',
+                tier: snapshot?.tier || '',
                 layout: '',
                 connection: '',
-                counts: emptyCounts,
-                totalChests: 0,
-                totalResources: 0,
-                totalDungeons: 0,
+                counts: finalCounts,
+                totalChests: Number(finalCounts['Green chest'] || 0) + Number(finalCounts['Blue chest'] || 0) + Number(finalCounts['Gold chest'] || 0),
+                totalResources: Number(finalCounts.Stone || 0) + Number(finalCounts.Wood || 0) + Number(finalCounts.Ore || 0) + Number(finalCounts.Hide || 0) + Number(finalCounts.Fiber || 0),
+                totalDungeons: Number(finalCounts['Solo dungeon'] || 0) + Number(finalCounts['Group dungeon'] || 0),
                 mapImage: 'https://albionbattlehub.com/api/og/avalon?slug=' + encodeURIComponent(slug),
                 sourceUrl: 'https://albiononline.th.gl/db/locations/' + encodeURIComponent(slug),
                 verifiedOnly: true,
