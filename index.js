@@ -4194,14 +4194,21 @@ async function generateAvaRoadsCard(data, ocrText = '') {
         ctx.textAlign = 'left';
         ctx.textBaseline = 'alphabetic';
     } else {
-        const scale = Math.min(width / mapImage.width, mapHeight / mapImage.height);
+        // Fill the entire map panel so there are no black side bars.
+        // Crop only the excess edges when the source aspect ratio differs.
+        const scale = Math.max(width / mapImage.width, mapHeight / mapImage.height);
         const dw = Math.round(mapImage.width * scale);
         const dh = Math.round(mapImage.height * scale);
         const dx = Math.round((width - dw) / 2);
         const dy = Math.round((mapHeight - dh) / 2);
         ctx.imageSmoothingEnabled = true;
         ctx.imageSmoothingQuality = 'high';
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(0, 0, width, mapHeight);
+        ctx.clip();
         ctx.drawImage(mapImage, dx, dy, dw, dh);
+        ctx.restore();
     }
 
     ctx.fillStyle = '#0d121b';
