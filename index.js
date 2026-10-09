@@ -3881,6 +3881,42 @@ async function fetchAlbionRoadsMapData(lookupName) {
 async function fetchAvaMapDataWithFallback(mapName, ocrCandidates = []) {
     const errors = [];
 
+    let bestData = null;
+    const mergeCandidate = (candidate, sourceName) => {
+        if (!candidate) return;
+        const incoming = normalizeAvaDataTotals(candidate);
+        if (!bestData) {
+            bestData = incoming;
+            bestData.providerSources = [sourceName];
+            return;
+        }
+        const mergedCounts = { ...normalizeAvaDataTotals(bestData).counts };
+        for (const key of Object.keys(mergedCounts)) {
+            mergedCounts[key] = Math.max(
+                Number(mergedCounts[key]) || 0,
+                Number(incoming.counts?.[key]) || 0
+            );
+        }
+        const currentPoints = avaDataPointCount(bestData);
+        const incomingPoints = avaDataPointCount(incoming);
+        bestData = normalizeAvaDataTotals({
+            ...bestData,
+            ...((incomingPoints > currentPoints) ? {
+                name: incoming.name || bestData.name,
+                tier: incoming.tier && incoming.tier !== 'ไม่พบข้อมูล' ? incoming.tier : bestData.tier,
+                layout: incoming.layout && incoming.layout !== 'ไม่พบข้อมูล' ? incoming.layout : bestData.layout,
+                connection: incoming.connection || bestData.connection
+            } : {}),
+            counts: mergedCounts,
+            mapImage: bestData.mapImage || incoming.mapImage,
+            sourceUrl: bestData.sourceUrl || incoming.sourceUrl,
+            providerSources: [...new Set([...(bestData.providerSources || []), sourceName])]
+        });
+        console.log('🗺️ AVA merged POI source ' + sourceName +
+            ': total=' + avaDataPointCount(bestData) +
+            ' counts=' + JSON.stringify(bestData.counts));
+    };
+
     // Avoid resolving the same OCR result twice. If mapName is already the
     // corrected/canonical candidate, go straight to the data source.
     let lookupName = mapName;
@@ -3922,10 +3958,13 @@ async function fetchAvaMapDataWithFallback(mapName, ocrCandidates = []) {
         const direct = normalizeAvaDataTotals(await fetchAvaMapData(lookupName));
         if (direct?.name) direct.name = normalizeAvaOcrMapName(direct.name);
         if (avaDataPointCount(direct) > 0 || direct.mapImage) {
-            console.log('🗺️ AVA direct canonical source used: ' + (direct.name || lookupName));
-            return direct;
+            mergeCandidate(direct, 'Battle Hub direct');
+            if (avaDataPointCount(direct) > 0) {
+                console.log('🗺️ AVA direct canonical source found POIs; checking other sources for missing counts');
+            }
+        } else {
+            errors.push('Battle Hub direct: พบหน้าแต่ไม่มีตัวเลข POI');
         }
-        errors.push('Battle Hub direct: พบหน้าแต่ไม่มีตัวเลข POI');
     } catch (err) {
         errors.push('Battle Hub direct: ' + err.message);
         console.warn('⚠️ AVA direct canonical source failed for ' + mapName + ': ' + err.message);
@@ -3936,18 +3975,19 @@ async function fetchAvaMapDataWithFallback(mapName, ocrCandidates = []) {
         const primary = normalizeAvaDataTotals(await fetchAvalonTrackerMapData(lookupName));
         if (avaDataPointCount(primary) > 0) {
             if (primary?.name) primary.name = normalizeAvaOcrMapName(primary.name);
-            if (!primary.mapImage) {
+            mergeCandidate(primary, 'Avalon Roads Tracker');
+            if (!bestData.mapImage) {
                 try {
                     const imageData = await fetchBattleHubMapData(lookupName);
-                    if (imageData?.mapImage) primary.mapImage = imageData.mapImage;
-                    if ((!primary.name || primary.name === lookupName) && imageData?.name) primary.name = imageData.name;
+                    if (imageData?.mapImage) bestData.mapImage = imageData.mapImage;
+                    if ((!bestData.name || bestData.name === lookupName) && imageData?.name) bestData.name = imageData.name;
                 } catch (imageErr) {
                     console.warn('⚠️ AVA map image enrichment failed: ' + imageErr.message);
                 }
             }
-            return primary;
+        } else {
+            errors.push('Avalon Roads Tracker: พบหน้าแต่ไม่มีตัวเลข POI');
         }
-        errors.push('Avalon Roads Tracker: พบหน้าแต่ไม่มีตัวเลข POI');
     } catch (err) {
         errors.push('Avalon Roads Tracker: ' + err.message);
         console.warn('⚠️ AVA Avalon Roads Tracker unavailable for ' + mapName + ': ' + err.message);
@@ -3962,12 +4002,27 @@ async function fetchAvaMapDataWithFallback(mapName, ocrCandidates = []) {
     for (const [sourceName, fetcher] of fallbackSources) {
         try {
             const data = normalizeAvaDataTotals(await fetcher(lookupName));
-            if (avaDataPointCount(data) > 0) return data;
-            errors.push(sourceName + ': พบหน้าแต่ไม่มีตัวเลข');
+            if (avaDataPointCount(data) > 0) {
+                if (data?.name) data.name = normalizeAvaOcrMapName(data.name);
+                mergeCandidate(data, sourceName);
+            } else {
+                errors.push(sourceName + ': พบหน้าแต่ไม่มีตัวเลข');
+            }
         } catch (err) {
             errors.push(sourceName + ': ' + err.message);
             console.warn('⚠️ AVA ' + sourceName + ' fallback failed for ' + mapName + ': ' + err.message);
         }
+    }
+
+    // Merge partial POI counts across providers before falling back to identity-only.
+    if (bestData && avaDataPointCount(bestData) > 0) {
+        bestData.name = normalizeAvaOcrMapName(bestData.name || lookupName);
+        bestData.counts = { ...normalizeAvaDataTotals(bestData).counts };
+        bestData = normalizeAvaDataTotals(bestData);
+        console.log('🗺️ AVA merged final data: map=' + bestData.name +
+            ' providers=' + JSON.stringify(bestData.providerSources || []) +
+            ' counts=' + JSON.stringify(bestData.counts));
+        return bestData;
     }
 
     // IMPORTANT: The selected name already came from the authoritative
