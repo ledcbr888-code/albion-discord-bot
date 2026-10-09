@@ -3490,9 +3490,18 @@ function parseBattleHubAvaData(html, url, requestedName) {
     const $ = cheerio.load(html);
     const bodyText = $('body').text().replace(/\s+/g, ' ').trim();
     const h1 = $('h1').first().text().trim() || requestedName;
-    const tierMatch = bodyText.match(/\bT\s*([468])\b/i);
-    const layoutMatch = bodyText.match(/Road Layout\s+([A-Z])/i) || bodyText.match(/เส้นทางรูปแบบ\s+([A-Z])/i);
-    const getCount = labels => extractAvaCountFromPageText(bodyText, labels);
+    // Some pages put tier and POI counts in image alt/title attributes or
+    // serialized page data instead of visible body text. Search all of them.
+    const imageLabels = [];
+    $('img').each((_, el) => {
+        const node = $(el);
+        imageLabels.push(node.attr('alt') || '', node.attr('title') || '', node.attr('aria-label') || '');
+    });
+    const scriptText = $('script').map((_, el) => $(el).html() || '').get().join(' ');
+    const searchableText = [bodyText, h1, imageLabels.join(' '), scriptText, html.replace(/<[^>]+>/g, ' ')].join(' ').replace(/\s+/g, ' ');
+    const tierMatch = searchableText.match(/\bT\s*([468])\b/i) || h1.match(/\bT\s*([468])\b/i);
+    const layoutMatch = searchableText.match(/Road Layout\s+([A-Z])/i) || searchableText.match(/Layout\s*[:#-]?\s*([A-Z])\b/i);
+    const getCount = labels => extractAvaCountFromPageText(searchableText, labels);
     const counts = {
         'Gold chest': getCount(['Gold chest', 'Gold Chest', 'หีบทอง', 'Peti emas', 'Cofre dorado', 'صندوق ذهبي']),
         'Blue chest': getCount(['Blue chest', 'Blue Chest', 'หีบน้ำเงิน', 'หีบฟ้า', 'Peti biru', 'Cofre azul', 'صندوق أزرق']),
@@ -3511,7 +3520,7 @@ function parseBattleHubAvaData(html, url, requestedName) {
     if (tunnel) connection = tunnel[0].toUpperCase();
     return {
         name: h1,
-        tier: tierMatch ? `T${tierMatch[1]}` : 'ไม่พบข้อมูล',
+        tier: tierMatch ? `T${tierMatch[1]}` : '',
         layout: layoutMatch ? layoutMatch[1] : '',
         counts,
         mapImage,
@@ -4088,8 +4097,8 @@ async function fetchAvaMapDataWithFallback(mapName, ocrCandidates = []) {
             return {
                 slug,
                 name: verifiedName,
-                tier: 'ยืนยันชื่อแล้ว • รอข้อมูล POI',
-                layout: 'ไม่พบข้อมูล',
+                tier: '',
+                layout: '',
                 connection: '',
                 counts: emptyCounts,
                 totalChests: 0,
@@ -4219,9 +4228,12 @@ async function generateAvaRoadsCard(data, ocrText = '') {
     ctx.moveTo(36, panelY);
     ctx.lineTo(width - 36, panelY);
     ctx.stroke();
+    // Use ASCII-only labels here to avoid missing-glyph squares on hosts without Thai fonts.
+    const tierText = String(data?.tier || '').match(/\bT\s*([468])\b/i);
+    const tierLabel = tierText ? 'T' + tierText[1] : 'TIER UNKNOWN';
     ctx.fillStyle = '#f1f5f9';
     ctx.font = '900 34px Arial, sans-serif';
-    ctx.fillText(canonicalDisplayName + '  •  ' + String(data?.tier || ''), 56, panelY + 48);
+    ctx.fillText(canonicalDisplayName + '  |  ' + tierLabel, 56, panelY + 48);
     ctx.fillStyle = '#94a3b8';
     ctx.font = '700 20px Arial, sans-serif';
     ctx.fillText('AVA MAP POINTS OF INTEREST', 56, panelY + 82);
