@@ -2767,9 +2767,13 @@ function avaCountLine(items) {
 async function generateAvaCheckResponse(input) {
     const data = await fetchAvaMapDataWithFallback(input);
     const chestValue = data.countsAvailable === false ? 'ยังดึงจำนวนจากเว็บไม่ได้' :
-        `🟢 เขียว **${data.counts['Green chest']}**  •  🔵 น้ำเงิน **${data.counts['Blue chest']}**  •  🟡 ทอง **${data.counts['Gold chest']}**`;
+        data.categoryCountsAvailable === false
+            ? `Chest รวม **${data.totalChests}** (เว็บไม่แสดงแยกสี)`
+            : `🟢 เขียว **${data.counts['Green chest']}**  •  🔵 น้ำเงิน **${data.counts['Blue chest']}**  •  🟡 ทอง **${data.counts['Gold chest']}**`;
     const dungeonValue = data.countsAvailable === false ? 'ยังดึงจำนวนจากเว็บไม่ได้' :
-        `🟣 ดันเดี่ยว **${data.counts['Solo dungeon']}**  •  🔴 ดันกลุ่ม **${data.counts['Group dungeon']}**`;
+        data.categoryCountsAvailable === false
+            ? `Dungeon รวม **${data.totalDungeons}** (เว็บไม่แสดงแยกประเภท)`
+            : `🟣 ดันเดี่ยว **${data.counts['Solo dungeon']}**  •  🔴 ดันกลุ่ม **${data.counts['Group dungeon']}**`;
     const embed = new EmbedBuilder()
         .setColor(0x2dd4bf)
         .setTitle(`🗺️ AVA CHECK — ${data.name}`)
@@ -3467,15 +3471,18 @@ function parseBattleHubAvaData(html, url, requestedName) {
     const counts = {
         'Gold chest': getCount(['Gold chest', 'Gold Chest', 'หีบทอง', 'Peti emas', 'Cofre dorado', 'صندوق ذهبي']),
         'Blue chest': getCount(['Blue chest', 'Blue Chest', 'หีบน้ำเงิน', 'หีบฟ้า', 'Peti biru', 'Cofre azul', 'صندوق أزرق']),
-        'Green chest': getCount(['Green chest', 'Green Chest', 'หีบเขียว', 'Peti hijau', 'Cofre verde', 'صندوق أخضر']),
+        'Green chest': getCount(['Green chest', 'Green Chest', 'หีบเขียว', 'Peti hijau', 'Cofre verde', 'صندوق أخเขียว']),
         'Group dungeon': getCount(['Group dungeon', 'ดันเจี้ยนกลุ่ม', 'ดันเจี้ยนกลุ่ม×', 'Dungeon Group']),
         'Solo dungeon': getCount(['Solo dungeon', 'ดันเจี้ยนเดี่ยว', 'Dungeon solo']),
-        Wood: getCount(['Wood', 'ไม้', 'Kayu', 'Madera']),
-        Ore: getCount(['Ore', 'แร่', 'Bijih', 'Minério', 'خام']),
-        Stone: getCount(['Stone', 'หิน', 'Batu', 'Piedra', 'حجر']),
-        Hide: getCount(['Hide', 'หนัง', 'Kulit', 'Pelego', 'Cuero']),
-        Fiber: getCount(['Fiber', 'ไฟเบอร์', 'เส้นใย', 'Serat', 'Fibra'])
+        Wood: 0, Ore: 0, Stone: 0, Hide: 0, Fiber: 0
     };
+    // Aggregate totals from the "Recorded content" section are a fallback
+    // when category-specific labels change.
+    const recordedSection = bodyText.split(/Recorded content/i)[1]?.split(/Reading the name/i)[0] || '';
+    const chestTotalMatch = recordedSection.match(/Chests\\s*(\\d+)/i);
+    const dungeonTotalMatch = recordedSection.match(/Dungeons\\s*(\\d+)/i);
+    const recordedChestTotal = chestTotalMatch ? Number(chestTotalMatch[1]) : null;
+    const recordedDungeonTotal = dungeonTotalMatch ? Number(dungeonTotalMatch[1]) : null;
     const mapImage = extractBattleHubMapImage($, url, h1) || extractAlbionRoadsImage($, url, h1);
     let connection = '';
     const tunnel = html.match(/TUNNEL(?:_BLACK)?_(?:LOW|MEDIUM|HIGH|DEEP(?:_RAID)?|HIDEOUT(?:_DEEP)?)/i);
@@ -3485,6 +3492,8 @@ function parseBattleHubAvaData(html, url, requestedName) {
         tier: tierMatch ? `T${tierMatch[1]}` : 'ไม่พบข้อมูล',
         layout: layoutMatch ? layoutMatch[1] : '',
         counts,
+        recordedChestTotal,
+        recordedDungeonTotal,
         mapImage,
         sourceUrl: url,
         source: 'Albion Battle Hub',
@@ -3507,7 +3516,10 @@ async function fetchBattleHubMapData(lookupName) {
     for (const url of urls) {
         try {
             const data = parseBattleHubAvaData(await requestBattleHubHtml(url), url, resolvedName);
-            if (data.name && data.tier !== 'ไม่พบข้อมูล' || Object.values(data.counts).some(Boolean)) {
+            const exactPageName = normalizeAvaLookupName(data.name) === normalizeAvaLookupName(resolvedName);
+            const hasRecordedTotals = Number.isFinite(data.recordedChestTotal) || Number.isFinite(data.recordedDungeonTotal);
+            if ((exactPageName && (data.tier !== 'ไม่พบข้อมูล' || hasRecordedTotals)) ||
+                Object.values(data.counts || {}).some(Boolean)) {
                 return { ...data, requestedName: lookupName, resolvedScore: resolved.score };
             }
         } catch (err) { lastError = err; }
@@ -3940,19 +3952,24 @@ async function fetchAvaMapDataWithFallback(mapName, ocrCandidates = []) {
             'Group dungeon': Number(data.counts?.['Group dungeon']) || 0,
             Wood: 0, Ore: 0, Stone: 0, Hide: 0, Fiber: 0
         };
-        const hasPoiCounts = counts['Gold chest'] + counts['Blue chest'] + counts['Green chest'] +
-            counts['Solo dungeon'] + counts['Group dungeon'] > 0;
+        const categoryChestTotal = counts['Gold chest'] + counts['Blue chest'] + counts['Green chest'];
+        const categoryDungeonTotal = counts['Solo dungeon'] + counts['Group dungeon'];
+        const totalChests = categoryChestTotal || Number(data.recordedChestTotal) || 0;
+        const totalDungeons = categoryDungeonTotal || Number(data.recordedDungeonTotal) || 0;
+        const hasPoiCounts = categoryChestTotal + categoryDungeonTotal > 0 ||
+            Number.isFinite(data.recordedChestTotal) || Number.isFinite(data.recordedDungeonTotal);
         const slug = normalizeAvaSlug(data.name || lookupName);
         const result = {
             ...data,
             slug,
             name: normalizeAvaOcrMapName(data.name || lookupName),
             counts,
-            totalChests: counts['Gold chest'] + counts['Blue chest'] + counts['Green chest'],
+            totalChests,
             totalResources: 0,
-            totalDungeons: counts['Solo dungeon'] + counts['Group dungeon'],
+            totalDungeons,
             totalDungeonMarkers: 0,
             countsAvailable: hasPoiCounts,
+            categoryCountsAvailable: categoryChestTotal + categoryDungeonTotal > 0,
             source: 'Albion Battle Hub',
             sourceUrl: data.sourceUrl || ('https://albionbattlehub.com/en/avalon-maps/' + encodeURIComponent(slug)),
             mapImage: data.mapImage || ('https://albionbattlehub.com/api/og/avalon?slug=' + encodeURIComponent(slug))
