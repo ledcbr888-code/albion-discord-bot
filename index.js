@@ -889,7 +889,7 @@ async function generatePlayerWeaponReportImage(players, battleInfo = {}) {
     ctx.save();
     ctx.shadowColor = 'rgba(255,255,255,.16)'; ctx.shadowBlur = 12;
     ctx.fillStyle = '#f8fafc'; ctx.font = '900 38px Arial, sans-serif';
-    ctx.fillText('BATTLE REPORT', padding, padding + 37);
+    ctx.fillText('BATTLE REPORT' + (battleInfo.totalPages > 1 ? '  |  PAGE ' + (battleInfo.page || 1) + '/' + battleInfo.totalPages : ''), padding, padding + 37);
     ctx.restore();
     ctx.fillStyle = '#94a3b8'; ctx.font = 'bold 12px Arial, sans-serif';
     ctx.fillText(`EAST SERVER   |   ${formatUTCTime(battleInfo.battleTime || Date.now())}   |   MATCH ID: ${battleInfo.matchId || 'N/A'}`, padding + 1, padding + 60);
@@ -1485,22 +1485,24 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
 
     const attachments = [];
 
-    try {
-        const playerReport = await generatePlayerWeaponReportImage(reportRosterRows, {
-            matchId: matchId,
-            battleTime: battleTime
-        });
-        if (playerReport) attachments.push(playerReport);
-    } catch (err) {
-        console.error('❌ Weapon report image error:', err.stack || err.message);
+    // One weapon report image per 20 tracked players; five cards per row.
+    const reportPages = [];
+    for (let offset = 0; offset < reportRosterRows.length; offset += 20) reportPages.push(reportRosterRows.slice(offset, offset + 20));
+    if (!reportPages.length) reportPages.push([]);
+    for (let pageIndex = 0; pageIndex < reportPages.length; pageIndex++) {
+        const pageRows = reportPages[pageIndex];
+        const pageInfo = { matchId: matchId, battleTime: battleTime, page: pageIndex + 1, totalPages: reportPages.length };
         try {
-            const fallbackReport = await generateBattleReportFallbackImage(reportRosterRows, {
-                matchId,
-                battleTime
-            });
-            if (fallbackReport) attachments.push(fallbackReport);
-        } catch (fallbackErr) {
-            console.error('❌ Battle report fallback error:', fallbackErr.stack || fallbackErr.message);
+            const playerReport = await generatePlayerWeaponReportImage(pageRows, pageInfo);
+            if (playerReport) attachments.push(playerReport);
+        } catch (err) {
+            console.error('Weapon report image error:', err.stack || err.message);
+            try {
+                const fallbackReport = await generateBattleReportFallbackImage(pageRows, pageInfo);
+                if (fallbackReport) attachments.push(fallbackReport);
+            } catch (fallbackErr) {
+                console.error('Battle report fallback error:', fallbackErr.stack || fallbackErr.message);
+            }
         }
     }
 
