@@ -669,10 +669,10 @@ async function generatePlayerWeaponReportImage(players, battleInfo = {}) {
         if (f > mvp.fame) mvp = { name: p.displayName || p.name, fame: f };
     });
 
-    const playersPerRow = 7;
-    const cardWidth = 210;
-    const cardHeight = 214;
-    const gapX = 14, gapY = 14, padding = 30;
+    const playersPerRow = 5;
+    const cardWidth = 300;
+    const cardHeight = 282;
+    const gapX = 16, gapY = 16, padding = 30;
     const headerHeight = 96, statsHeight = 92;
     const gridOffsetY = padding + headerHeight + statsHeight + 20;
     const columns = Math.min(playersPerRow, sortedPlayers.length);
@@ -959,75 +959,75 @@ async function generatePlayerWeaponReportImage(players, battleInfo = {}) {
             ctx.fillStyle = '#fbbf24'; ctx.font = '900 9px Arial, sans-serif'; ctx.fillText('MVP', x + cardWidth - 40, y + 26);
         }
 
-        const wy = y + 63;
+        const wy = y + 84;
         ctx.save();
         ctx.shadowColor = qm.color; ctx.shadowBlur = isMVP ? 18 : 10;
         ctx.fillStyle = '#030811';
-        ctx.beginPath(); ctx.arc(cx, wy, 45, 0, Math.PI * 2); ctx.fill();
+        ctx.beginPath(); ctx.arc(cx, wy, 65, 0, Math.PI * 2); ctx.fill();
         ctx.shadowBlur = 0;
         ctx.strokeStyle = qm.color; ctx.lineWidth = isMVP ? 2.4 : 1.8;
-        ctx.beginPath(); ctx.arc(cx, wy, 45, 0, Math.PI * 2); ctx.stroke();
+        ctx.beginPath(); ctx.arc(cx, wy, 65, 0, Math.PI * 2); ctx.stroke();
         ctx.strokeStyle = 'rgba(255,255,255,.13)'; ctx.lineWidth = 1;
-        ctx.beginPath(); ctx.arc(cx, wy, 37, 0, Math.PI * 2); ctx.stroke();
+        ctx.beginPath(); ctx.arc(cx, wy, 54, 0, Math.PI * 2); ctx.stroke();
         ctx.restore();
 
         ctx.save();
         ctx.strokeStyle = qm.color; ctx.lineWidth = 2; ctx.globalAlpha = .65;
-        [[0,-49,0,-56],[0,49,0,56],[-49,0,-56,0],[49,0,56,0]].forEach(a => {
+        [[0,-69,0,-78],[0,69,0,78],[-69,0,-78,0],[69,0,78,0]].forEach(a => {
             ctx.beginPath(); ctx.moveTo(cx + a[0], wy + a[1]); ctx.lineTo(cx + a[2], wy + a[3]); ctx.stroke();
         });
         ctx.restore();
 
         if (iconImages[i]) {
-            try { ctx.drawImage(iconImages[i], cx - 36, wy - 36, 72, 72); } catch (_) {}
+            try { ctx.drawImage(iconImages[i], cx - 54, wy - 54, 108, 108); } catch (_) {}
         } else {
             drawSwordIcon(cx, wy, 1.7, qm.color);
         }
 
         const qText = `Q${q}  ${qm.label}`;
-        ctx.font = '900 8px Arial, sans-serif';
-        const qw = ctx.measureText(qText).width + 18;
-        rounded(cx - qw / 2, y + 108, qw, 17, 8, '#050b14', qm.color, 1);
-        centerText(qText, cx, y + 120, 8, qm.color, '900');
+        ctx.font = '900 12px Arial, sans-serif';
+        const qw = ctx.measureText(qText).width + 24;
+        rounded(cx - qw / 2, y + 151, qw, 24, 10, '#050b14', qm.color, 1);
+        centerText(qText, cx, y + 168, 12, qm.color, '900');
 
         let name = String(p.displayName || p.name || 'Unknown').trim();
         if (name.length > 22) name = `${name.slice(0, 20)}..`;
-        const nameSize = textFit(name, cardWidth - 20, 15, '900');
+        const nameSize = textFit(name, cardWidth - 28, 22, '900');
         ctx.save();
         ctx.textAlign = 'center';
         ctx.font = `900 ${nameSize}px Arial, sans-serif`;
         ctx.lineWidth = 3;
         ctx.strokeStyle = '#02060c';
-        ctx.strokeText(name, cx, y + 145);
+        ctx.strokeText(name, cx, y + 202);
         ctx.fillStyle = isMVP ? '#fef3c7' : '#f8fafc';
         ctx.shadowColor = isMVP ? 'rgba(245,158,11,.25)' : 'rgba(255,255,255,.10)';
         ctx.shadowBlur = 5;
-        ctx.fillText(name, cx, y + 145);
+        ctx.fillText(name, cx, y + 202);
         ctx.restore();
 
         const guild = String(p.guild || '').trim();
         if (guild) {
             let g = guild.length > 21 ? `${guild.slice(0, 19)}..` : guild;
-            centerText(g, cx, y + 158, 8, '#64748b', 'bold', cardWidth - 20);
+            centerText(g, cx, y + 221, 12, '#94a3b8', 'bold', cardWidth - 24);
         }
 
-        const metricY = y + 180;
-        centerText(String(k), cx - 18, metricY, 12, k > 0 ? '#ef4444' : '#64748b', '900');
-        centerText('/', cx, metricY, 11, '#475569', '900');
-        centerText(String(d), cx + 18, metricY, 12, d > 0 ? '#f87171' : '#64748b', '900');
+        const metricY = y + 246;
+        centerText('K ' + String(k), cx - 42, metricY, 17, k > 0 ? '#ef4444' : '#64748b', '900');
+        centerText('/', cx, metricY, 16, '#475569', '900');
+        centerText('D ' + String(d), cx + 42, metricY, 17, d > 0 ? '#f87171' : '#64748b', '900');
 
         const fameText = formatFame(p.fame || 0);
-        const famePillW = 112;
-        const famePillH = 23;
+        const famePillW = 170;
+        const famePillH = 30;
         const fameX = cx - famePillW / 2;
-        const fameY = y + cardHeight - 31;
+        const fameY = y + cardHeight - 39;
         rounded(fameX, fameY, famePillW, famePillH, 10, '#0b1422', isMVP ? '#8b6518' : '#263a55', 1);
         if (fameImg) {
-            try { ctx.drawImage(fameImg, fameX + 10, fameY + 5, 13, 13); } catch (_) {}
+            try { ctx.drawImage(fameImg, fameX + 12, fameY + 7, 17, 17); } catch (_) {}
         } else {
-            drawGemIcon(fameX + 17, fameY + 11, .35, '#fbbf24');
+            drawGemIcon(fameX + 21, fameY + 15, .42, '#fbbf24');
         }
-        centerText(fameText, fameX + 72, fameY + 16, 11, '#fbbf24', '900');
+        centerText(fameText, fameX + 101, fameY + 21, 16, '#fbbf24', '900');
     });
 
     const footerY = height - padding - 13;
@@ -1157,7 +1157,7 @@ async function generateBattleReportFallbackImage(players, battleInfo = {}) {
             ctx.fillStyle = '#f8fafc';
             ctx.font = '900 15px Arial, sans-serif';
             ctx.textAlign = 'center';
-            ctx.fillText(name, cx, y + 145);
+            ctx.fillText(name, cx, y + 202);
 
             const guild = String(p.guild || '').trim();
             if (guild) {
