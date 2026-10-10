@@ -1008,10 +1008,9 @@ async function generatePlayerWeaponReportImage(players, battleInfo = {}) {
         const guild = String(p.guild || '').trim();
         if (guild) {
             let g = guild.length > 21 ? `${guild.slice(0, 19)}..` : guild;
-            centerText(g, cx, y + 221, 12, '#94a3b8', 'bold', cardWidth - 24);
         }
 
-        const metricY = y + 246;
+        const metricY = y + 224;
         centerText('K ' + String(k), cx - 42, metricY, 17, k > 0 ? '#ef4444' : '#64748b', '900');
         centerText('/', cx, metricY, 16, '#475569', '900');
         centerText('D ' + String(d), cx + 42, metricY, 17, d > 0 ? '#f87171' : '#64748b', '900');
