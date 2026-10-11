@@ -64,6 +64,13 @@ const GITHUB_DATA_REPO = String(process.env.GITHUB_DATA_REPO || '').trim();
 const GITHUB_DATA_BRANCH = String(process.env.GITHUB_DATA_BRANCH || 'main').trim();
 const GITHUB_DATA_PATH = String(process.env.GITHUB_DATA_PATH || 'tracking.json').trim();
 const GITHUB_DATA_API = 'https://api.github.com/repos/' + GITHUB_DATA_REPO + '/contents/' + GITHUB_DATA_PATH.split('/').map(encodeURIComponent).join('/');
+const SUPABASE_URL = String(process.env.SUPABASE_URL || '').trim().replace(/\/+$/, '');
+const SUPABASE_SERVICE_ROLE_KEY = String(process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+const SUPABASE_TABLE = String(process.env.SUPABASE_TABLE || 'bot_state').trim();
+const SUPABASE_ROW_ID = String(process.env.SUPABASE_ROW_ID || 'albion-discord-bot').trim();
+const SUPABASE_API = SUPABASE_URL ? `${SUPABASE_URL}/rest/v1/${encodeURIComponent(SUPABASE_TABLE)}` : '';
+let supabasePersistenceReady = false;
+let supabaseSaveQueue = Promise.resolve();
 let githubSaveQueue = Promise.resolve();
 let githubDataSha = null;
 let githubPersistenceReady = false;
@@ -212,9 +219,8 @@ function saveData() {
         const tempFile = `${DATA_FILE}.tmp`;
         fs.writeFileSync(tempFile, payload, 'utf8');
         fs.renameSync(tempFile, DATA_FILE);
-        if (GITHUB_DATA_TOKEN && GITHUB_DATA_REPO && githubPersistenceReady) {
-            queueGitHubTrackingSave(payload);
-        }
+        if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY && supabasePersistenceReady) queueSupabaseTrackingSave(payload);
+        if (GITHUB_DATA_TOKEN && GITHUB_DATA_REPO && githubPersistenceReady) queueGitHubTrackingSave(payload);
         return true;
     } catch (err) {
         try { if (fs.existsSync(`${DATA_FILE}.tmp`)) fs.unlinkSync(`${DATA_FILE}.tmp`); } catch (_) {}
@@ -304,12 +310,66 @@ function queueGitHubTrackingSave(content) {
     });
 }
 
+function supabaseHeaders() {
+    return { apikey: SUPABASE_SERVICE_ROLE_KEY, Authorization: 'Bearer ' + SUPABASE_SERVICE_ROLE_KEY, 'Content-Type': 'application/json', Accept: 'application/json', Prefer: 'return=representation' };
+}
+async function pullSupabaseTrackingData() {
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) return false;
+    try {
+        const response = await axios.get(SUPABASE_API, { timeout: 20000, headers: supabaseHeaders(), params: { id: 'eq.' + SUPABASE_ROW_ID, select: 'id,payload,updated_at' } });
+        const row = Array.isArray(response.data) ? response.data[0] : null;
+        if (row?.payload && typeof row.payload === 'object') {
+            const content = JSON.stringify(row.payload, null, 2);
+            JSON.parse(content);
+            ensureDataDirectory();
+            const tempFile = DATA_FILE + '.restore.tmp';
+            fs.writeFileSync(tempFile, content, 'utf8');
+            fs.renameSync(tempFile, DATA_FILE);
+            loadData();
+            supabasePersistenceReady = true;
+            console.log('💾 Tracking data loaded from Supabase; ' + Object.keys(guildConfigs).length + ' Discord server(s).');
+            return true;
+        }
+        if (fs.existsSync(DATA_FILE)) {
+            const localText = fs.readFileSync(DATA_FILE, 'utf8');
+            const localData = JSON.parse(localText);
+            if (localData && typeof localData === 'object' && Object.keys(localData).length) {
+                await axios.post(SUPABASE_API, { id: SUPABASE_ROW_ID, payload: localData, updated_at: new Date().toISOString() }, {
+                    timeout: 20000, headers: { ...supabaseHeaders(), Prefer: 'resolution=merge-duplicates,return=representation' }, params: { on_conflict: 'id' }
+                });
+                supabasePersistenceReady = true;
+                console.log('💾 Migrated existing local tracking data to Supabase without clearing it.');
+                return true;
+            }
+        }
+        console.warn('⚠️ Supabase row empty and no non-empty local tracking file exists; refusing to seed blank data.');
+        return false;
+    } catch (err) {
+        supabasePersistenceReady = false;
+        console.error('❌ Supabase tracking load failed; local data was not overwritten:', err.response?.status || '', err.response?.data?.message || err.message);
+        return false;
+    }
+}
+function queueSupabaseTrackingSave(content) {
+    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !supabasePersistenceReady) return;
+    let payload;
+    try { payload = JSON.parse(String(content)); } catch (err) { console.error('❌ Refusing to persist invalid tracking JSON:', err.message); return; }
+    supabaseSaveQueue = supabaseSaveQueue.then(async () => {
+        await axios.post(SUPABASE_API, { id: SUPABASE_ROW_ID, payload, updated_at: new Date().toISOString() }, {
+            timeout: 20000, headers: { ...supabaseHeaders(), Prefer: 'resolution=merge-duplicates,return=minimal' }, params: { on_conflict: 'id' }
+        });
+        console.log('💾 Supabase tracking backup saved successfully.');
+    }).catch(err => console.error('❌ Supabase tracking save failed:', err.response?.status || '', err.response?.data?.message || err.message));
+}
 async function initializeTrackingPersistence() {
-    if (!GITHUB_DATA_TOKEN || !GITHUB_DATA_REPO) {
-        console.warn('⚠️ GitHub persistence is OFF. Configure GITHUB_DATA_TOKEN and GITHUB_DATA_REPO in Render Environment.');
+    if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) {
+        if (await pullSupabaseTrackingData()) return;
+        console.warn('⚠️ Supabase configured but not ready; external writes remain disabled to protect existing data.');
+        if (GITHUB_DATA_TOKEN && GITHUB_DATA_REPO) await pullGitHubTrackingData();
         return;
     }
-    await pullGitHubTrackingData();
+    if (GITHUB_DATA_TOKEN && GITHUB_DATA_REPO) { await pullGitHubTrackingData(); return; }
+    console.warn('⚠️ No external tracking database configured. Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY, or GitHub backup variables.');
 }
 
 function parseFameValue(value) {
@@ -557,11 +617,16 @@ async function fetchOfficialBattleWeaponMap(matchId) {
 
 async function fetchOfficialBattle(matchId) {
     const urls = getApiUrls(matchId);
-    for (const url of urls) {
-        try {
-            const response = await axios.get(url, { timeout: 30000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' } });
-            if (response.data) return response.data;
-        } catch (err) {}
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        for (const url of urls) {
+            try {
+                const response = await axios.get(url, { timeout: 30000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' } });
+                if (response.data && typeof response.data === 'object' && (response.data.id || response.data.players || response.data.guilds)) return response.data;
+            } catch (err) {
+                console.warn(`⚠️ Official battle API attempt ${attempt}/3 failed for ${matchId}: ${err.response?.status || err.message}`);
+            }
+        }
+        if (attempt < 3) await new Promise(resolve => setTimeout(resolve, attempt * 1500));
     }
     return null;
 }
@@ -1744,26 +1809,30 @@ async function processBattleReport(input, targetContext, isMessage = false) {
 }
 
 async function fetchGuildRecentBattles(guildName) {
-    try {
-        const searchUrl = `https://east.albionbb.com/?search=${encodeURIComponent(guildName)}&minPlayers=1&_=${Date.now()}`;
-        const searchRes = await cloudscraper.get(searchUrl).catch(() => null);
-        if (!searchRes) return [];
-
-        const $ = cheerio.load(searchRes);
-        const matchIds = [];
-        $('a[href*="/battles/"]').each((_, el) => {
-            const href = $(el).attr('href');
-            const match = href ? href.match(/\/battles\/(\d+)/) : null;
-            if (match && match[1]) {
-                matchIds.push(match[1]);
-            }
-        });
-
-        return [...new Set(matchIds)];
-    } catch (err) {
-        console.warn(`⚠️ Fetch guild battles error for ${guildName}:`, err.message);
-        return [];
+    const searchUrl = `https://east.albionbb.com/?search=${encodeURIComponent(guildName)}&minPlayers=1&_=${Date.now()}`;
+    let lastError = null;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            const searchRes = await cloudscraper.get(searchUrl, { timeout: 20000 });
+            if (!searchRes || typeof searchRes !== 'string' || !searchRes.length) throw new Error('AlbionBB returned an empty response');
+            const $ = cheerio.load(searchRes);
+            const matchIds = [];
+            $('a[href*="/battles/"]').each((_, el) => {
+                const href = $(el).attr('href');
+                const match = href ? href.match(new RegExp('/battles/(\\d+)')) : null;
+                if (match && match[1]) matchIds.push(match[1]);
+            });
+            const pageText = $('title').text() + ' ' + $('body').text();
+            if (!matchIds.length && !/battle|search|albion/i.test(pageText)) throw new Error('Unexpected AlbionBB response; no recognizable search page');
+            return [...new Set(matchIds)];
+        } catch (err) {
+            lastError = err;
+            console.warn(`⚠️ Fetch guild battles attempt ${attempt}/3 for ${guildName}: ${err.message}`);
+            if (attempt < 3) await new Promise(resolve => setTimeout(resolve, attempt * 1000));
+        }
     }
+    console.warn(`❌ Fetch guild battles failed for ${guildName}; leaving battles unprocessed: ${lastError?.message || 'unknown error'}`);
+    return null;
 }
 
 async function primeAutoBattleHistory() {
@@ -1827,9 +1896,9 @@ async function checkAutoBattlesForGuild() {
     try {
         for (const config of autoBattleConfigs) {
             const recentMatches = await fetchGuildRecentBattles(config.targetGuild);
-            if (!recentMatches.length) continue;
+            if (recentMatches === null || !recentMatches.length) continue;
 
-            const newMatchIds = recentMatches.filter(id => !processedBattles.has(id));
+            const newMatchIds = recentMatches.filter(id => !processedBattles.has(String(id)));
             if (!newMatchIds.length) continue;
 
             // Process every unseen battle returned by the search page so a burst
@@ -1851,7 +1920,8 @@ async function checkAutoBattlesForGuild() {
                         `⏭️ Skip Match ${latestMatchId}: tracked Guild "${config.targetGuild}" ` +
                         `ไม่ตรงกับ Official Guilds: ${officialGuildNames.join(', ') || 'N/A'}`
                     );
-                    processedBattles.add(latestMatchId);
+                    processedBattles.add(String(latestMatchId));
+                    saveData();
                     continue;
                 }
 
@@ -1869,29 +1939,23 @@ async function checkAutoBattlesForGuild() {
                 const checkValue = config.minFrames;
                 if (result.guildTotalFrames >= checkValue || result.totalFame >= checkValue) {
                     const channel = await client.channels.fetch(config.channelId).catch(() => null);
-                    if (channel) {
-                        await channel.send({
-                            content: 
-                                `🚨 **Auto-Battle Alert!** ตรวจพบไฟต์ใหม่ของกิลด์ **${config.targetGuild}**\n` +
-                                `⚔️ รวม Kills + Deaths: \`${result.guildTotalFrames.toLocaleString()}\`\n` +
-                                `💰 Total Fame: \`${formatFame(result.totalFame)}\`\n` +
-                                `🔗 **Battle Link:** <${result.battleUrl}>`
-                        });
-
-                        const reportFiles = Array.isArray(result.payload.files) ? result.payload.files : [];
-                        if (reportFiles.length > 0) {
-                            for (const file of reportFiles) {
-                                await channel.send({ files: [file] });
-                            }
-                        } else {
-                            await channel.send({ content: result.payload.content });
-                        }
+                    if (!channel || typeof channel.send !== 'function') {
+                        console.warn(`⚠️ Auto-Battle channel unavailable for Match ID ${latestMatchId}; will retry next poll.`);
+                        continue;
                     }
+                    const alertText =
+                        `🚨 **Auto-Battle Alert!** ตรวจพบไฟต์ใหม่ของกิลด์ **${config.targetGuild}**\n` +
+                        `⚔️ รวม Kills + Deaths: \`${result.guildTotalFrames.toLocaleString()}\`\n` +
+                        `💰 Total Fame: \`${formatFame(result.totalFame)}\`\n` +
+                        `🔗 **Battle Link:** <${result.battleUrl}>`;
+                    const reportFiles = Array.isArray(result.payload.files) ? result.payload.files : [];
+                    await channel.send(reportFiles.length ? { content: alertText, files: reportFiles } : { content: alertText + '\n' + (result.payload.content || '') });
+                    console.log(`✅ Auto-Battle report send succeeded for Match ID ${latestMatchId} in channel ${config.channelId}.`);
+                } else {
+                    console.log(`ℹ️ Match ID ${latestMatchId} checked below threshold; marking handled.`);
                 }
-                
                 processedBattles.add(String(latestMatchId));
-                saveData();
-                } catch (e) {
+                saveData();                } catch (e) {
                     console.error(`❌ Auto-Battle Error on Match ID ${latestMatchId} for guild ${config.targetGuild}:`, e.message);
                 }
             }
