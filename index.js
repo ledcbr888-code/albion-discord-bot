@@ -5226,8 +5226,16 @@ client.on('interactionCreate', async interaction => {
             } else {
                 autoBattleConfigs.push(configData);
             }
-            const baselineMatches = await fetchGuildRecentBattles(guildName);
-            baselineMatches.forEach(id => processedBattles.add(String(id)));
+            const recentMatches = await fetchGuildRecentBattles(guildName);
+            // When creating/reconfiguring the tracker, mark older visible fights as
+            // seen but leave the newest battle eligible for the next polling pass.
+            // This avoids silently skipping a just-published report during setup.
+            const existingIds = recentMatches.map(String);
+            const newestId = existingIds[0] || null;
+            for (const id of existingIds) {
+                if (id !== newestId) processedBattles.add(id);
+            }
+            if (newestId) processedBattles.delete(newestId);
             saveData();
 
             return interaction.editReply(`✅ ตั้งค่า **Auto-Battle Tracker** สำเร็จเรียบร้อย!\n- 🌐 เซิร์ฟเวอร์: **EAST (ตายตัว)**\n- 📢 ห้องแจ้งเตือน: <#${channel.id}>\n- 🛡️ กิลด์ที่ติดตาม: **${guildName}**\n- ⚔️ ขั้นต่ำ: **${minFrames.toLocaleString()}**\n\n📌 *ระบบจะคอยตรวจสอบไฟต์การต่อสู้ใหม่ๆ ของกิลด์นี้ให้อัตโนมัติทุกๆ 5 นาทีครับ*`);
