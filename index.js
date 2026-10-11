@@ -5034,12 +5034,7 @@ const commands = [
                     { name: '🌎 West (Americas)', value: 'west' },
                     { name: '🌍 Europe (EU)', value: 'europe' }
                 )))
-        .addSubcommand(s => s.setName('confirm').setDescription('ยืนยันโบนัส Asia จากข้อมูลที่เห็นในเกม')
-            .addStringOption(o => o.setName('category').setDescription('ชื่อหมวดโบนัส เช่น Cloth Robes').setRequired(true))
-            .addStringOption(o => o.setName('city').setDescription('เมืองที่ได้โบนัส เช่น Fort Sterling').setRequired(true))
-            .addIntegerOption(o => o.setName('bonus').setDescription('เปอร์เซ็นต์โบนัส เช่น 10 หรือ 20').setRequired(true).setMinValue(1).setMaxValue(100)))
         .addSubcommand(s => s.setName('status').setDescription('ตรวจสถานะแหล่งข้อมูลและเวลาตรวจล่าสุด'))
-        .addSubcommand(s => s.setName('refresh').setDescription('ดึงข้อมูล Daily ใหม่ทันที'))
         .addSubcommand(s => s.setName('remove').setDescription('ยกเลิกการส่งรายงานโบนัสประจำวันอัตโนมัติในเซิร์ฟเวอร์นี้'))
     ,new SlashCommandBuilder().setName('ava').setDescription('เช็กข้อมูลแผนที่ Roads of Avalon เป็นภาษาไทย')
         .addSubcommand(s => s.setName('check').setDescription('เช็กกล่อง ทรัพยากร ดันเจี้ยน และ Connection ของแมพ AVA')
@@ -5386,30 +5381,10 @@ client.on('interactionCreate', async interaction => {
     if (commandName === 'daily') {
         const sub = interaction.options.getSubcommand();
 
-        if (sub === 'confirm') {
-            const category = interaction.options.getString('category').trim();
-            const city = interaction.options.getString('city').trim();
-            const dailyBonus = interaction.options.getInteger('bonus');
-            const meta = Object.values(DAILY_CATEGORY_META).find(x => x.label.toLowerCase() === category.toLowerCase());
-            const normalizedCategory = meta?.label || category;
-            const normalizedCity = meta?.city || city;
-            dailyPlayerConfirmations = dailyPlayerConfirmations.filter(x => !(x.server === 'asia' && x.date === getExpectedDailyDate() && x.category.toLowerCase() === normalizedCategory.toLowerCase() && x.userId === interaction.user.id));
-            dailyPlayerConfirmations.push({ server: 'asia', date: getExpectedDailyDate(), category: normalizedCategory, city: normalizedCity, baseBonus: meta?.baseBonus || 15, dailyBonus, userId: interaction.user.id, userName: interaction.user.tag, confirmedAt: new Date().toISOString() });
-            saveData();
-            const total = dailyPlayerConfirmations.filter(x => x.server === 'asia' && x.date === getExpectedDailyDate()).length;
-            return interaction.reply(`✅ บันทึกการยืนยันโบนัส Asia แล้ว\n**${normalizedCategory}** +${dailyBonus}% — ${normalizedCity}\n👥 จำนวนการยืนยันวันนี้: **${total}** คน/รายการ`);
-        }
-
         if (sub === 'status') {
             const status = dailySourceStatus.asia || {};
             const communityCount = dailyPlayerConfirmations.filter(x => x.server === 'asia' && x.date === getExpectedDailyDate()).length;
             return interaction.reply({ ephemeral: true, content: `📊 **DAILY STATUS — ASIA**\nAO-SAGE: **${status.aoSage || 'ยังไม่ตรวจ'}**\nAODP: **${status.aodp || 'ยังไม่ตรวจ'}**\nCommunity: **${communityCount}** การยืนยันวันนี้\nตรวจล่าสุด: **${status.checkedAt ? formatIctTime(status.checkedAt) : 'ยังไม่มีข้อมูล'} น. ICT**\nสถานะ: **${status.aoSage === 'confirmed' || status.aodp === 'confirmed' ? 'CONFIRMED' : communityCount ? 'COMMUNITY CONFIRMED' : 'WAITING'}**` });
-        }
-
-        if (sub === 'refresh') {
-            await interaction.deferReply();
-            const refreshed = await generateDailyBonusCard('asia');
-            return refreshed ? interaction.editReply({ content: '✅ ดึง Daily Bonus Asia ใหม่แล้ว', files: [refreshed] }) : interaction.editReply('⏳ ยังไม่มีข้อมูลของวันนี้จากแหล่งข้อมูลที่เชื่อมต่ออยู่ และยังไม่มีการยืนยันจากผู้เล่น');
         }
 
         if (sub === 'get') {
