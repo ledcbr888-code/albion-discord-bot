@@ -5260,13 +5260,13 @@ client.on('interactionCreate', async interaction => {
     if (commandName === 'check') {
         const sub = interaction.options.getSubcommand();
         if (sub === 'guilds') {
-            if (!targetGuilds.length) return interaction.reply('🛡️ ไม่มีกิลด์ในระบบติดตาม');
+            if (!targetGuilds.length) return interaction.reply({ content: '🛡️ ไม่มีกิลด์ในระบบติดตาม', flags: 64 });
             const listFormatted = targetGuilds.map((g, i) => `${i + 1}. ${g.name} ${g.channelId ? `(ห้อง: <#${g.channelId}>)` : ''}`).join('\n');
-            return interaction.reply(`🛡️ **กิลด์ที่ติดตาม (${targetGuilds.length})**\n\`\`\`\n${listFormatted}\n\`\`\``);
+            return interaction.reply({ content: `🛡️ **กิลด์ที่ติดตาม (${targetGuilds.length})**\n\`\`\`\n${listFormatted}\n\`\`\``, flags: 64 });
         }
         if (sub === 'members') {
-            if (!targetPlayers.length) return interaction.reply('📋 ไม่มีผู้เล่นในระบบติดตาม');
-            return interaction.reply(`📋 **ผู้เล่นที่ติดตาม (${targetPlayers.length})**\n\`\`\`\n${targetPlayers.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\`\`\``);
+            if (!targetPlayers.length) return interaction.reply({ content: '📋 ไม่มีผู้เล่นในระบบติดตาม', flags: 64 });
+            return interaction.reply({ content: `📋 **ผู้เล่นที่ติดตาม (${targetPlayers.length})**\n\`\`\`\n${targetPlayers.map((x, i) => `${i + 1}. ${x}`).join('\n')}\n\`\`\``, flags: 64 });
         }
         if (sub === 'battles') {
             await interaction.deferReply();
@@ -5284,17 +5284,17 @@ client.on('interactionCreate', async interaction => {
             if (existingIndex >= 0) {
                 targetGuilds[existingIndex].channelId = channel.id;
                 saveData();
-                return interaction.reply(`🛡️ อัปเดตห้องสำหรับกิลด์ **${name}** เป็น <#${channel.id}> เรียบร้อยแล้ว`);
+                return interaction.reply({ content: `🛡️ อัปเดตห้องสำหรับกิลด์ **${name}** เป็น <#${channel.id}> เรียบร้อยแล้ว`, flags: 64 });
             }
 
             targetGuilds.push({ name, channelId: channel.id });
             saveData();
-            return interaction.reply(`🛡️ เพิ่มกิลด์ **${name}** และกำหนดให้ดึงข้อมูลอัตโนมัติเฉพาะในห้อง <#${channel.id}> เรียบร้อยแล้วครับ`);
+            return interaction.reply({ content: `🛡️ เพิ่มกิลด์ **${name}** และกำหนดให้ดึงข้อมูลอัตโนมัติเฉพาะในห้อง <#${channel.id}> เรียบร้อยแล้วครับ`, flags: 64 });
         }
         if (sub === 'player') {
             const name = interaction.options.getString('name').trim();
             if (targetPlayers.some(x => x.toLowerCase() === name.toLowerCase())) return interaction.reply({ content: `⚠️ ผู้เล่น **${name}** มีอยู่แล้ว`, flags: 64 });
-            targetPlayers.push(name); saveData(); return interaction.reply(`✅ เพิ่มผู้เล่น **${name}** แล้ว`);
+            targetPlayers.push(name); saveData(); return interaction.reply({ content: `✅ เพิ่มผู้เล่น **${name}** แล้ว`, flags: 64 });
         }
     }
 
@@ -5304,12 +5304,12 @@ client.on('interactionCreate', async interaction => {
             const before = targetGuilds.length; 
             targetGuilds = targetGuilds.filter(x => x.name.toLowerCase() !== name.toLowerCase());
             if (before === targetGuilds.length) return interaction.reply({ content: `❌ ไม่พบกิลด์ **${name}**`, flags: 64 });
-            saveData(); return interaction.reply(`🗑️ ลบกิลด์ **${name}** แล้ว`);
+            saveData(); return interaction.reply({ content: `🗑️ ลบกิลด์ **${name}** แล้ว`, flags: 64 });
         }
         if (sub === 'player') {
             const before = targetPlayers.length; targetPlayers = targetPlayers.filter(x => x.toLowerCase() !== name.toLowerCase());
             if (before === targetPlayers.length) return interaction.reply({ content: `❌ ไม่พบผู้เล่น **${name}**`, flags: 64 });
-            saveData(); return interaction.reply(`🗑️ ลบผู้เล่น **${name}** แล้ว`);
+            saveData(); return interaction.reply({ content: `🗑️ ลบผู้เล่น **${name}** แล้ว`, flags: 64 });
         }
     }
 
@@ -5317,7 +5317,7 @@ client.on('interactionCreate', async interaction => {
         const sub = interaction.options.getSubcommand();
 
         if (sub === 'set') {
-            await interaction.deferReply();
+            await interaction.deferReply({ flags: 64 });
             const channel = interaction.options.getChannel('channel');
             const guildName = interaction.options.getString('guild').trim();
             const minFramesInput = interaction.options.getString('min_frames');
@@ -5352,7 +5352,7 @@ client.on('interactionCreate', async interaction => {
             if (newestId) processedBattles.delete(newestId);
             saveData();
 
-            return interaction.editReply(`✅ ตั้งค่า **Auto-Battle Tracker** สำเร็จเรียบร้อย!\n- 🌐 เซิร์ฟเวอร์: **EAST (ตายตัว)**\n- 📢 ห้องแจ้งเตือน: <#${channel.id}>\n- 🛡️ กิลด์ที่ติดตาม: **${guildName}**\n- ⚔️ ขั้นต่ำ: **${minFrames.toLocaleString()}**\n\n📌 *ระบบจะคอยตรวจสอบไฟต์การต่อสู้ใหม่ๆ ของกิลด์นี้ให้อัตโนมัติทุกๆ 5 นาทีครับ*`);
+            return interaction.editReply({ content: `✅ ตั้งค่า **Auto-Battle Tracker** สำเร็จเรียบร้อย!\n- 🌐 เซิร์ฟเวอร์: **EAST (ตายตัว)**\n- 📢 ห้องแจ้งเตือน: <#${channel.id}>\n- 🛡️ กิลด์ที่ติดตาม: **${guildName}**\n- ⚔️ ขั้นต่ำ: **${minFrames.toLocaleString()}**\n\n📌 *ระบบจะคอยตรวจสอบไฟต์การต่อสู้ใหม่ๆ ของกิลด์นี้ให้อัตโนมัติทุกๆ 5 นาทีครับ*`, flags: 64 });
         }
 
         if (sub === 'list') {
@@ -5365,7 +5365,7 @@ client.on('interactionCreate', async interaction => {
                 .setTitle(`🛡️ รายชื่อกิลด์ที่ติดตาม Auto-Battle ในเซิร์ฟเวอร์นี้ (${serverConfigs.length})`)
                 .setDescription(listText)
                 .setTimestamp();
-            return interaction.reply({ embeds: [embed] });
+            return interaction.reply({ embeds: [embed], flags: 64 });
         }
 
         if (sub === 'remove') {
@@ -5379,7 +5379,7 @@ client.on('interactionCreate', async interaction => {
             }
 
             saveData();
-            return interaction.reply(`🗑️ ลบกิลด์ **${guildName}** ออกจากระบบ Auto-Battle เรียบร้อยแล้ว`);
+            return interaction.reply({ content: `🗑️ ลบกิลด์ **${guildName}** ออกจากระบบ Auto-Battle เรียบร้อยแล้ว`, flags: 64 });
         }
     }
 
