@@ -1653,6 +1653,13 @@ async function fetchGuildRecentBattles(guildName) {
 }
 
 async function primeAutoBattleHistory() {
+    // Only seed the recent-history baseline on a truly fresh install.
+    // On normal restarts, do NOT mark every currently visible battle as seen:
+    // that would silently discard battles posted while Render was restarting/offline.
+    if (processedBattles.size > 0) {
+        console.log(`🛡️ Auto-Battle startup: keeping ${processedBattles.size} saved battle ID(s); checking for new fights normally.`);
+        return 0;
+    }
     const guilds = getAllGuildConfigs();
     for (const { guildId } of guilds) {
         await guildContext.run({ guildId }, async () => {
