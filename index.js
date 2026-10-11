@@ -487,7 +487,12 @@ async function fetchAlbionBBWeaponMap(matchId) {
             }
             if (map.size) return map;
         } catch (err) {
-            console.error('⚠️ AlbionBB weapon fallback failed:', err.message);
+            const status = err?.response?.status;
+            if (status === 403 || status === 401) {
+                console.warn(`⚠️ AlbionBB weapon fallback blocked (HTTP ${status}); skipping remaining AlbionBB URL variants.`);
+                break;
+            }
+            console.warn('⚠️ AlbionBB weapon fallback failed:', err.message);
         }
     }
     return new Map();
@@ -1400,15 +1405,22 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
 
     try {
         const officialWeaponMap = await fetchOfficialBattleWeaponMap(matchId);
-        const albionBBWeaponMap = await fetchAlbionBBWeaponMap(matchId);
-
         rawPlayers = rawPlayers.map(p => {
-            const key = p.name.trim().toLowerCase();
             if (p.weapon) return p;
-
-            const info = officialWeaponMap.get(key) || albionBBWeaponMap.get(key);
+            const info = officialWeaponMap.get(p.name.trim().toLowerCase());
             return info ? { ...p, weapon: info.id, weaponQuality: info.quality } : p;
         });
+
+        // Only call the third-party AlbionBB endpoint when the official API
+        // did not provide weapon icons for every player.
+        if (rawPlayers.some(p => !p.weapon)) {
+            const albionBBWeaponMap = await fetchAlbionBBWeaponMap(matchId);
+            rawPlayers = rawPlayers.map(p => {
+                if (p.weapon) return p;
+                const info = albionBBWeaponMap.get(p.name.trim().toLowerCase());
+                return info ? { ...p, weapon: info.id, weaponQuality: info.quality } : p;
+            });
+        }
     } catch (err) {
         console.error('⚠️ Weapon enrichment error:', err.message);
     }
