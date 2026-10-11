@@ -57,6 +57,16 @@ const client = new Client({
 
 const DATA_DIR = String(process.env.DATA_DIR || __dirname).trim();
 const DATA_FILE = String(process.env.TRACKING_FILE || path.join(DATA_DIR, 'tracking.json')).trim();
+// GitHub persistence must point to a PRIVATE repository; never store tracking data
+// in this public bot source repository.
+const GITHUB_DATA_TOKEN = String(process.env.GITHUB_DATA_TOKEN || '').trim();
+const GITHUB_DATA_REPO = String(process.env.GITHUB_DATA_REPO || '').trim();
+const GITHUB_DATA_BRANCH = String(process.env.GITHUB_DATA_BRANCH || 'main').trim();
+const GITHUB_DATA_PATH = String(process.env.GITHUB_DATA_PATH || 'tracking.json').trim();
+const GITHUB_DATA_API = 'https://api.github.com/repos/' + GITHUB_DATA_REPO + '/contents/' + GITHUB_DATA_PATH.split('/').map(encodeURIComponent).join('/');
+let githubSaveQueue = Promise.resolve();
+let githubDataSha = null;
+let githubPersistenceReady = false;
 let guildConfigs = {};
 let legacyMigration = null;
 let autoBattleCheckRunning = false;
@@ -171,8 +181,10 @@ function loadData() {
         if (!ensureDataDirectory()) { guildConfigs = {}; legacyMigration = null; return; }
         if (!fs.existsSync(DATA_FILE)) {
             guildConfigs = {};
-            console.warn(`⚠️ tracking.json not found at ${DATA_FILE}. A new empty configuration will be created.`);
-            saveData();
+            console.warn(`⚠️ tracking.json not found at ${DATA_FILE}.`);
+            // If GitHub persistence is configured, wait for remote download before
+            // creating a new file, so an empty local file cannot overwrite saved data.
+            if (!(GITHUB_DATA_TOKEN && GITHUB_DATA_REPO)) saveData();
             return;
         }
         const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
@@ -200,6 +212,9 @@ function saveData() {
         const tempFile = `${DATA_FILE}.tmp`;
         fs.writeFileSync(tempFile, payload, 'utf8');
         fs.renameSync(tempFile, DATA_FILE);
+        if (GITHUB_DATA_TOKEN && GITHUB_DATA_REPO && githubPersistenceReady) {
+            queueGitHubTrackingSave(payload);
+        }
         return true;
     } catch (err) {
         try { if (fs.existsSync(`${DATA_FILE}.tmp`)) fs.unlinkSync(`${DATA_FILE}.tmp`); } catch (_) {}
@@ -209,6 +224,93 @@ function saveData() {
 }
 
 loadData();
+
+function githubRequestHeaders() {
+    return {
+        Authorization: 'Bearer ' + GITHUB_DATA_TOKEN,
+        Accept: 'application/vnd.github+json',
+        'X-GitHub-Api-Version': '2022-11-28',
+        'User-Agent': 'albion-discord-bot-persistence'
+    };
+}
+
+async function pullGitHubTrackingData() {
+    if (!GITHUB_DATA_TOKEN || !GITHUB_DATA_REPO) {
+        console.warn('💾 GitHub persistence is not configured. Set GITHUB_DATA_TOKEN and GITHUB_DATA_REPO in Render Environment.');
+        return false;
+    }
+    try {
+        const response = await axios.get(GITHUB_DATA_API, {
+            timeout: 20000,
+            headers: githubRequestHeaders(),
+            params: { ref: GITHUB_DATA_BRANCH },
+            validateStatus: status => status === 200 || status === 404
+        });
+        if (response.status === 404) {
+            console.warn('💾 GitHub tracking file not found in private data repo; preserving local data and creating remote copy.');
+            githubPersistenceReady = true;
+            if (fs.existsSync(DATA_FILE)) {
+                const local = fs.readFileSync(DATA_FILE, 'utf8');
+                queueGitHubTrackingSave(local);
+            } else {
+                // Do not overwrite an absent remote file with empty settings unless
+                // the operator has confirmed that no previous backup exists.
+                console.warn('⚠️ No local tracking.json or GitHub backup exists yet. Existing settings must be restored from a backup if available.');
+            }
+            return false;
+        }
+        const remote = response.data;
+        if (!remote || remote.type !== 'file' || !remote.content) throw new Error('GitHub tracking path is not a readable file');
+        const content = Buffer.from(String(remote.content).replace(/\n/g, ''), 'base64').toString('utf8');
+        const parsed = JSON.parse(content);
+        if (!parsed || typeof parsed !== 'object') throw new Error('GitHub tracking JSON is invalid');
+        ensureDataDirectory();
+        fs.writeFileSync(DATA_FILE, content, 'utf8');
+        githubDataSha = remote.sha || null;
+        loadData();
+        githubPersistenceReady = true;
+        console.log('💾 GitHub tracking data loaded from private repo ' + GITHUB_DATA_REPO + '/' + GITHUB_DATA_PATH);
+        return true;
+    } catch (err) {
+        githubPersistenceReady = false;
+        console.error('❌ GitHub tracking load failed; local tracking data was left untouched:', err.response?.status || '', err.message);
+        return false;
+    }
+}
+
+function queueGitHubTrackingSave(content) {
+    if (!GITHUB_DATA_TOKEN || !GITHUB_DATA_REPO || !githubPersistenceReady) return;
+    githubSaveQueue = githubSaveQueue.then(async () => {
+        const encoded = Buffer.from(String(content), 'utf8').toString('base64');
+        const get = await axios.get(GITHUB_DATA_API, {
+            timeout: 20000, headers: githubRequestHeaders(),
+            params: { ref: GITHUB_DATA_BRANCH },
+            validateStatus: status => status === 200 || status === 404
+        });
+        const currentSha = get.status === 200 ? get.data.sha : undefined;
+        const body = {
+            message: 'Update Albion bot tracking backup',
+            content: encoded,
+            branch: GITHUB_DATA_BRANCH
+        };
+        if (currentSha) body.sha = currentSha;
+        const put = await axios.put(GITHUB_DATA_API, body, {
+            timeout: 20000, headers: githubRequestHeaders()
+        });
+        githubDataSha = put.data?.content?.sha || currentSha || null;
+        console.log('💾 GitHub tracking backup saved successfully.');
+    }).catch(err => {
+        console.error('❌ GitHub tracking backup save failed:', err.response?.status || '', err.response?.data?.message || err.message);
+    });
+}
+
+async function initializeTrackingPersistence() {
+    if (!GITHUB_DATA_TOKEN || !GITHUB_DATA_REPO) {
+        console.warn('⚠️ GitHub persistence is OFF. Configure GITHUB_DATA_TOKEN and GITHUB_DATA_REPO in Render Environment.');
+        return;
+    }
+    await pullGitHubTrackingData();
+}
 
 function parseFameValue(value) {
     if (typeof value === 'number') return value;
@@ -5588,4 +5690,6 @@ process.on('uncaughtException', err => console.error('❌ Uncaught exception:', 
 
 console.log('🛡️ AUTO-BATTLE FIX V3 LOADED: Fully automated battle reports & /daily bonus feature enabled');
 
-client.login(BOT_TOKEN);
+initializeTrackingPersistence()
+    .catch(err => console.error('❌ Tracking persistence initialization failed:', err.message))
+    .finally(() => client.login(BOT_TOKEN));
