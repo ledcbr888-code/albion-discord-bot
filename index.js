@@ -5023,20 +5023,7 @@ const commands = [
         .addSubcommand(s => s.setName('list').setDescription('แสดงรายชื่อกิลด์ที่ตั้งค่า Auto-Battle ในเซิร์ฟเวอร์นี้'))
         .addSubcommand(s => s.setName('remove').setDescription('ลบกิลด์ที่ตั้งค่า Auto-Battle ออก')
             .addStringOption(o => o.setName('guild').setDescription('ชื่อ Guild ที่ต้องการยกเลิกติดตาม Auto-Battle').setRequired(true))),
-    new SlashCommandBuilder().setName('daily').setDescription('ดึงข้อมูลหรือตั้งค่ารายงานโบนัสประจำวันอัตโนมัติ')
-        .addSubcommand(s => s.setName('get').setDescription('ดึงข้อมูลโบนัสประจำวันทันที')
-            .addChannelOption(o => o.setName('channel').setDescription('ส่งรายงานไปยังห้องที่เลือก (ไม่เลือกจะส่งห้องนี้)').addChannelTypes(ChannelType.GuildText)))
-        .addSubcommand(s => s.setName('setup').setDescription('ตั้งค่าให้บอทส่งรายงานโบนัสประจำวันให้อัตโนมัติทุกวัน (17:05 น. ไทย)')
-            .addChannelOption(o => o.setName('channel').setDescription('ห้องที่ต้องการให้แจ้งเตือนอัตโนมัติ').addChannelTypes(ChannelType.GuildText).setRequired(true))
-            .addStringOption(o => o.setName('server').setDescription('เลือกเซิร์ฟเวอร์').setRequired(true)
-                .addChoices(
-                    { name: '🌏 Asia (East)', value: 'asia' },
-                    { name: '🌎 West (Americas)', value: 'west' },
-                    { name: '🌍 Europe (EU)', value: 'europe' }
-                )))
-        .addSubcommand(s => s.setName('status').setDescription('ตรวจสถานะแหล่งข้อมูลและเวลาตรวจล่าสุด'))
-        .addSubcommand(s => s.setName('remove').setDescription('ยกเลิกการส่งรายงานโบนัสประจำวันอัตโนมัติในเซิร์ฟเวอร์นี้'))
-    ,new SlashCommandBuilder().setName('ava').setDescription('เช็กข้อมูลแผนที่ Roads of Avalon เป็นภาษาไทย')
+    new SlashCommandBuilder().setName('ava').setDescription('เช็กข้อมูลแผนที่ Roads of Avalon เป็นภาษาไทย')
         .addSubcommand(s => s.setName('check').setDescription('เช็กกล่อง ทรัพยากร ดันเจี้ยน และ Connection ของแมพ AVA')
             .addStringOption(o => o.setName('map').setDescription('ชื่อแมพ เช่น Casitos-Alieam หรือ URL ของแมพ').setRequired(true)))
         .addSubcommand(s => s.setName('setup').setDescription('ตั้งค่าห้องสำหรับตรวจจับรูป AVA อัตโนมัติ')
@@ -5128,10 +5115,8 @@ client.once('clientReady', async () => {
     fetchBattleHubMapIndex()
         .then(names => console.log('🗺️ AVA canonical map cache ready: ' + names.length + ' maps'))
         .catch(err => console.warn('⚠️ AVA canonical map cache preload failed: ' + err.message));
-    scheduleDailyAutoCheck();
     setTimeout(() => checkAndSendBanditAlerts().catch(err => console.error('❌ Initial Bandit check error:', err)), 5000);
     setInterval(() => checkAndSendBanditAlerts().catch(err => console.error('❌ Bandit scheduler error:', err)), 60 * 1000);
-    preloadDailyIcons().catch(err => console.warn('⚠️ Daily icon preload failed:', err.message));
 });
 
 client.on('interactionCreate', async interaction => {
@@ -5378,79 +5363,6 @@ client.on('interactionCreate', async interaction => {
         }
     }
 
-    if (commandName === 'daily') {
-        const sub = interaction.options.getSubcommand();
-
-        if (sub === 'status') {
-            const status = dailySourceStatus.asia || {};
-            const communityCount = dailyPlayerConfirmations.filter(x => x.server === 'asia' && x.date === getExpectedDailyDate()).length;
-            return interaction.reply({ ephemeral: true, content: `📊 **DAILY STATUS — ASIA**\nAO-SAGE: **${status.aoSage || 'ยังไม่ตรวจ'}**\nAODP: **${status.aodp || 'ยังไม่ตรวจ'}**\nCommunity: **${communityCount}** การยืนยันวันนี้\nตรวจล่าสุด: **${status.checkedAt ? formatIctTime(status.checkedAt) : 'ยังไม่มีข้อมูล'} น. ICT**\nสถานะ: **${status.aoSage === 'confirmed' || status.aodp === 'confirmed' ? 'CONFIRMED' : communityCount ? 'COMMUNITY CONFIRMED' : 'WAITING'}**` });
-        }
-
-        if (sub === 'get') {
-            await interaction.deferReply();
-            const targetChannel1 = interaction.options.getChannel('channel') || interaction.channel;
-
-            // /daily get: แสดงเฉพาะ Daily Bonus ของเซิร์ฟเวอร์ Asia (East) เท่านั้น
-            const cardAsia = await generateDailyBonusCard('asia');
-
-            if (!cardAsia) {
-                return interaction.editReply('❌ **เกิดข้อผิดพลาด:** ไม่สามารถดึง Daily Bonus ของเซิร์ฟเวอร์ **Asia (East)** ได้ในขณะนี้\n`ตรวจสอบ console log ของบอทเพื่อดูรายละเอียด`');
-            }
-
-            try {
-                if (targetChannel1.id === interaction.channel.id) {
-                    await interaction.editReply({ files: [cardAsia] });
-                } else {
-                    await targetChannel1.send({ files: [cardAsia] });
-                    await interaction.editReply(`✅ ส่งรายงานโบนัสประจำวันไปยังห้อง <#${targetChannel1.id}> เรียบร้อยแล้ว!`);
-                }
-
-            } catch (err) {
-                console.error('❌ Daily command response error:', err.message);
-                await interaction.editReply('❌ ไม่สามารถส่งข้อความไปยังห้องที่เลือกได้ โปรดตรวจสอบสิทธิ์การส่งข้อความของบอท');
-            }
-        }
-
-        if (sub === 'setup') {
-            await interaction.deferReply();
-            const channel = interaction.options.getChannel('channel');
-            const serverChoice = interaction.options.getString('server');
-
-            const existingIndex = dailyAutoConfigs.findIndex(c => c.guildId === interaction.guildId);
-            const configData = {
-                guildId: interaction.guildId,
-                channelId: channel.id,
-                serverChoice: serverChoice
-            };
-
-            if (existingIndex >= 0) {
-                dailyAutoConfigs[existingIndex] = configData;
-            } else {
-                dailyAutoConfigs.push(configData);
-            }
-            saveData();
-
-            const setupCard = await generateDailyBonusCard(serverChoice);
-            const setupMessage = `✅ **ตั้งค่ารายงานโบนัสรายวันอัตโนมัติสำเร็จ!**\n- 🌐 เซิร์ฟเวอร์: **${SERVER_NAMES[serverChoice]}**\n- 📢 ห้องแจ้งเตือน: <#${channel.id}>\n- ⏰ เวลาแจ้งเตือน: **หลัง ${getDailyResetText(serverChoice)}** ของทุกวันครับ`;
-            return setupCard
-                ? interaction.editReply({ content: setupMessage, files: [setupCard] })
-                : interaction.editReply(setupMessage);
-        }
-
-        if (sub === 'remove') {
-            const beforeCount = dailyAutoConfigs.length;
-            dailyAutoConfigs = dailyAutoConfigs.filter(c => c.guildId !== interaction.guildId);
-
-            if (beforeCount === dailyAutoConfigs.length) {
-                return interaction.reply({ content: '❌ เซิร์ฟเวอร์นี้ยังไม่ได้ตั้งค่ารายงานโบนัสรายวันอัตโนมัติไว้ครับ', flags: 64 });
-            }
-
-            saveData();
-            return interaction.reply('🗑️ ยกเลิกการตั้งค่ารายงานโบนัสรายวันอัตโนมัติสำหรับเซิร์ฟเวอร์นี้เรียบร้อยแล้ว');
-        }
-    }
-
     if (commandName === 'ava') {
         const sub = interaction.options.getSubcommand();
         if (sub === 'check') {
@@ -5675,7 +5587,7 @@ client.on('error', err => console.error('❌ Discord client error:', err));
 process.on('unhandledRejection', err => console.error('❌ Unhandled rejection:', err));
 process.on('uncaughtException', err => console.error('❌ Uncaught exception:', err));
 
-console.log('🛡️ AUTO-BATTLE FIX V3 LOADED: Fully automated battle reports & /daily bonus feature enabled');
+console.log('🛡️ AUTO-BATTLE FIX V3 LOADED: Battle reports enabled');
 
 initializeTrackingPersistence()
     .catch(err => console.error('❌ Tracking persistence initialization failed:', err.message))
