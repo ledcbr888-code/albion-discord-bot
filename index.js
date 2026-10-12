@@ -2288,7 +2288,16 @@ async function checkAutoBattlesForGuild() {
                         `💰 Total Fame: \`${formatFame(result.totalFame)}\`\n` +
                         `🔗 **Battle Link:** <${result.battleUrl}>`;
                     const reportFiles = Array.isArray(result.payload.files) ? result.payload.files : [];
-                    await channel.send(reportFiles.length ? { content: alertText, files: reportFiles } : { content: alertText + '\n' + (result.payload.content || '') });
+                    if (reportFiles.length > 0) {
+                        // Discord displays multiple image attachments side-by-side in one message.
+                        // Send each report image in its own message so they stack vertically.
+                        await channel.send({ content: alertText, files: [reportFiles[0]] });
+                        for (const reportFile of reportFiles.slice(1)) {
+                            await channel.send({ files: [reportFile] });
+                        }
+                    } else {
+                        await channel.send({ content: alertText + '\n' + (result.payload.content || '') });
+                    }
                     console.log(`✅ Auto-Battle report send succeeded for Match ID ${latestMatchId} in channel ${config.channelId}.`);
                 } else {
                     console.log(`ℹ️ Match ID ${latestMatchId} checked below threshold; marking handled.`);
