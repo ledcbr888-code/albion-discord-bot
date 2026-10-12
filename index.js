@@ -2103,7 +2103,7 @@ async function fetchGuildRecentBattles(guildName) {
                 let node = el;
                 for (let depth = 0; node && depth < 7; depth++, node = node.parent) {
                     const cardText = $(node).text().replace(/\s+/g, ' ').trim().toLowerCase();
-                    if (cardText.length > 0 && cardText < 1800 &&
+                    if (cardText.length > 0 && cardText.length < 1800 &&
                         cardText.includes(String(match[1])) && cardText.includes(normalizedTarget)) {
                         cardMatchedIds.push(match[1]);
                         break;
