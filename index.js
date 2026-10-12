@@ -2013,11 +2013,13 @@ async function primeAutoBattleHistory() {
         return 0;
     }
     const guilds = getAllGuildConfigs();
+    let totalAdded = 0;
     for (const { guildId } of guilds) {
-        await guildContext.run({ guildId }, async () => {
-            await primeAutoBattleHistoryForGuild();
-        });
+        totalAdded += await guildContext.run({ guildId }, async () => {
+            return await primeAutoBattleHistoryForGuild();
+        }) || 0;
     }
+    return totalAdded;
 }
 
 async function primeAutoBattleHistoryForGuild(configs = autoBattleConfigs) {
