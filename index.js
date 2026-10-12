@@ -691,6 +691,8 @@ async function fetchAlbionBBBattleFallback(matchId) {
 // trigger duplicate API bursts during a single polling cycle.
 const battleFetchInFlight = new Map();
 const battleFetchFailureUntil = new Map();
+// GameInfo rate limits are shared across battle IDs, so back off globally.
+let officialApiRateLimitedUntil = 0;
 
 function sleep(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
@@ -779,32 +781,38 @@ async function fetchAlbionBBPageFallback(matchId) {
 }
 
 async function fetchOfficialBattleUncached(matchId) {
-    // Query Asia first. On HTTP 429, respect Retry-After and avoid rapid retry loops.
+    // A 429 is generally shared across regional endpoints. Pause official requests
+    // globally rather than retrying every region for every candidate battle.
     const urls = getApiUrls(matchId).reverse();
     let sawRateLimit = false;
-    for (let attempt = 1; attempt <= 2; attempt++) {
-        for (const url of urls) {
-            try {
-                const response = await axios.get(url, {
-                    timeout: 20000,
-                    headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' }
-                });
-                if (response.data && typeof response.data === 'object' &&
-                    (response.data.id || response.data.players || response.data.guilds)) return response.data;
-                console.warn(`⚠️ Official battle API returned an unexpected payload for ${matchId} from ${url}`);
-            } catch (err) {
-                const status = err.response?.status;
-                if (status === 429) {
-                    sawRateLimit = true;
-                    const waitMs = retryAfterMs(err) || attempt * 3000;
-                    console.warn(`⏳ Official battle API rate-limited ${matchId} (${url.includes('gameinfo-sgp') ? 'Asia' : 'global'}); retrying after ${waitMs}ms.`);
-                } else {
-                    console.warn(`⚠️ Official battle API attempt ${attempt}/2 failed for ${matchId} (${url.includes('gameinfo-sgp') ? 'Asia' : 'global'}): ${status || err.message}`);
+    if (officialApiRateLimitedUntil > Date.now()) {
+        console.log(`⏭️ Official battle API cooldown active for ${Math.ceil((officialApiRateLimitedUntil - Date.now()) / 1000)}s; trying public fallbacks for ${matchId}.`);
+    } else {
+        for (let attempt = 1; attempt <= 2; attempt++) {
+            for (const url of urls) {
+                try {
+                    const response = await axios.get(url, {
+                        timeout: 20000,
+                        headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' }
+                    });
+                    if (response.data && typeof response.data === 'object' &&
+                        (response.data.id || response.data.players || response.data.guilds)) return response.data;
+                    console.warn(`⚠️ Official battle API returned an unexpected payload for ${matchId} from ${url}`);
+                } catch (err) {
+                    const status = err.response?.status;
+                    if (status === 429) {
+                        sawRateLimit = true;
+                        const waitMs = Math.max(retryAfterMs(err), 60000);
+                        officialApiRateLimitedUntil = Math.max(officialApiRateLimitedUntil, Date.now() + waitMs);
+                        console.warn(`⏳ Official battle API rate-limited ${matchId} (${url.includes('gameinfo-sgp') ? 'Asia' : 'global'}); pausing official requests for ${Math.ceil(waitMs / 1000)}s and switching to fallbacks.`);
+                        break;
+                    } else {
+                        console.warn(`⚠️ Official battle API attempt ${attempt}/2 failed for ${matchId} (${url.includes('gameinfo-sgp') ? 'Asia' : 'global'}): ${status || err.message}`);
+                    }
                 }
             }
-        }
-        if (attempt < 2) {
-            await sleep(sawRateLimit ? 5000 : 1800);
+            if (sawRateLimit) break;
+            if (attempt < 2) await sleep(1800);
         }
     }
 
@@ -2039,7 +2047,9 @@ async function fetchGuildRecentBattles(guildName) {
     const officialCache = fetchGuildRecentBattles._officialCache || (fetchGuildRecentBattles._officialCache = new Map());
     const filterMatchingGuildBattles = async (ids) => {
         const matched = [];
-        for (const id of [...new Set(ids)].slice(0, 40)) {
+        // Limit API verification to a few candidates; archive card text is preferred.
+        for (const id of [...new Set(ids)].slice(0, 5)) {
+            if (officialApiRateLimitedUntil > Date.now()) break;
             let cached = officialCache.get(String(id));
             if (!cached || cached.expiresAt <= Date.now()) {
                 const data = await fetchOfficialBattle(id).catch(() => null);
@@ -2081,14 +2091,31 @@ async function fetchGuildRecentBattles(guildName) {
             sawValidSourcePage = true;
 
             const candidateIds = [];
+            const cardMatchedIds = [];
             $('a[href*="/battles/"]').each((_, el) => {
                 const href = $(el).attr('href') || '';
                 const match = href.match(/\/battles\/(\d+)(?:[/?#]|$)/i);
-                if (match && match[1]) candidateIds.push(match[1]);
+                if (!match || !match[1]) return;
+                candidateIds.push(match[1]);
+
+                // Prefer the guild names shown on each individual archive card.
+                // This avoids one official API call per historical report.
+                let node = el;
+                for (let depth = 0; node && depth < 7; depth++, node = node.parent) {
+                    const cardText = $(node).text().replace(/\s+/g, ' ').trim().toLowerCase();
+                    if (cardText.length > 0 && cardText < 1800 &&
+                        cardText.includes(String(match[1])) && cardText.includes(normalizedTarget)) {
+                        cardMatchedIds.push(match[1]);
+                        break;
+                    }
+                }
             });
 
             const uniqueIds = [...new Set(candidateIds)];
-            const matchingIds = await filterMatchingGuildBattles(uniqueIds);
+            const cardMatchedUnique = [...new Set(cardMatchedIds)];
+            const matchingIds = cardMatchedUnique.length
+                ? cardMatchedUnique
+                : await filterMatchingGuildBattles(uniqueIds);
             if (matchingIds.length) {
                 console.log('✅ AlbionBattles East verified ' + matchingIds.length + ' battle(s) for ' + targetGuild + ' (checked ' + uniqueIds.length + ' archive link(s)).');
                 return matchingIds;
