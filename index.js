@@ -1775,9 +1775,11 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
 
         const isGuildMatch = isExactGuildMatch(p.guild, guildNamesList);
 
-        // IMPORTANT: when /add player exists, ONLY explicitly tracked players
-        // are allowed into the player report/image. A tracked guild must not
-        // inject every other guild member into the image.
+        // Auto-Battle is configured per target guild, so guild scope must take
+        // precedence over the server's /add player list. Otherwise a guild that
+        // has no explicitly tracked players (for example Psz) gets filtered out.
+        // For manual reports, preserve /add player as the strictest scope.
+        if (options.autoBattle && hasTrackedGuilds) return isGuildMatch;
         if (hasTrackedPlayers) return isExplicitPlayer;
         if (hasTrackedGuilds) return isGuildMatch;
         return true;
