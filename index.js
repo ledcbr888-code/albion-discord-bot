@@ -687,28 +687,163 @@ async function fetchAlbionBBBattleFallback(matchId) {
     }
 }
 
-async function fetchOfficialBattle(matchId) {
-    // Query the Asia host first; the global host can route to a different realm.
+// Share battle lookups between tracked guilds so the same Match ID does not
+// trigger duplicate API bursts during a single polling cycle.
+const battleFetchInFlight = new Map();
+const battleFetchFailureUntil = new Map();
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function retryAfterMs(err) {
+    const raw = err?.response?.headers?.['retry-after'] ?? err?.response?.headers?.['Retry-After'];
+    if (raw == null) return 0;
+    const seconds = Number(raw);
+    if (Number.isFinite(seconds)) return Math.max(0, Math.min(15000, seconds * 1000));
+    const dateMs = Date.parse(String(raw));
+    return Number.isFinite(dateMs) ? Math.max(0, Math.min(15000, dateMs - Date.now())) : 0;
+}
+
+function findBattleObjectInJson(value, matchId, depth = 0, visited = { count: 0 }) {
+    if (!value || typeof value !== 'object' || depth > 9 || visited.count++ > 12000) return null;
+    if (Array.isArray(value)) {
+        for (const item of value) {
+            const found = findBattleObjectInJson(item, matchId, depth + 1, visited);
+            if (found) return found;
+        }
+        return null;
+    }
+    const id = String(value.id ?? value.Id ?? value.albionId ?? value.battleId ?? value.BattleId ?? '');
+    const players = value.players ?? value.Players ?? value.participants ?? value.Participants;
+    const guilds = value.guilds ?? value.Guilds;
+    const isCollection = x => Array.isArray(x) || (x && typeof x === 'object');
+    if (isCollection(players) && isCollection(guilds) && (!id || id === String(matchId))) {
+        const playerValues = Array.isArray(players) ? players : Object.values(players);
+        const guildValues = Array.isArray(guilds) ? guilds : Object.values(guilds);
+        if (playerValues.length && guildValues.length) {
+            return {
+                ...value,
+                id: String(matchId),
+                players: Array.isArray(players) ? Object.fromEntries(players.map((p, i) => [String(i), p])) : players,
+                guilds: Array.isArray(guilds) ? Object.fromEntries(guilds.map((g, i) => [String(i), g])) : guilds
+            };
+        }
+    }
+    for (const child of Object.values(value)) {
+        const found = findBattleObjectInJson(child, matchId, depth + 1, visited);
+        if (found) return found;
+    }
+    return null;
+}
+
+async function fetchAlbionBBPageFallback(matchId) {
+    const url = `https://east.albionbb.com/battles/${encodeURIComponent(matchId)}`;
+    const headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36',
+        Accept: 'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        Referer: 'https://east.albionbb.com/'
+    };
+    let html = '';
+    try {
+        html = String(await cloudscraper.get({ uri: url, timeout: 18000, headers }));
+    } catch (err) {
+        try {
+            const response = await axios.get(url, { timeout: 18000, headers, validateStatus: status => status >= 200 && status < 400 });
+            html = String(response.data || '');
+        } catch (fallbackErr) {
+            console.warn(`⚠️ AlbionBB battle page fallback failed for ${matchId}: ${fallbackErr.response?.status || fallbackErr.message || err.message}`);
+            return null;
+        }
+    }
+    if (!html || html.length < 100) return null;
+    const $ = cheerio.load(html);
+    const candidates = [];
+    $('script[type="application/json"], script[type="application/ld+json"], script#__NEXT_DATA__, script').each((_, node) => {
+        const raw = $(node).html();
+        if (!raw || raw.length < 2 || raw.length > 5000000) return;
+        const trimmed = raw.trim();
+        if (!(trimmed.startsWith('{') || trimmed.startsWith('['))) return;
+        try { candidates.push(JSON.parse(trimmed)); } catch (_) {}
+    });
+    for (const candidate of candidates) {
+        const battle = findBattleObjectInJson(candidate, matchId);
+        if (battle) {
+            console.log(`✅ Using structured data from AlbionBB battle page for Match ID ${matchId}.`);
+            return battle;
+        }
+    }
+    console.warn(`⚠️ AlbionBB battle page loaded for ${matchId}, but no structured participant/guild data was exposed.`);
+    return null;
+}
+
+async function fetchOfficialBattleUncached(matchId) {
+    // Query Asia first. On HTTP 429, respect Retry-After and avoid rapid retry loops.
     const urls = getApiUrls(matchId).reverse();
-    for (let attempt = 1; attempt <= 3; attempt++) {
+    let sawRateLimit = false;
+    for (let attempt = 1; attempt <= 2; attempt++) {
         for (const url of urls) {
             try {
-                const response = await axios.get(url, { timeout: 30000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' } });
-                if (response.data && typeof response.data === 'object' && (response.data.id || response.data.players || response.data.guilds)) return response.data;
+                const response = await axios.get(url, {
+                    timeout: 20000,
+                    headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' }
+                });
+                if (response.data && typeof response.data === 'object' &&
+                    (response.data.id || response.data.players || response.data.guilds)) return response.data;
                 console.warn(`⚠️ Official battle API returned an unexpected payload for ${matchId} from ${url}`);
             } catch (err) {
-                console.warn(`⚠️ Official battle API attempt ${attempt}/3 failed for ${matchId} (${url.includes('gameinfo-sgp') ? 'Asia' : 'global'}): ${err.response?.status || err.message}`);
+                const status = err.response?.status;
+                if (status === 429) {
+                    sawRateLimit = true;
+                    const waitMs = retryAfterMs(err) || attempt * 3000;
+                    console.warn(`⏳ Official battle API rate-limited ${matchId} (${url.includes('gameinfo-sgp') ? 'Asia' : 'global'}); retrying after ${waitMs}ms.`);
+                } else {
+                    console.warn(`⚠️ Official battle API attempt ${attempt}/2 failed for ${matchId} (${url.includes('gameinfo-sgp') ? 'Asia' : 'global'}): ${status || err.message}`);
+                }
             }
         }
-        if (attempt < 3) await new Promise(resolve => setTimeout(resolve, attempt * 1500));
+        if (attempt < 2) {
+            await sleep(sawRateLimit ? 5000 : 1800);
+        }
     }
+
+    // AlbionBB's public HTML page can expose the same structured battle payload
+    // even when its JSON API returns 403 and the Official API is rate-limited.
+    const pageFallback = await fetchAlbionBBPageFallback(matchId);
+    if (pageFallback) return pageFallback;
+
     const fallback = await fetchAlbionBBBattleFallback(matchId);
     if (fallback) {
         console.log(`✅ Using AlbionBB battle fallback for Match ID ${matchId} (${Object.keys(fallback.players || {}).length} players).`);
         return fallback;
     }
-    console.warn(`❌ No battle data source succeeded for ${matchId}; Auto-Battle will retry on the next poll.`);
+    console.warn(`❌ Battle data unavailable for ${matchId} (not proof that the Match ID is missing); Auto-Battle will retry on the next poll.`);
     return null;
+}
+
+async function fetchOfficialBattle(matchId) {
+    const key = String(matchId);
+    if (battleFetchInFlight.has(key)) return battleFetchInFlight.get(key);
+    const blockedUntil = battleFetchFailureUntil.get(key) || 0;
+    if (blockedUntil > Date.now()) {
+        console.log(`⏭️ Reusing recent failed lookup for Match ID ${key}; will retry after cooldown.`);
+        return null;
+    }
+    const task = fetchOfficialBattleUncached(key)
+        .then(data => {
+            if (data) battleFetchFailureUntil.delete(key);
+            else battleFetchFailureUntil.set(key, Date.now() + 45000);
+            return data;
+        })
+        .catch(err => {
+            battleFetchFailureUntil.set(key, Date.now() + 45000);
+            console.warn(`❌ Battle lookup crashed for ${key}: ${err.message}`);
+            return null;
+        })
+        .finally(() => battleFetchInFlight.delete(key));
+    battleFetchInFlight.set(key, task);
+    return task;
 }
 
 function objectToPlayer(obj) {
@@ -2078,7 +2213,7 @@ async function checkAutoBattlesForGuild() {
                 try {
                     const officialBattle = await fetchOfficialBattle(latestMatchId);
                 if (!officialBattle) {
-                    console.warn(`⚠️ Official Albion API ไม่พบ Match ID ${latestMatchId}`);
+                    console.warn(`⚠️ ยังดึงข้อมูล Battle ${latestMatchId} ไม่สำเร็จจากแหล่งข้อมูลที่เข้าถึงได้; จะลองใหม่รอบถัดไป (ไม่ได้ยืนยันว่า Match ID ไม่มีอยู่)`);
                     continue;
                 }
 
