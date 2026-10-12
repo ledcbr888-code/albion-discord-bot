@@ -1893,6 +1893,27 @@ async function fetchGuildRecentBattles(guildName) {
     if (!targetGuild) return null;
     const normalizedTarget = targetGuild.toLowerCase();
     let lastError = null;
+
+    // Search query parameters can be ignored, and broad DOM ancestors can contain
+    // the search-box text. Verify candidates against official guild data instead.
+    const officialCache = fetchGuildRecentBattles._officialCache || (fetchGuildRecentBattles._officialCache = new Map());
+    const filterMatchingGuildBattles = async (ids) => {
+        const matched = [];
+        for (const id of [...new Set(ids)].slice(0, 40)) {
+            let cached = officialCache.get(String(id));
+            if (!cached || cached.expiresAt <= Date.now()) {
+                const data = await fetchOfficialBattle(id).catch(() => null);
+                cached = { data, expiresAt: Date.now() + 3 * 60 * 1000 };
+                officialCache.set(String(id), cached);
+                if (officialCache.size > 250) officialCache.delete(officialCache.keys().next().value);
+            }
+            const guildNames = cached.data?.guilds
+                ? Object.values(cached.data.guilds).map(g => g?.name).filter(Boolean)
+                : [];
+            if (isExactGuildMatch(targetGuild, guildNames)) matched.push(String(id));
+        }
+        return matched;
+    };
     let sawValidSourcePage = false;
 
     // Primary discovery source: AlbionBattles East. Search URLs are attempted
@@ -1919,31 +1940,18 @@ async function fetchGuildRecentBattles(guildName) {
             }
             sawValidSourcePage = true;
 
-            const matchIds = [];
+            const candidateIds = [];
             $('a[href*="/battles/"]').each((_, el) => {
                 const href = $(el).attr('href') || '';
                 const match = href.match(/\/battles\/(\d+)(?:[/?#]|$)/i);
-                if (!match || !match[1]) return;
-
-                // Walk upward only until the smallest container that includes
-                // both this Battle ID and the tracked guild is found.
-                let node = $(el);
-                let matchedCard = false;
-                for (let depth = 0; depth < 10 && node.length; depth++) {
-                    const cardText = String(node.text() || '').replace(/\s+/g, ' ').trim().toLowerCase();
-                    if (cardText.includes(match[1]) && cardText.includes(normalizedTarget)) {
-                        matchedCard = true;
-                        break;
-                    }
-                    node = node.parent();
-                }
-                if (matchedCard) matchIds.push(match[1]);
+                if (match && match[1]) candidateIds.push(match[1]);
             });
 
-            const uniqueIds = [...new Set(matchIds)];
-            if (uniqueIds.length) {
-                console.log('✅ AlbionBattles East found ' + uniqueIds.length + ' recent battle(s) for ' + targetGuild + '.');
-                return uniqueIds;
+            const uniqueIds = [...new Set(candidateIds)];
+            const matchingIds = await filterMatchingGuildBattles(uniqueIds);
+            if (matchingIds.length) {
+                console.log('✅ AlbionBattles East verified ' + matchingIds.length + ' battle(s) for ' + targetGuild + ' (checked ' + uniqueIds.length + ' archive link(s)).');
+                return matchingIds;
             }
         } catch (err) {
             lastError = err;
@@ -1977,9 +1985,10 @@ async function fetchGuildRecentBattles(guildName) {
             }
             sawValidAlbionBBPage = true;
             const uniqueIds = [...new Set(matchIds)];
-            if (uniqueIds.length) {
-                console.log('✅ AlbionBB fallback found ' + uniqueIds.length + ' recent battle(s) for ' + targetGuild + '.');
-                return uniqueIds;
+            const matchingIds = await filterMatchingGuildBattles(uniqueIds);
+            if (matchingIds.length) {
+                console.log('✅ AlbionBB fallback verified ' + matchingIds.length + ' battle(s) for ' + targetGuild + ' (checked ' + uniqueIds.length + ' archive link(s)).');
+                return matchingIds;
             }
         } catch (err) {
             lastError = err;
@@ -2080,8 +2089,8 @@ async function checkAutoBattlesForGuild() {
                         `⏭️ Skip Match ${latestMatchId}: tracked Guild "${config.targetGuild}" ` +
                         `ไม่ตรงกับ Official Guilds: ${officialGuildNames.join(', ') || 'N/A'}`
                     );
-                    processedBattles.add(String(latestMatchId));
-                    saveData();
+                    // Do not globally mark an unrelated candidate as processed;
+                    // this battle may later be discovered for another tracked guild.
                     continue;
                 }
 
