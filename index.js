@@ -615,19 +615,99 @@ async function fetchOfficialBattleWeaponMap(matchId) {
     return map;
 }
 
+async function fetchAlbionBBBattleFallback(matchId) {
+    // AlbionBB can publish a battle before the official GameInfo API indexes it.
+    // Try its public battle-summary + kill-event endpoints; never treat a 403/empty
+    // response as a valid report and never mark the battle processed on fallback failure.
+    const base = 'https://api.albionbb.com/asia/battles';
+    let summary = null;
+    try {
+        const response = await axios.get(base, {
+            params: { search: String(matchId), minPlayers: 1, page: 1 },
+            timeout: 20000,
+            headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' }
+        });
+        const rows = Array.isArray(response.data) ? response.data :
+            (Array.isArray(response.data?.battles) ? response.data.battles : []);
+        summary = rows.find(row => String(row.albionId ?? row.id ?? row.battleId ?? '') === String(matchId)) || null;
+    } catch (err) {
+        console.warn(`⚠️ AlbionBB battle-summary fallback failed for ${matchId}: ${err.response?.status || err.message}`);
+    }
+    try {
+        const response = await axios.get(`https://api.albionbb.com/asia/battles/kills?ids=${encodeURIComponent(matchId)}`, {
+            timeout: 20000,
+            headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' }
+        });
+        const events = Array.isArray(response.data) ? response.data :
+            (Array.isArray(response.data?.events) ? response.data.events : []);
+        if (!events.length) {
+            console.warn(`⚠️ AlbionBB returned no kill events for ${matchId}; cannot build a safe fallback report.`);
+            return null;
+        }
+        const players = new Map();
+        const guilds = new Map();
+        const touch = (entity) => {
+            if (!entity || typeof entity !== 'object') return null;
+            const name = String(entity.Name ?? entity.name ?? '').trim();
+            if (!name) return null;
+            const guildName = String(entity.GuildName ?? entity.guildName ?? entity.Guild?.Name ?? entity.guild?.name ?? '').trim();
+            const key = name.toLowerCase();
+            if (!players.has(key)) players.set(key, {
+                name, guildName, kills: 0, deaths: 0, killFame: 0,
+                MainHand: entity.MainHand ?? entity.mainHand ?? entity.Equipment?.MainHand ?? entity.equipment?.MainHand ?? null
+            });
+            const p = players.get(key);
+            if (!p.guildName && guildName) p.guildName = guildName;
+            if (guildName && !guilds.has(guildName.toLowerCase())) guilds.set(guildName.toLowerCase(), { name: guildName, kills: 0, deaths: 0, killFame: 0 });
+            return { p, g: guildName ? guilds.get(guildName.toLowerCase()) : null };
+        };
+        for (const event of events) {
+            const killer = event.Killer ?? event.killer;
+            const victim = event.Victim ?? event.victim;
+            const k = touch(killer), v = touch(victim);
+            const fame = Number(event.TotalVictimKillFame ?? event.totalVictimKillFame ?? event.KillFame ?? event.killFame ?? victim?.KillFame ?? victim?.killFame ?? 0) || 0;
+            if (k) { k.p.kills++; if (k.g) k.g.kills++; }
+            if (v) { v.p.deaths++; if (v.g) v.g.deaths++; }
+            if (k) { k.p.killFame += fame; if (k.g) k.g.killFame += fame; }
+        }
+        const guildObj = Object.fromEntries([...guilds.values()].map((g, i) => [String(i), g]));
+        const playerObj = Object.fromEntries([...players.values()].map((p, i) => [String(i), p]));
+        return {
+            id: String(matchId),
+            startTime: summary?.startedAt ?? summary?.startTime ?? events[0]?.TimeStamp ?? events[0]?.timestamp ?? null,
+            players: playerObj,
+            guilds: guildObj,
+            alliances: {},
+            totalKills: summary?.totalKills ?? events.length,
+            totalFame: summary?.totalFame ?? [...players.values()].reduce((sum, p) => sum + p.killFame, 0)
+        };
+    } catch (err) {
+        console.warn(`⚠️ AlbionBB kill-event fallback failed for ${matchId}: ${err.response?.status || err.message}`);
+        return null;
+    }
+}
+
 async function fetchOfficialBattle(matchId) {
-    const urls = getApiUrls(matchId);
+    // Query the Asia host first; the global host can route to a different realm.
+    const urls = getApiUrls(matchId).reverse();
     for (let attempt = 1; attempt <= 3; attempt++) {
         for (const url of urls) {
             try {
                 const response = await axios.get(url, { timeout: 30000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' } });
                 if (response.data && typeof response.data === 'object' && (response.data.id || response.data.players || response.data.guilds)) return response.data;
+                console.warn(`⚠️ Official battle API returned an unexpected payload for ${matchId} from ${url}`);
             } catch (err) {
-                console.warn(`⚠️ Official battle API attempt ${attempt}/3 failed for ${matchId}: ${err.response?.status || err.message}`);
+                console.warn(`⚠️ Official battle API attempt ${attempt}/3 failed for ${matchId} (${url.includes('gameinfo-sgp') ? 'Asia' : 'global'}): ${err.response?.status || err.message}`);
             }
         }
         if (attempt < 3) await new Promise(resolve => setTimeout(resolve, attempt * 1500));
     }
+    const fallback = await fetchAlbionBBBattleFallback(matchId);
+    if (fallback) {
+        console.log(`✅ Using AlbionBB battle fallback for Match ID ${matchId} (${Object.keys(fallback.players || {}).length} players).`);
+        return fallback;
+    }
+    console.warn(`❌ No battle data source succeeded for ${matchId}; Auto-Battle will retry on the next poll.`);
     return null;
 }
 
