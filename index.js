@@ -1988,7 +1988,7 @@ async function fetchGuildRecentBattles(guildName) {
         }
     }
 
-    if (sawValidSourcePage || sawValidAlbionBBPage) {
+    if (sawValidAlbionBBPage) {
         console.log('ℹ️ No new battle IDs found for tracked guild ' + targetGuild + ' on AlbionBattles or AlbionBB.');
         return [];
     }
