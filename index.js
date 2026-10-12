@@ -1776,10 +1776,13 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
         const isGuildMatch = isExactGuildMatch(p.guild, guildNamesList);
 
         // Auto-Battle is configured per target guild, so guild scope must take
-        // precedence over the server's /add player list. Otherwise a guild that
-        // has no explicitly tracked players (for example Psz) gets filtered out.
-        // For manual reports, preserve /add player as the strictest scope.
+        // precedence over the server's /add player list.
         if (options.autoBattle && hasTrackedGuilds) return isGuildMatch;
+
+        // Manual battle-link reports combine both tracking scopes:
+        // explicitly tracked players PLUS every member of each tracked guild.
+        // If only one scope is configured, keep that scope strict.
+        if (hasTrackedPlayers && hasTrackedGuilds) return isExplicitPlayer || isGuildMatch;
         if (hasTrackedPlayers) return isExplicitPlayer;
         if (hasTrackedGuilds) return isGuildMatch;
         return true;
