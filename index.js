@@ -1536,7 +1536,7 @@ function isExactGuildMatch(playerGuild, targetGuilds) {
 }
 
 async function buildBattleReportPayload(matchId, customTargetGuilds = [], options = {}) {
-    const apiData = /^\d+$/.test(matchId) ? await fetchOfficialBattle(matchId) : null;
+    const apiData = options.apiData || (/^\d+$/.test(matchId) ? await fetchOfficialBattle(matchId) : null);
     if (!apiData) throw new Error('ไม่พบข้อมูลไฟต์จาก Official Albion API');
 
     const battleTime = apiData.startTime || apiData.timestamp || null;
@@ -1889,32 +1889,112 @@ async function processBattleReport(input, targetContext, isMessage = false) {
 }
 
 async function fetchGuildRecentBattles(guildName) {
-    const searchUrl = `https://east.albionbb.com/?search=${encodeURIComponent(guildName)}&minPlayers=1&_=${Date.now()}`;
+    const targetGuild = String(guildName || '').trim();
+    if (!targetGuild) return null;
+    const normalizedTarget = targetGuild.toLowerCase();
     let lastError = null;
+    let sawValidSourcePage = false;
+
+    // Primary discovery source: AlbionBattles East. Search URLs are attempted
+    // first, then the live archive itself. Only accept IDs whose individual
+    // report card contains the tracked guild name; never treat an unfiltered
+    // page full of unrelated battles as a successful guild search.
+    const albionBattlesUrls = [
+        'https://albionbattles.com/east?search=' + encodeURIComponent(targetGuild) + '&minPlayers=1',
+        'https://albionbattles.com/east?q=' + encodeURIComponent(targetGuild) + '&minPlayers=1',
+        'https://albionbattles.com/east'
+    ];
+
+    for (const url of albionBattlesUrls) {
+        try {
+            const html = await cloudscraper.get(url, { timeout: 20000 });
+            if (!html || typeof html !== 'string' || !html.length) {
+                throw new Error('AlbionBattles returned an empty response');
+            }
+
+            const $ = cheerio.load(html);
+            const pageText = ($('title').text() + ' ' + $('body').text()).replace(/\s+/g, ' ');
+            if (!/Albion Battles|EAST live archive|Find your battle/i.test(pageText)) {
+                throw new Error('Unexpected AlbionBattles response; no recognizable East battle archive');
+            }
+            sawValidSourcePage = true;
+
+            const matchIds = [];
+            $('a[href*="/battles/"]').each((_, el) => {
+                const href = $(el).attr('href') || '';
+                const match = href.match(/\/battles\/(\d+)(?:[/?#]|$)/i);
+                if (!match || !match[1]) return;
+
+                // Walk upward only until the smallest container that includes
+                // both this Battle ID and the tracked guild is found.
+                let node = $(el);
+                let matchedCard = false;
+                for (let depth = 0; depth < 10 && node.length; depth++) {
+                    const cardText = String(node.text() || '').replace(/\s+/g, ' ').trim().toLowerCase();
+                    if (cardText.includes(match[1]) && cardText.includes(normalizedTarget)) {
+                        matchedCard = true;
+                        break;
+                    }
+                    node = node.parent();
+                }
+                if (matchedCard) matchIds.push(match[1]);
+            });
+
+            const uniqueIds = [...new Set(matchIds)];
+            if (uniqueIds.length) {
+                console.log('✅ AlbionBattles East found ' + uniqueIds.length + ' recent battle(s) for ' + targetGuild + '.');
+                return uniqueIds;
+            }
+        } catch (err) {
+            lastError = err;
+            console.warn('⚠️ AlbionBattles discovery failed for ' + targetGuild + ' (' + url + '): ' + err.message);
+        }
+    }
+
+    console.warn('⚠️ AlbionBattles returned no matching recent reports for ' + targetGuild + '; trying AlbionBB fallback.');
+
+    // Secondary discovery source: AlbionBB's searchable battle list.
+    // Keep this fallback so existing installations still work if AlbionBattles
+    // blocks the host, changes its markup, or has not indexed the battle yet.
+    const searchUrl = 'https://east.albionbb.com/?search=' + encodeURIComponent(targetGuild) + '&minPlayers=1&_=' + Date.now();
+    let sawValidAlbionBBPage = false;
     for (let attempt = 1; attempt <= 3; attempt++) {
         try {
             const searchRes = await cloudscraper.get(searchUrl, { timeout: 20000 });
-            if (!searchRes || typeof searchRes !== 'string' || !searchRes.length) throw new Error('AlbionBB returned an empty response');
+            if (!searchRes || typeof searchRes !== 'string' || !searchRes.length) {
+                throw new Error('AlbionBB returned an empty response');
+            }
             const $ = cheerio.load(searchRes);
             const matchIds = [];
             $('a[href*="/battles/"]').each((_, el) => {
                 const href = $(el).attr('href');
-                const match = href ? href.match(new RegExp('/battles/(\\d+)')) : null;
+                const match = href ? href.match(/\/battles\/(\d+)/i) : null;
                 if (match && match[1]) matchIds.push(match[1]);
             });
             const pageText = $('title').text() + ' ' + $('body').text();
-            if (!matchIds.length && !/battle|search|albion/i.test(pageText)) throw new Error('Unexpected AlbionBB response; no recognizable search page');
-            return [...new Set(matchIds)];
+            if (!matchIds.length && !/battle|search|albion/i.test(pageText)) {
+                throw new Error('Unexpected AlbionBB response; no recognizable search page');
+            }
+            sawValidAlbionBBPage = true;
+            const uniqueIds = [...new Set(matchIds)];
+            if (uniqueIds.length) {
+                console.log('✅ AlbionBB fallback found ' + uniqueIds.length + ' recent battle(s) for ' + targetGuild + '.');
+                return uniqueIds;
+            }
         } catch (err) {
             lastError = err;
-            console.warn(`⚠️ Fetch guild battles attempt ${attempt}/3 for ${guildName}: ${err.message}`);
+            console.warn('⚠️ AlbionBB fallback attempt ' + attempt + '/3 for ' + targetGuild + ': ' + err.message);
             if (attempt < 3) await new Promise(resolve => setTimeout(resolve, attempt * 1000));
         }
     }
-    console.warn(`❌ Fetch guild battles failed for ${guildName}; leaving battles unprocessed: ${lastError?.message || 'unknown error'}`);
+
+    if (sawValidAlbionBBPage) {
+        console.log('ℹ️ No new battle IDs found for tracked guild ' + targetGuild + ' on AlbionBattles or AlbionBB.');
+        return [];
+    }
+    console.warn('❌ Could not fetch battle listings for ' + targetGuild + '; leaving battles unprocessed: ' + (lastError?.message || 'unknown error'));
     return null;
 }
-
 async function primeAutoBattleHistory() {
     // Only seed the recent-history baseline on a truly fresh install.
     // On normal restarts, do NOT mark every currently visible battle as seen:
@@ -2012,6 +2092,7 @@ async function checkAutoBattlesForGuild() {
                     {
                         autoBattle: true,
                         guildId: config.guildId,
+                        apiData: officialBattle,
                         trackedPlayers: Array.isArray(trackedConfig?.players) ? trackedConfig.players : []
                     }
                 );
