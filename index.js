@@ -4683,6 +4683,56 @@ async function downloadImageForCanvas(url) {
     } catch (_) { return null; }
 }
 
+async function downloadAvaImageBuffer(data, mapName) {
+    const slug = normalizeAvaSlug(data?.name || mapName);
+    const candidates = [...new Set([
+        data?.mapImage,
+        'https://albionbattlehub.com/api/og/avalon?slug=' + encodeURIComponent(slug),
+        'https://albionbattlehub.com/images/avalon/' + encodeURIComponent(slug) + '.webp'
+    ].filter(Boolean))];
+    let lastError = null;
+    for (const url of candidates) {
+        try {
+            const response = await axios.get(url, {
+                responseType: 'arraybuffer', timeout: 8000,
+                headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'image/png,image/webp,image/*,*/*;q=0.8' },
+                validateStatus: status => status >= 200 && status < 300
+            });
+            const buffer = Buffer.from(response.data);
+            // Reject HTML/error pages returned with a 200 status.
+            const image = await loadImage(buffer);
+            if (!image.width || !image.height) throw new Error('invalid image dimensions');
+            console.log('🗺️ AVA attachment image selected: ' + url);
+            return buffer;
+        } catch (err) {
+            lastError = err;
+            console.warn('⚠️ AVA image candidate failed: ' + url + ' (' + err.message + ')');
+        }
+    }
+    throw lastError || new Error('ไม่พบไฟล์รูปแมฟที่ใช้งานได้');
+}
+
+function createAvaResultEmbed(data, mapName, attachmentAvailable) {
+    const counts = data?.counts || {};
+    const line = items => items.filter(([, value]) => Number(value) > 0)
+        .map(([label, value]) => label + ' ' + value).join(' • ') || 'ไม่มีข้อมูล';
+    const embed = new EmbedBuilder()
+        .setColor(0x2dd4bf)
+        .setTitle('🗺️ AVA CHECK — ' + (data?.name || mapName))
+        .setDescription('🛡️ **Tier:** ' + (data?.tier || 'ไม่พบข้อมูล') +
+            '\n🌀 **Connection:** ' + formatAvaConnection(data?.connection))
+        .addFields(
+            { name: '📦 กล่อง', value: line([['🟢 เขียว', counts['Green chest']], ['🔵 น้ำเงิน', counts['Blue chest']], ['🟡 ทอง', counts['Gold chest']]]) },
+            { name: '⛏️ ทรัพยากร', value: line([['🪨 หินใหญ่', counts.Stone], ['⛏️ แร่', counts.Ore], ['🪵 ไม้', counts.Wood], ['🦌 หนัง', counts.Hide], ['🌿 เส้นใย', counts.Fiber]]) },
+            { name: '🏰 ดันเจี้ยน', value: line([['🟣 ดันเดี่ยว', counts['Solo dungeon']], ['🔴 ดันกลุ่ม', counts['Group dungeon']]]) }
+        )
+        .setFooter({ text: 'ข้อมูลจาก AVA sources' })
+        .setTimestamp();
+    if (attachmentAvailable) embed.setImage('attachment://ava-map.png');
+    else if (data?.mapImage) embed.setImage(data.mapImage);
+    return embed;
+}
+
 function avaIdentityFallback(mapName) {
     const name = normalizeAvaOcrMapName(mapName);
     const slug = normalizeAvaSlug(name);
@@ -5674,21 +5724,24 @@ client.on('interactionCreate', async interaction => {
                         data = avaIdentityFallback(selectedName);
                     }
 
-                    const card = await withAvaTimeout(
-                        generateAvaRoadsCard(data, pending.ocrName),
-                        20000,
-                        'AVA card rendering'
-                    ).catch(renderErr => {
-                        console.warn('⚠️ AVA card rendering fallback for ' + selectedName + ': ' + renderErr.message);
-                        return null;
-                    });
+                    let imageBuffer = null;
+                    try {
+                        imageBuffer = await withAvaTimeout(
+                            downloadAvaImageBuffer(data, selectedName),
+                            20000,
+                            'AVA image download'
+                        );
+                    } catch (imageErr) {
+                        console.warn('⚠️ AVA image attachment fallback for ' + selectedName + ': ' + imageErr.message);
+                    }
 
                     await interaction.editReply({
                         content: '✅ เลือกแมพได้: **' + data.name + '** • **' + (String(data.tier || '').match(/T[468]/i)?.[0]?.toUpperCase() || (String(data.name || '').toLowerCase().includes('sasitos-umogaum') ? 'T4' : 'Tier unavailable')) + '**',
+                        embeds: [createAvaResultEmbed(data, selectedName, Boolean(imageBuffer))],
                         components: [],
-                        ...(card ? { files: [card] } : {})
+                        ...(imageBuffer ? { files: [new AttachmentBuilder(imageBuffer, { name: 'ava-map.png' })] } : {})
                     });
-                    console.log('✅ AVA map report sent: map=' + data.name + ' image=' + (data.mapImage ? 'yes' : 'no') + ' points=' + avaDataPointCount(data));
+                    console.log('✅ AVA map report sent: map=' + data.name + ' image=' + (imageBuffer ? 'yes' : 'no') + ' points=' + avaDataPointCount(data));
                 } catch (err) {
                     console.error('❌ AVA selected map lookup error for ' + selectedName + ':', err);
                     await interaction.editReply({
