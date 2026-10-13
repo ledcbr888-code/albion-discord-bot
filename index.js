@@ -5603,6 +5603,7 @@ client.on('interactionCreate', async interaction => {
 
                 await interaction.deferUpdate();
                 avaPendingSelections.delete(token);
+                console.log('🗺️ AVA map selected: guild=' + guildId + ' channel=' + interaction.channelId + ' map=' + selectedName + ' OCR=' + String(pending.ocrName || ''));
 
                 try {
                     await interaction.editReply({
@@ -5610,7 +5611,32 @@ client.on('interactionCreate', async interaction => {
                         components: []
                     });
 
-                    const data = await fetchAvaMapDataWithFallback(selectedName, [selectedName, ...pending.ocrCandidates]);
+                    // Dropdown candidates can include OCR aliases when the authoritative
+                    // index is temporarily unavailable. Resolve to the canonical indexed
+                    // map before querying POI providers, but preserve a valid user choice.
+                    let canonicalName = selectedName;
+                    try {
+                        const canonicalNames = await fetchAuthoritativeAvaMapIndex();
+                        const exact = canonicalNames.find(name =>
+                            normalizeAvaLookupName(name) === normalizeAvaLookupName(selectedName)
+                        );
+                        if (exact) {
+                            canonicalName = exact;
+                        } else {
+                            const ranked = canonicalNames.map(name => ({
+                                name,
+                                score: avaNameSimilarity(normalizeAvaOcrMapName(selectedName), name)
+                            })).sort((a, b) => b.score - a.score);
+                            if (ranked[0] && ranked[0].score >= 0.62) {
+                                canonicalName = ranked[0].name;
+                                console.log('🗺️ AVA selected OCR alias corrected: ' + selectedName + ' -> ' + canonicalName + ' (' + ranked[0].score.toFixed(3) + ')');
+                            }
+                        }
+                    } catch (resolveErr) {
+                        console.warn('⚠️ AVA selected-name canonicalization unavailable: ' + resolveErr.message);
+                    }
+
+                    const data = await fetchAvaMapDataWithFallback(canonicalName, [canonicalName, selectedName, ...pending.ocrCandidates]);
                     const card = await generateAvaRoadsCard(data, pending.ocrName);
 
                     await interaction.editReply({
@@ -5618,8 +5644,9 @@ client.on('interactionCreate', async interaction => {
                         components: [],
                         files: [card]
                     });
+                    console.log('✅ AVA map report sent: map=' + data.name + ' image=' + (data.mapImage ? 'yes' : 'no') + ' points=' + avaDataPointCount(data));
                 } catch (err) {
-                    console.error('❌ AVA selected map lookup error:', err);
+                    console.error('❌ AVA selected map lookup error for ' + selectedName + ':', err);
                     await interaction.editReply({
                         content: '❌ ค้นหาแมพ **' + selectedName + '** ไม่สำเร็จ: ' + err.message,
                         components: []
