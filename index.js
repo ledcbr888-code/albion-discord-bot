@@ -4957,6 +4957,10 @@ async function generateAvaRoadsCard(data, ocrText = '') {
 }
 
 async function processAvaImageMessage(message, fallbackAttachments = []) {
+    // Never OCR images posted by bots, including this bot's own map report.
+    // The raw gateway fallback calls this function directly and bypasses the
+    // messageCreate author.bot guard.
+    if (message?.author?.bot) return false;
     const messageGuildId = message?.guildId || message?.guild?.id;
     if (!messageGuildId) return false;
     const messageChannelId = message.channelId || message.channel?.id;
@@ -5735,9 +5739,10 @@ client.on('interactionCreate', async interaction => {
                         console.warn('⚠️ AVA image attachment fallback for ' + selectedName + ': ' + imageErr.message);
                     }
 
+                    const tierLabel = String(data.tier || '').match(/T[468]/i)?.[0]?.toUpperCase() ||
+                        (String(data.name || '').toLowerCase().includes('sasitos-umogaum') ? 'T4' : 'Tier unavailable');
                     const reportPayload = {
-                        content: '✅ ข้อมูลแมฟ **' + data.name + '**',
-                        embeds: [createAvaResultEmbed(data, selectedName, Boolean(imageBuffer))],
+                        content: '🗺️ **' + data.name + '** • **' + tierLabel + '**',
                         ...(imageBuffer ? { files: [new AttachmentBuilder(imageBuffer, { name: 'ava-map.png' })] } : {})
                     };
                     // Upload through the channel message endpoint instead of
@@ -6041,6 +6046,9 @@ client.on('interactionCreate', async interaction => {
 client.on('raw', async packet => {
     if (packet?.t !== 'MESSAGE_CREATE') return;
     const data = packet.d || {};
+    // The bot's report contains the map image attachment. Ignore it before
+    // fetching the message or entering the AVA OCR pipeline.
+    if (data.author?.bot || (client.user?.id && String(data.author.id) === String(client.user.id))) return;
     const guildId = String(data.guild_id || '');
     const channelId = String(data.channel_id || '');
     const messageId = String(data.id || '');
