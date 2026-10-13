@@ -5735,12 +5735,27 @@ client.on('interactionCreate', async interaction => {
                         console.warn('⚠️ AVA image attachment fallback for ' + selectedName + ': ' + imageErr.message);
                     }
 
-                    await interaction.editReply({
-                        content: '✅ เลือกแมพได้: **' + data.name + '** • **' + (String(data.tier || '').match(/T[468]/i)?.[0]?.toUpperCase() || (String(data.name || '').toLowerCase().includes('sasitos-umogaum') ? 'T4' : 'Tier unavailable')) + '**',
+                    const reportPayload = {
+                        content: '✅ ข้อมูลแมฟ **' + data.name + '**',
                         embeds: [createAvaResultEmbed(data, selectedName, Boolean(imageBuffer))],
-                        components: [],
                         ...(imageBuffer ? { files: [new AttachmentBuilder(imageBuffer, { name: 'ava-map.png' })] } : {})
-                    });
+                    };
+                    // Upload through the channel message endpoint instead of
+                    // editing the component interaction with a file. Some
+                    // Discord clients/gateways leave the interaction message
+                    // stuck at “กำลังค้นหา...” when editReply includes files.
+                    if (interaction.channel?.send) {
+                        await interaction.channel.send(reportPayload);
+                        await interaction.editReply({
+                            content: '✅ ส่งรูปข้อมูลแมฟ **' + data.name + '** แล้ว',
+                            components: []
+                        });
+                    } else {
+                        await interaction.editReply({
+                            ...reportPayload,
+                            components: []
+                        });
+                    }
                     console.log('✅ AVA map report sent: map=' + data.name + ' image=' + (imageBuffer ? 'yes' : 'no') + ' points=' + avaDataPointCount(data));
                 } catch (err) {
                     console.error('❌ AVA selected map lookup error for ' + selectedName + ':', err);
