@@ -1755,7 +1755,14 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
 
     const allSortedRows = [...reportStats.values()].sort((a, b) => b.fame - a.fame || b.kills - a.kills || b.damage - a.damage);
 
-    const guildNamesList = customTargetGuilds.map(g => typeof g === 'string' ? g : g.name);
+    // `customTargetGuilds` is used by manual reports. For Auto-Battle,
+    // the source guild is only used to find the battle and must not become
+    // the tracking scope. Auto-Battle tracking comes from /add player and
+    // /add guild instead.
+    const guildNamesList = (Array.isArray(options.trackedGuilds)
+        ? options.trackedGuilds
+        : customTargetGuilds
+    ).map(g => typeof g === 'string' ? g : g?.name).filter(Boolean);
 
     // Resolve the tracking list explicitly from the Discord server that owns
     // this report. Do not rely only on the AsyncLocalStorage getter here:
@@ -1774,7 +1781,7 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
     const hasTrackedGuilds = guildNamesList.length > 0;
 
     const rows = allSortedRows.filter(p => {
-        if (!hasTrackedPlayers && !hasTrackedGuilds) return true;
+        if (!hasTrackedPlayers && !hasTrackedGuilds) return options.autoBattle ? false : true;
 
         const playerName = String(p.displayName || p.name || '').trim().toLowerCase();
         const isExplicitPlayer = trackedPlayers.some(
@@ -1783,10 +1790,9 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
 
         const isGuildMatch = isExactGuildMatch(p.guild, guildNamesList);
 
-        // Auto-Battle is configured per target guild, so guild scope must take
-        // precedence over the server's /add player list.
-        if (options.autoBattle && hasTrackedGuilds) return isGuildMatch;
-
+        // Auto-Battle's target guild is only the battle source. The rows
+        // must be the union of /add player and /add guild tracking scopes.
+        // This prevents unrelated members of the source guild from appearing.
         // Manual battle-link reports combine both tracking scopes:
         // explicitly tracked players PLUS every member of each tracked guild.
         // If only one scope is configured, keep that scope strict.
@@ -1796,24 +1802,16 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
         return true;
     });
 
-    // Auto-Battle threshold metrics follow the active tracking scope:
-    // /add player => ONLY tracked players; /add guild => tracked guild roster.
-    // This prevents unrelated guild members from contributing to the threshold.
-    const guildMetricRows = hasTrackedGuilds
-        ? allSortedRows.filter(p => isExactGuildMatch(p.guild, guildNamesList))
-        : rows;
-    const metricRows = options.autoBattle && hasTrackedPlayers ? rows : (options.autoBattle && hasTrackedGuilds ? guildMetricRows : rows);
-
+    // Threshold metrics must use exactly the same tracked rows that are
+    // rendered in the report: /add player plus /add guild, never the
+    // Auto-Battle source guild's full roster.
+    const metricRows = rows;
     let totalKills = 0, totalDeaths = 0, totalFame = 0;
     let guildTotalFrames = 0;
-
     for (const p of metricRows) {
         totalKills += p.kills;
         totalDeaths += p.deaths;
         totalFame += p.fame;
-    }
-
-    for (const p of guildMetricRows) {
         guildTotalFrames += (p.kills + p.deaths);
     }
 
@@ -2264,19 +2262,30 @@ async function checkAutoBattlesForGuild() {
                 }
 
                 const trackedConfig = getGuildConfig(config.guildId, false);
+                const trackedGuilds = Array.isArray(trackedConfig?.guilds)
+                    ? trackedConfig.guilds
+                        .map(g => typeof g === 'string' ? g : g?.name)
+                        .filter(Boolean)
+                    : [];
+                const trackedPlayers = Array.isArray(trackedConfig?.players)
+                    ? trackedConfig.players
+                    : [];
+
                 const result = await buildBattleReportPayload(
                     latestMatchId,
-                    [config.targetGuild],
+                    [], // Auto-Battle source guild is not a tracking scope.
                     {
                         autoBattle: true,
                         guildId: config.guildId,
                         apiData: officialBattle,
-                        trackedPlayers: Array.isArray(trackedConfig?.players) ? trackedConfig.players : []
+                        trackedPlayers,
+                        trackedGuilds
                     }
                 );
-
                 const checkValue = config.minFrames;
-                if (result.guildTotalFrames >= checkValue || result.totalFame >= checkValue) {
+                // min_frames means total Kills + Deaths from tracked players/
+                // tracked guild members only. Fame must not trigger the alert.
+                if (result.guildTotalFrames >= checkValue) {
                     const channel = await client.channels.fetch(config.channelId).catch(() => null);
                     if (!channel || typeof channel.send !== 'function') {
                         console.warn(`⚠️ Auto-Battle channel unavailable for Match ID ${latestMatchId}; will retry next poll.`);
