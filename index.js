@@ -5611,30 +5611,12 @@ client.on('interactionCreate', async interaction => {
                         components: []
                     });
 
-                    // Dropdown candidates can include OCR aliases when the authoritative
-                    // index is temporarily unavailable. Resolve to the canonical indexed
-                    // map before querying POI providers, but preserve a valid user choice.
-                    let canonicalName = selectedName;
-                    try {
-                        const canonicalNames = await fetchAuthoritativeAvaMapIndex();
-                        const exact = canonicalNames.find(name =>
-                            normalizeAvaLookupName(name) === normalizeAvaLookupName(selectedName)
-                        );
-                        if (exact) {
-                            canonicalName = exact;
-                        } else {
-                            const ranked = canonicalNames.map(name => ({
-                                name,
-                                score: avaNameSimilarity(normalizeAvaOcrMapName(selectedName), name)
-                            })).sort((a, b) => b.score - a.score);
-                            if (ranked[0] && ranked[0].score >= 0.62) {
-                                canonicalName = ranked[0].name;
-                                console.log('🗺️ AVA selected OCR alias corrected: ' + selectedName + ' -> ' + canonicalName + ' (' + ranked[0].score.toFixed(3) + ')');
-                            }
-                        }
-                    } catch (resolveErr) {
-                        console.warn('⚠️ AVA selected-name canonicalization unavailable: ' + resolveErr.message);
-                    }
+                    // Keep the original AVA selection flow: the fallback resolver already
+                    // handles OCR aliases. Do not refetch the authoritative index here,
+                    // because a slow index request can stall the selected-map interaction.
+                    const canonicalName = selectedName;
+                    console.log('🗺️ AVA lookup starting: selected=' + selectedName +
+                        ' candidates=' + JSON.stringify([selectedName, ...pending.ocrCandidates].slice(0, 8)));
 
                     const data = await fetchAvaMapDataWithFallback(canonicalName, [canonicalName, selectedName, ...pending.ocrCandidates]);
                     const card = await generateAvaRoadsCard(data, pending.ocrName);
