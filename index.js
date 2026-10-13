@@ -3890,7 +3890,7 @@ async function fetchAlternativeAvaMapIndex() {
     return [];
 }
 
-async function getAvaMapSuggestions(ocrCandidates = [], limit = 5) {
+async function getAvaMapSuggestions(ocrCandidates = [], limit = 3) {
     const rawInputs = [...new Set(ocrCandidates.filter(Boolean).map(String).filter(Boolean))];
     const normalizedInputs = rawInputs
         .map(value => normalizeAvaOcrMapName(value).replace(/\s+/g, ''))
@@ -3927,6 +3927,14 @@ async function getAvaMapSuggestions(ocrCandidates = [], limit = 5) {
         }));
     }
 
+    const getAvaInitialKey = value => {
+        const parts = normalizeAvaLookupName(value).split('-').filter(Boolean);
+        return parts.length >= 2 ? parts[0][0] + parts[1][0] : '';
+    };
+    const ocrInitialKeys = new Set(normalizedInputs.map(getAvaInitialKey).filter(Boolean));
+    const ocrFirstInitials = new Set([...ocrInitialKeys].map(key => key[0]));
+    const ocrSecondInitials = new Set([...ocrInitialKeys].map(key => key[1]));
+
     const ranked = canonicalNames.map(name => {
         const normalizedName = normalizeAvaLookupName(name);
         let score = 0;
@@ -3944,13 +3952,32 @@ async function getAvaMapSuggestions(ocrCandidates = [], limit = 5) {
             }
         }
 
-        return { name, score, exact: normalizedInputs.some(input => input === normalizedName) };
-    }).sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
+        const initialKey = getAvaInitialKey(name);
+        const sameInitialKey = Boolean(initialKey && ocrInitialKeys.has(initialKey));
+        const sameFirstInitial = Boolean(initialKey && ocrFirstInitials.has(initialKey[0]));
+        const sameSecondInitial = Boolean(initialKey && ocrSecondInitials.has(initialKey[1]));
+        return {
+            name, score, initialKey, sameInitialKey, sameFirstInitial, sameSecondInitial,
+            exact: normalizedInputs.some(input => input === normalizedName)
+        };
+    }).sort((a, b) => {
+        // First prefer the same first letters on both sides of the hyphen,
+        // then normal similarity. This prevents unrelated names such as
+        // Fonitos/Ponitos from displacing Tonitos/Tynos/Tasitos.
+        if (a.sameInitialKey !== b.sameInitialKey) return Number(b.sameInitialKey) - Number(a.sameInitialKey);
+        if (a.sameFirstInitial !== b.sameFirstInitial) return Number(b.sameFirstInitial) - Number(a.sameFirstInitial);
+        if (a.sameSecondInitial !== b.sameSecondInitial) return Number(b.sameSecondInitial) - Number(a.sameSecondInitial);
+        return b.score - a.score || a.name.localeCompare(b.name);
+    });
 
-    // Always provide a selection when we have real Avalon names, even if OCR
-    // confidence is low. The user can visually compare the five closest names.
+    // Keep three options, primarily from names matching both OCR initials.
+    // If the authoritative index has fewer than three exact-initial matches,
+    // fill the remainder with names matching either side, then similarity.
     const selected = [];
-    for (const item of ranked) {
+    const preferred = ranked.filter(item => item.sameInitialKey);
+    const relaxed = ranked.filter(item => !item.sameInitialKey && (item.sameFirstInitial || item.sameSecondInitial));
+    const fallback = ranked.filter(item => !item.sameInitialKey && !item.sameFirstInitial && !item.sameSecondInitial);
+    for (const item of [...preferred, ...relaxed, ...fallback]) {
         if (selected.some(x => normalizeAvaLookupName(x.name) === normalizeAvaLookupName(item.name))) continue;
         selected.push(item);
         if (selected.length >= limit) break;
@@ -5134,7 +5161,7 @@ async function processAvaImageMessage(message, fallbackAttachments = []) {
         }
 
         const ocrCandidates = [ocr.mapName, ...(ocr.candidates || [])].filter(Boolean);
-        const suggestions = await getAvaMapSuggestions(ocrCandidates, 5);
+        const suggestions = await getAvaMapSuggestions(ocrCandidates, 3);
         const top = suggestions[0];
 
         // Never auto-process here. The user must always choose a real map name
@@ -5658,7 +5685,7 @@ client.on('interactionCreate', async interaction => {
                 try {
                     const ocr = await detectAvaMapNameFromImage(pending.imageBuffer);
                     const ocrCandidates = [ocr?.mapName, ...(ocr?.candidates || [])].filter(Boolean);
-                    const suggestions = await getAvaMapSuggestions(ocrCandidates, 5);
+                    const suggestions = await getAvaMapSuggestions(ocrCandidates, 3);
 
                     pending.ocrName = ocr?.mapName || pending.ocrName;
                     pending.ocrCandidates = ocrCandidates;
