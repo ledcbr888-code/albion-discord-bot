@@ -465,6 +465,42 @@ function getApiUrls(matchId) {
     ];
 }
 
+const GAMEINFO_EAST_BASE = 'https://gameinfo-sgp.albiononline.com/api/gameinfo';
+const GAMEINFO_GLOBAL_BASE = 'https://gameinfo.albiononline.com/api/gameinfo';
+function getGuildIdFromObject(g) { return String(g?.id ?? g?.Id ?? g?.guildId ?? g?.GuildId ?? '').trim(); }
+function battleContainsGuildId(battle, guildId) {
+    const id=String(guildId||'').trim(); if(!id||!battle)return false;
+    const gs=battle.guilds??battle.Guilds, gv=Array.isArray(gs)?gs:(gs&&typeof gs==='object'?Object.values(gs):[]);
+    if(gv.some(g=>getGuildIdFromObject(g)===id))return true;
+    const ps=battle.players??battle.Players, pv=Array.isArray(ps)?ps:(ps&&typeof ps==='object'?Object.values(ps):[]);
+    return pv.some(p=>String(p?.guildId??p?.GuildId??p?.guild?.id??p?.Guild?.Id??'').trim()===id);
+}
+async function resolveTrackedGuildId(name) {
+    const wanted=String(name||'').trim(); if(!wanted)return null;
+    for(const base of [GAMEINFO_EAST_BASE,GAMEINFO_GLOBAL_BASE]) { try {
+        const r=await axios.get(base+'/search',{timeout:15000,headers:{'User-Agent':'Mozilla/5.0',Accept:'application/json'},params:{q:wanted}});
+        const found=new Map();
+        for(const g of (Array.isArray(r.data?.guilds)?r.data.guilds:[])) { const n=String(g?.Name??g?.name??'').trim(), id=getGuildIdFromObject(g); if(n.toLowerCase()===wanted.toLowerCase()&&id)found.set(id,n); }
+        if(found.size===1)return {guildId:[...found.keys()][0],name:[...found.values()][0]};
+        if(found.size>1)throw new Error('พบชื่อกิลด์ซ้ำ: '+[...found.entries()].map(([id,n])=>n+' ('+id+')').join(', '));
+    } catch(e) { if(String(e.message).startsWith('พบชื่อกิลด์ซ้ำ'))throw e; console.warn('Guild ID resolve failed: '+(e.response?.status||e.message)); } }
+    return null;
+}
+async function fetchGuildRecentBattlesById(config) {
+    if(!config.targetGuildId) { const identity=await resolveTrackedGuildId(config.targetGuild); if(identity) { config.targetGuildId=identity.guildId; config.targetGuild=identity.name; saveData(); console.log('Auto-Battle migrated '+config.targetGuild+' to Guild ID '+config.targetGuildId); } }
+    const id=String(config.targetGuildId||'').trim();
+    if(id) for(const base of [GAMEINFO_EAST_BASE,GAMEINFO_GLOBAL_BASE]) { try {
+        const r=await axios.get(base+'/battles',{timeout:18000,headers:{'User-Agent':'Mozilla/5.0',Accept:'application/json'},params:{guildId:id,limit:51,sort:'recent'}});
+        const data=r.data, rows=Array.isArray(data)?data:(Array.isArray(data?.battles)?data.battles:[]);
+        const ids=[...new Set(rows.map(x=>String(x?.id??x?.Id??x?.battleId??x?.BattleId??'')).filter(x=>/^\\d+$/.test(x)))], verified=[];
+        for(const matchId of ids.slice(0,10)){const battle=await fetchOfficialBattle(matchId).catch(()=>null);if(battle&&battleContainsGuildId(battle,id))verified.push(matchId);}
+        if(verified.length){console.log('GameInfo Guild ID search verified '+verified.length+' battle(s) for '+config.targetGuild+' ('+id+')');return verified;}
+        console.log('GameInfo returned no verified recent battles for '+id+' at '+base);
+    } catch(e){console.warn('GameInfo Guild ID search failed: '+(e.response?.status||e.message));} }
+    console.warn('Using name-based archive fallback for '+(config.targetGuild||id));
+    return fetchGuildRecentBattles(config.targetGuild||id);
+}
+
 function extractMainHandInfo(obj) {
     if (!obj || typeof obj !== 'object') return null;
 
@@ -2195,7 +2231,7 @@ async function primeAutoBattleHistoryForGuild(configs = autoBattleConfigs) {
     let added = 0;
     for (const config of configs) {
         try {
-            const recentMatches = await fetchGuildRecentBattles(config.targetGuild);
+            const recentMatches = await fetchGuildRecentBattlesById(config);
             for (const id of recentMatches) {
                 const key = String(id);
                 if (!processedBattles.has(key)) {
@@ -2231,7 +2267,7 @@ async function checkAutoBattlesForGuild() {
     autoBattleCheckRunning = true;
     try {
         for (const config of autoBattleConfigs) {
-            const recentMatches = await fetchGuildRecentBattles(config.targetGuild);
+            const recentMatches = await fetchGuildRecentBattlesById(config);
             if (recentMatches === null || !recentMatches.length) continue;
 
             const newMatchIds = recentMatches.filter(id => !processedBattles.has(String(id)));
@@ -2251,11 +2287,9 @@ async function checkAutoBattlesForGuild() {
                     ? Object.values(officialBattle.guilds).map(g => g?.name).filter(Boolean)
                     : [];
 
-                if (!isExactGuildMatch(config.targetGuild, officialGuildNames)) {
-                    console.log(
-                        `⏭️ Skip Match ${latestMatchId}: tracked Guild "${config.targetGuild}" ` +
-                        `ไม่ตรงกับ Official Guilds: ${officialGuildNames.join(', ') || 'N/A'}`
-                    );
+                const guildVerified = config.targetGuildId ? battleContainsGuildId(officialBattle, config.targetGuildId) : isExactGuildMatch(config.targetGuild, officialGuildNames);
+                if (!guildVerified) {
+                    console.log(`⏭️ Skip Match ${latestMatchId}: tracked Guild "${config.targetGuild}" (${config.targetGuildId || 'legacy name-only'}) does not match Battle Guild ID/name data.`);
                     // Do not globally mark an unrelated candidate as processed;
                     // this battle may later be discovered for another tracked guild.
                     continue;
@@ -5912,11 +5946,11 @@ client.on('interactionCreate', async interaction => {
             } else {
                 autoBattleConfigs.push(configData);
             }
-            const recentMatches = await fetchGuildRecentBattles(guildName);
+            const recentMatches = await fetchGuildRecentBattlesById(configData);
             // When creating/reconfiguring the tracker, mark older visible fights as
             // seen but leave the newest battle eligible for the next polling pass.
             // This avoids silently skipping a just-published report during setup.
-            const existingIds = recentMatches.map(String);
+            const existingIds = Array.isArray(recentMatches) ? recentMatches.map(String) : [];
             const newestId = existingIds[0] || null;
             for (const id of existingIds) {
                 if (id !== newestId) processedBattles.add(id);
