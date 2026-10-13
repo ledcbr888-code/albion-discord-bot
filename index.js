@@ -492,7 +492,7 @@ async function fetchGuildRecentBattlesById(config) {
     if(id) for(const base of [GAMEINFO_EAST_BASE,GAMEINFO_GLOBAL_BASE]) { try {
         const r=await axios.get(base+'/battles',{timeout:18000,headers:{'User-Agent':'Mozilla/5.0',Accept:'application/json'},params:{guildId:id,limit:51,sort:'recent'}});
         const data=r.data, rows=Array.isArray(data)?data:(Array.isArray(data?.battles)?data.battles:[]);
-        const ids=[...new Set(rows.map(x=>String(x?.id??x?.Id??x?.battleId??x?.BattleId??'')).filter(x=>/^\\d+$/.test(x)))], verified=[];
+        const ids=[...new Set(rows.map(x=>String(x?.id??x?.Id??x?.battleId??x?.BattleId??'')).filter(x=>/^\d+$/.test(x)))], verified=[];
         for(const matchId of ids.slice(0,10)){const battle=await fetchOfficialBattle(matchId).catch(()=>null);if(battle&&battleContainsGuildId(battle,id))verified.push(matchId);}
         if(verified.length){console.log('GameInfo Guild ID search verified '+verified.length+' battle(s) for '+config.targetGuild+' ('+id+')');return verified;}
         console.log('GameInfo returned no verified recent battles for '+id+' at '+base);
