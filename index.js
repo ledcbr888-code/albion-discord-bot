@@ -2034,110 +2034,141 @@ async function processBattleReport(input, targetContext, isMessage = false) {
     }
 }
 
-function parseGuildReference(value) {
-    const raw = String(value || '').trim();
-    const urlMatch = raw.match(/\/guilds\/([A-Za-z0-9_-]+)(?:\/|$)/i);
-    const id = urlMatch?.[1] || (/^[A-Za-z0-9_-]{16,}$/.test(raw) ? raw : '');
-    return { name: id ? '' : raw, id };
-}
-
-function extractBattleIdsFromHtml(html) {
-    const source = String(html || '');
-    const ids = [];
-    const add = value => {
-        const id = String(value || '').trim();
-        if (/^\d+$/.test(id)) ids.push(id);
-    };
-    try {
-        const $ = cheerio.load(source);
-        $('a[href*="/battles/"]').each((_, el) => {
-            const match = String($(el).attr('href') || '').match(/\/battles\/(\d+)(?:[/?#]|$)/i);
-            if (match) add(match[1]);
-        });
-    } catch (_) {}
-    for (const match of source.matchAll(/(?:\\?\/)battles\\?\/(\d+)(?=[/?#"'&\s)\\]|$)/gi)) add(match[1]);
-    return [...new Set(ids)];
-}
-
-async function fetchGuildRecentBattles(guildOrConfig) {
-    const config = guildOrConfig && typeof guildOrConfig === 'object' ? guildOrConfig : {};
-    const rawTarget = typeof guildOrConfig === 'string' ? guildOrConfig : (config.targetGuild || '');
-    const parsed = parseGuildReference(config.targetGuildId || rawTarget);
-    const targetGuildId = String(config.targetGuildId || parsed.id || '').trim();
-    const targetGuild = String(config.targetGuild || parsed.name || '').trim();
-    if (!targetGuildId && !targetGuild) return null;
+async function fetchGuildRecentBattles(guildName) {
+    const targetGuild = String(guildName || '').trim();
+    if (!targetGuild) return null;
+    const normalizedTarget = targetGuild.toLowerCase();
     let lastError = null;
+
+    // Search query parameters can be ignored, and broad DOM ancestors can contain
+    // the search-box text. Verify candidates against official guild data instead.
     const officialCache = fetchGuildRecentBattles._officialCache || (fetchGuildRecentBattles._officialCache = new Map());
-    const verify = async (ids) => {
-        const matched=[];
-        for (const id of [...new Set(ids)]) {
+    const filterMatchingGuildBattles = async (ids) => {
+        const matched = [];
+        // Limit API verification to a few candidates; archive card text is preferred.
+        for (const id of [...new Set(ids)].slice(0, 5)) {
             if (officialApiRateLimitedUntil > Date.now()) break;
-            let cached=officialCache.get(String(id));
+            let cached = officialCache.get(String(id));
             if (!cached || cached.expiresAt <= Date.now()) {
-                cached={data:await fetchOfficialBattle(id).catch(()=>null), expiresAt:Date.now()+180000};
-                officialCache.set(String(id),cached);
-                if (officialCache.size>250) officialCache.delete(officialCache.keys().next().value);
+                const data = await fetchOfficialBattle(id).catch(() => null);
+                cached = { data, expiresAt: Date.now() + 3 * 60 * 1000 };
+                officialCache.set(String(id), cached);
+                if (officialCache.size > 250) officialCache.delete(officialCache.keys().next().value);
             }
-            const names=cached.data?.guilds ? Object.values(cached.data.guilds).map(g=>g?.name).filter(Boolean) : [];
-            if (!targetGuild || isExactGuildMatch(targetGuild,names)) matched.push(String(id));
+            const guildNames = cached.data?.guilds
+                ? Object.values(cached.data.guilds).map(g => g?.name).filter(Boolean)
+                : [];
+            if (isExactGuildMatch(targetGuild, guildNames)) matched.push(String(id));
         }
         return matched;
     };
-    if (targetGuildId) {
-        // Primary source: Albion's Gameinfo API for the Asia/East server.
-        // This endpoint supports guildId directly and avoids AlbionBB's
-        // Cloudflare/API restrictions on Render.
-        const apiUrl = 'https://gameinfo-sgp.albiononline.com/api/gameinfo/battles';
-        try {
-            const response = await axios.get(apiUrl, {
-                timeout: 20000,
-                headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
-                params: {
-                    range: 'week', offset: 0, limit: 50,
-                    sort: 'recent', guildId: targetGuildId
-                }
-            });
-            const rows = Array.isArray(response.data) ? response.data : [];
-            const unique = [...new Set(rows
-                .map(row => row?.id ?? row?.albionId ?? row?.battleId)
-                .filter(id => /^\d+$/.test(String(id)))
-                .map(String))];
-            if (unique.length) {
-                console.log(`✅ Official Gameinfo Asia Guild ID ${targetGuildId} (${targetGuild || 'unknown'}) returned ${unique.length} Battle ID(s).`);
-                return unique;
-            }
-            console.warn(`⚠️ Official Gameinfo API returned no Battle IDs for Guild ID ${targetGuildId}.`);
-        } catch (e) {
-            lastError = e;
-            console.warn(`⚠️ Official Gameinfo Asia Guild ID lookup failed for ${targetGuildId}: ${e.response?.status || e.message}`);
-        }
+    let sawValidSourcePage = false;
 
-        // Secondary source: AlbionBB, retained only as a fallback.
-        const url=`https://east.albionbb.com/guilds/${encodeURIComponent(targetGuildId)}/battles`;
-        try {
-            const html = String(await cloudscraper.get(url,{timeout:20000}) || '');
-            const unique = extractBattleIdsFromHtml(html);
-            const good=await verify(unique);
-            if (!unique.length) console.warn(`⚠️ AlbionBB Guild ID page returned no Battle links: ${url} (HTML ${html.length} chars).`);
-            console.log(`✅ AlbionBB Guild ID ${targetGuildId} (${targetGuild||'unknown'}) verified ${good.length}/${unique.length} battle(s).`);
-            if (good.length) return good;
-        } catch(e) { lastError=e; console.warn(`⚠️ AlbionBB Guild ID fallback failed for ${targetGuildId}: ${e.message}`); }
-    }
-    if (!targetGuild) return null;
-    const urls=[
-        'https://albionbattles.com/east?search='+encodeURIComponent(targetGuild)+'&minPlayers=1',
-        'https://albionbattles.com/east?q='+encodeURIComponent(targetGuild)+'&minPlayers=1',
+    // Primary discovery source: AlbionBattles East. Search URLs are attempted
+    // first, then the live archive itself. Only accept IDs whose individual
+    // report card contains the tracked guild name; never treat an unfiltered
+    // page full of unrelated battles as a successful guild search.
+    const albionBattlesUrls = [
+        'https://albionbattles.com/east?search=' + encodeURIComponent(targetGuild) + '&minPlayers=1',
+        'https://albionbattles.com/east?q=' + encodeURIComponent(targetGuild) + '&minPlayers=1',
         'https://albionbattles.com/east'
     ];
-    for (const url of urls) try {
-        const html = String(await cloudscraper.get(url,{timeout:20000}) || '');
-        const unique = extractBattleIdsFromHtml(html), good=await verify(unique);
-        if(good.length){ console.log(`✅ AlbionBattles Official-verified ${good.length}/${unique.length} battle(s) for ${targetGuild}.`); return good; }
-    } catch(e) { lastError=e; console.warn(`⚠️ AlbionBattles discovery failed for ${targetGuild}: ${e.message}`); }
-    console.warn(`❌ No Official-verified battles found for ${targetGuild}; leaving battles unprocessed: ${lastError?.message||'none'}`);
-    return [];
-}
 
+    for (const url of albionBattlesUrls) {
+        try {
+            const html = await cloudscraper.get(url, { timeout: 20000 });
+            if (!html || typeof html !== 'string' || !html.length) {
+                throw new Error('AlbionBattles returned an empty response');
+            }
+
+            const $ = cheerio.load(html);
+            const pageText = ($('title').text() + ' ' + $('body').text()).replace(/\s+/g, ' ');
+            if (!/Albion Battles|EAST live archive|Find your battle/i.test(pageText)) {
+                throw new Error('Unexpected AlbionBattles response; no recognizable East battle archive');
+            }
+            sawValidSourcePage = true;
+
+            const candidateIds = [];
+            const cardMatchedIds = [];
+            $('a[href*="/battles/"]').each((_, el) => {
+                const href = $(el).attr('href') || '';
+                const match = href.match(/\/battles\/(\d+)(?:[/?#]|$)/i);
+                if (!match || !match[1]) return;
+                candidateIds.push(match[1]);
+
+                // Prefer the guild names shown on each individual archive card.
+                // This avoids one official API call per historical report.
+                let node = el;
+                for (let depth = 0; node && depth < 7; depth++, node = node.parent) {
+                    const cardText = $(node).text().replace(/\s+/g, ' ').trim().toLowerCase();
+                    if (cardText.length > 0 && cardText.length < 1800 &&
+                        cardText.includes(String(match[1])) && cardText.includes(normalizedTarget)) {
+                        cardMatchedIds.push(match[1]);
+                        break;
+                    }
+                }
+            });
+
+            const uniqueIds = [...new Set(candidateIds)];
+            const cardMatchedUnique = [...new Set(cardMatchedIds)];
+            const matchingIds = cardMatchedUnique.length
+                ? cardMatchedUnique
+                : await filterMatchingGuildBattles(uniqueIds);
+            if (matchingIds.length) {
+                console.log('✅ AlbionBattles East verified ' + matchingIds.length + ' battle(s) for ' + targetGuild + ' (checked ' + uniqueIds.length + ' archive link(s)).');
+                return matchingIds;
+            }
+        } catch (err) {
+            lastError = err;
+            console.warn('⚠️ AlbionBattles discovery failed for ' + targetGuild + ' (' + url + '): ' + err.message);
+        }
+    }
+
+    console.warn('⚠️ AlbionBattles returned no matching recent reports for ' + targetGuild + '; trying AlbionBB fallback.');
+
+    // Secondary discovery source: AlbionBB's searchable battle list.
+    // Keep this fallback so existing installations still work if AlbionBattles
+    // blocks the host, changes its markup, or has not indexed the battle yet.
+    const searchUrl = 'https://east.albionbb.com/?search=' + encodeURIComponent(targetGuild) + '&minPlayers=1&_=' + Date.now();
+    let sawValidAlbionBBPage = false;
+    for (let attempt = 1; attempt <= 3; attempt++) {
+        try {
+            const searchRes = await cloudscraper.get(searchUrl, { timeout: 20000 });
+            if (!searchRes || typeof searchRes !== 'string' || !searchRes.length) {
+                throw new Error('AlbionBB returned an empty response');
+            }
+            const $ = cheerio.load(searchRes);
+            const matchIds = [];
+            $('a[href*="/battles/"]').each((_, el) => {
+                const href = $(el).attr('href');
+                const match = href ? href.match(/\/battles\/(\d+)/i) : null;
+                if (match && match[1]) matchIds.push(match[1]);
+            });
+            const pageText = $('title').text() + ' ' + $('body').text();
+            if (!matchIds.length && !/battle|search|albion/i.test(pageText)) {
+                throw new Error('Unexpected AlbionBB response; no recognizable search page');
+            }
+            sawValidAlbionBBPage = true;
+            const uniqueIds = [...new Set(matchIds)];
+            const matchingIds = await filterMatchingGuildBattles(uniqueIds);
+            if (matchingIds.length) {
+                console.log('✅ AlbionBB fallback verified ' + matchingIds.length + ' battle(s) for ' + targetGuild + ' (checked ' + uniqueIds.length + ' archive link(s)).');
+                return matchingIds;
+            }
+        } catch (err) {
+            lastError = err;
+            console.warn('⚠️ AlbionBB fallback attempt ' + attempt + '/3 for ' + targetGuild + ': ' + err.message);
+            if (attempt < 3) await new Promise(resolve => setTimeout(resolve, attempt * 1000));
+        }
+    }
+
+    if (sawValidAlbionBBPage) {
+        console.log('ℹ️ No new battle IDs found for tracked guild ' + targetGuild + ' on AlbionBattles or AlbionBB.');
+        return [];
+    }
+    console.warn('❌ Could not fetch battle listings for ' + targetGuild + '; leaving battles unprocessed: ' + (lastError?.message || 'unknown error'));
+    return null;
+}
 async function primeAutoBattleHistory() {
     // Only seed the recent-history baseline on a truly fresh install.
     // On normal restarts, do NOT mark every currently visible battle as seen:
@@ -2164,7 +2195,7 @@ async function primeAutoBattleHistoryForGuild(configs = autoBattleConfigs) {
     let added = 0;
     for (const config of configs) {
         try {
-            const recentMatches = await fetchGuildRecentBattles(config);
+            const recentMatches = await fetchGuildRecentBattles(config.targetGuild);
             for (const id of recentMatches) {
                 const key = String(id);
                 if (!processedBattles.has(key)) {
@@ -2200,7 +2231,7 @@ async function checkAutoBattlesForGuild() {
     autoBattleCheckRunning = true;
     try {
         for (const config of autoBattleConfigs) {
-            const recentMatches = await fetchGuildRecentBattles(config);
+            const recentMatches = await fetchGuildRecentBattles(config.targetGuild);
             if (recentMatches === null || !recentMatches.length) continue;
 
             const newMatchIds = recentMatches.filter(id => !processedBattles.has(String(id)));
@@ -2220,7 +2251,7 @@ async function checkAutoBattlesForGuild() {
                     ? Object.values(officialBattle.guilds).map(g => g?.name).filter(Boolean)
                     : [];
 
-                if (config.targetGuild && !isExactGuildMatch(config.targetGuild, officialGuildNames)) {
+                if (!isExactGuildMatch(config.targetGuild, officialGuildNames)) {
                     console.log(
                         `⏭️ Skip Match ${latestMatchId}: tracked Guild "${config.targetGuild}" ` +
                         `ไม่ตรงกับ Official Guilds: ${officialGuildNames.join(', ') || 'N/A'}`
@@ -5529,8 +5560,7 @@ const commands = [
         .addSubcommand(s => s.setName('set').setDescription('ตั้งค่าระบบติดตามไฟต์อัตโนมัติ')
             .addChannelOption(o => o.setName('channel').setDescription('ห้องที่ต้องการให้แจ้งเตือน').addChannelTypes(ChannelType.GuildText).setRequired(true))
             .addStringOption(o => o.setName('guild').setDescription('ชื่อ Guild ที่ต้องการติดตาม').setRequired(true))
-            .addStringOption(o => o.setName('min_frames').setDescription('จำนวนขั้นต่ำ เช่น 200K (Kills + Deaths ของรายการติดตาม)').setRequired(true))
-            .addStringOption(o => o.setName('guild_id').setDescription('Guild ID จาก AlbionBB เช่น 0SZ1Nlh7RfmuuuxS0lZ3kw')))
+            .addStringOption(o => o.setName('min_frames').setDescription('จำนวนขั้นต่ำ เช่น 200K (Fame หรือ Kills+Deaths)').setRequired(true)))
         .addSubcommand(s => s.setName('list').setDescription('แสดงรายชื่อกิลด์ที่ตั้งค่า Auto-Battle ในเซิร์ฟเวอร์นี้'))
         .addSubcommand(s => s.setName('remove').setDescription('ลบกิลด์ที่ตั้งค่า Auto-Battle ออก')
             .addStringOption(o => o.setName('guild').setDescription('ชื่อ Guild ที่ต้องการยกเลิกติดตาม Auto-Battle').setRequired(true))),
@@ -5861,69 +5891,47 @@ client.on('interactionCreate', async interaction => {
         if (sub === 'set') {
             await interaction.deferReply({ flags: 64 });
             const channel = interaction.options.getChannel('channel');
-            const guildInput = interaction.options.getString('guild').trim();
-            const explicitGuildId = interaction.options.getString('guild_id')?.trim() || '';
-            const parsedGuild = parseGuildReference(guildInput);
-            const guildName = parsedGuild.name || guildInput;
-            const targetGuildId = explicitGuildId || parsedGuild.id || '';
+            const guildName = interaction.options.getString('guild').trim();
             const minFramesInput = interaction.options.getString('min_frames');
             const minFrames = parseFameValue(minFramesInput);
 
             let existingConfigs = autoBattleConfigs.filter(c => c.guildId === interaction.guildId);
-            const duplicateIndex = existingConfigs.findIndex(c =>
-                (targetGuildId && c.targetGuildId === targetGuildId) ||
-                (c.targetGuild || '').toLowerCase() === guildName.toLowerCase()
-            );
+            const duplicateIndex = existingConfigs.findIndex(c => c.targetGuild.toLowerCase() === guildName.toLowerCase());
 
             const configData = {
                 guildId: interaction.guildId,
                 channelId: channel.id,
                 targetGuild: guildName,
-                targetGuildId: targetGuildId || undefined,
                 minFrames: minFrames,
                 createdAt: new Date().toISOString()
             };
 
             if (duplicateIndex >= 0) {
-                const globalIndex = autoBattleConfigs.findIndex(c => c.guildId === interaction.guildId && ((targetGuildId && c.targetGuildId === targetGuildId) || (c.targetGuild || '').toLowerCase() === guildName.toLowerCase()));
+                const globalIndex = autoBattleConfigs.findIndex(c => c.guildId === interaction.guildId && c.targetGuild.toLowerCase() === guildName.toLowerCase());
                 if (globalIndex >= 0) autoBattleConfigs[globalIndex] = configData;
             } else {
                 autoBattleConfigs.push(configData);
             }
+            const recentMatches = await fetchGuildRecentBattles(guildName);
+            // When creating/reconfiguring the tracker, mark older visible fights as
+            // seen but leave the newest battle eligible for the next polling pass.
+            // This avoids silently skipping a just-published report during setup.
+            const existingIds = recentMatches.map(String);
+            const newestId = existingIds[0] || null;
+            for (const id of existingIds) {
+                if (id !== newestId) processedBattles.add(id);
+            }
+            if (newestId) processedBattles.delete(newestId);
             saveData();
 
-            // Reply before contacting AlbionBB/Official API. Those requests can
-            // take longer than Discord's interaction window and previously left
-            // the user stuck on "กำลังคิด…" even though the config was saved.
-            await interaction.editReply({ content: `✅ ตั้งค่า **Auto-Battle Tracker** สำเร็จเรียบร้อย!\n- 🌐 เซิร์ฟเวอร์: **EAST (ตายตัว)**\n- 📢 ห้องแจ้งเตือน: <#${channel.id}>\n- 🛡️ กิลด์ที่ติดตาม: **${guildName}**${targetGuildId ? ` (ID: ${targetGuildId})` : ''}\n- ⚔️ ขั้นต่ำ Kills + Deaths: **${minFrames.toLocaleString()}**\n\n📌 *บันทึกการตั้งค่าแล้ว ระบบกำลังเตรียมรายการ Battle เบื้องหลัง และจะตรวจสอบไฟต์ใหม่ทุกๆ 5 นาทีครับ*` });
-
-            // Baseline asynchronously after the interaction has completed.
-            void (async () => {
-                try {
-                    const recentMatches = await fetchGuildRecentBattles(configData);
-                    const existingIds = Array.isArray(recentMatches) ? recentMatches.map(String) : [];
-                    // Mark older visible fights as seen but leave the newest one
-                    // eligible for the next polling pass.
-                    const newestId = existingIds[0] || null;
-                    for (const id of existingIds) {
-                        if (id !== newestId) processedBattles.add(id);
-                    }
-                    if (newestId) processedBattles.delete(newestId);
-                    saveData();
-                    console.log(`✅ Auto-Battle baseline completed for ${guildName}${targetGuildId ? ` (${targetGuildId})` : ''}: ${existingIds.length} battle(s).`);
-                } catch (err) {
-                    console.warn(`⚠️ Auto-Battle baseline failed for ${guildName}: ${err.message}`);
-                }
-            })();
-
-            return;
+            return interaction.editReply({ content: `✅ ตั้งค่า **Auto-Battle Tracker** สำเร็จเรียบร้อย!\n- 🌐 เซิร์ฟเวอร์: **EAST (ตายตัว)**\n- 📢 ห้องแจ้งเตือน: <#${channel.id}>\n- 🛡️ กิลด์ที่ติดตาม: **${guildName}**\n- ⚔️ ขั้นต่ำ: **${minFrames.toLocaleString()}**\n\n📌 *ระบบจะคอยตรวจสอบไฟต์การต่อสู้ใหม่ๆ ของกิลด์นี้ให้อัตโนมัติทุกๆ 5 นาทีครับ*`, flags: 64 });
         }
 
         if (sub === 'list') {
             const serverConfigs = autoBattleConfigs.filter(c => c.guildId === interaction.guildId);
             if (!serverConfigs.length) return interaction.reply({ content: '🛡️ เซิร์ฟเวอร์นี้ยังไม่มีการตั้งค่า Auto-Battle สำหรับกิลด์ใดๆ', flags: 64 });
 
-            let listText = serverConfigs.map((c, i) => `${i + 1}. กิลด์: **${c.targetGuild || c.targetGuildId}**${c.targetGuildId ? ` (ID: ${c.targetGuildId})` : ''} | ห้อง: <#${c.channelId}> | ขั้นต่ำ: **${(c.minFrames || 0).toLocaleString()}**`).join('\n');
+            let listText = serverConfigs.map((c, i) => `${i + 1}. กิลด์: **${c.targetGuild}** | ห้อง: <#${c.channelId}> | ขั้นต่ำ: **${(c.minFrames || 0).toLocaleString()}**`).join('\n');
             const embed = new EmbedBuilder()
                 .setColor(0x3498db)
                 .setTitle(`🛡️ รายชื่อกิลด์ที่ติดตาม Auto-Battle ในเซิร์ฟเวอร์นี้ (${serverConfigs.length})`)
