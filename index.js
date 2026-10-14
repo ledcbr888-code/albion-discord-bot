@@ -2041,6 +2041,24 @@ function parseGuildReference(value) {
     return { name: id ? '' : raw, id };
 }
 
+function extractBattleIdsFromHtml(html) {
+    const source = String(html || '');
+    const ids = [];
+    const add = value => {
+        const id = String(value || '').trim();
+        if (/^\d+$/.test(id)) ids.push(id);
+    };
+    try {
+        const $ = cheerio.load(source);
+        $('a[href*="/battles/"]').each((_, el) => {
+            const match = String($(el).attr('href') || '').match(/\/battles\/(\d+)(?:[/?#]|$)/i);
+            if (match) add(match[1]);
+        });
+    } catch (_) {}
+    for (const match of source.matchAll(/(?:\\?\/)battles\\?\/(\d+)(?=[/?#"'&\s)\\]|$)/gi)) add(match[1]);
+    return [...new Set(ids)];
+}
+
 async function fetchGuildRecentBattles(guildOrConfig) {
     const config = guildOrConfig && typeof guildOrConfig === 'object' ? guildOrConfig : {};
     const rawTarget = typeof guildOrConfig === 'string' ? guildOrConfig : (config.targetGuild || '');
@@ -2068,11 +2086,10 @@ async function fetchGuildRecentBattles(guildOrConfig) {
     if (targetGuildId) {
         const url=`https://east.albionbb.com/guilds/${encodeURIComponent(targetGuildId)}/battles`;
         try {
-            const $=cheerio.load(String(await cloudscraper.get(url,{timeout:20000})||''));
-            const ids=[];
-            $('a[href*="/battles/"]').each((_,el)=>{const m=String($(el).attr('href')||'').match(/\/battles\/(\d+)(?:[/?#]|$)/i); if(m) ids.push(m[1]);});
-            const unique=[...new Set(ids)];
+            const html = String(await cloudscraper.get(url,{timeout:20000}) || '');
+            const unique = extractBattleIdsFromHtml(html);
             const good=await verify(unique);
+            if (!unique.length) console.warn(`⚠️ AlbionBB Guild ID page returned no Battle links: ${url} (HTML ${html.length} chars).`);
             console.log(`✅ AlbionBB Guild ID ${targetGuildId} (${targetGuild||'unknown'}) verified ${good.length}/${unique.length} battle(s).`);
             return good;
         } catch(e) { lastError=e; console.warn(`⚠️ AlbionBB Guild ID lookup failed for ${targetGuildId}: ${e.message}`); }
@@ -2084,10 +2101,8 @@ async function fetchGuildRecentBattles(guildOrConfig) {
         'https://albionbattles.com/east'
     ];
     for (const url of urls) try {
-        const $=cheerio.load(String(await cloudscraper.get(url,{timeout:20000})||''));
-        const ids=[];
-        $('a[href*="/battles/"]').each((_,el)=>{const m=String($(el).attr('href')||'').match(/\/battles\/(\d+)(?:[/?#]|$)/i); if(m) ids.push(m[1]);});
-        const unique=[...new Set(ids)], good=await verify(unique);
+        const html = String(await cloudscraper.get(url,{timeout:20000}) || '');
+        const unique = extractBattleIdsFromHtml(html), good=await verify(unique);
         if(good.length){ console.log(`✅ AlbionBattles Official-verified ${good.length}/${unique.length} battle(s) for ${targetGuild}.`); return good; }
     } catch(e) { lastError=e; console.warn(`⚠️ AlbionBattles discovery failed for ${targetGuild}: ${e.message}`); }
     console.warn(`❌ No Official-verified battles found for ${targetGuild}; leaving battles unprocessed: ${lastError?.message||'none'}`);
@@ -5851,7 +5866,7 @@ client.on('interactionCreate', async interaction => {
             // Reply before contacting AlbionBB/Official API. Those requests can
             // take longer than Discord's interaction window and previously left
             // the user stuck on "กำลังคิด…" even though the config was saved.
-            await interaction.editReply({ content: `✅ ตั้งค่า **Auto-Battle Tracker** สำเร็จเรียบร้อย!\n- 🌐 เซิร์ฟเวอร์: **EAST (ตายตัว)**\n- 📢 ห้องแจ้งเตือน: <#${channel.id}>\n- 🛡️ กิลด์ที่ติดตาม: **${guildName}**${targetGuildId ? ` (ID: ${targetGuildId})` : ''}\n- ⚔️ ขั้นต่ำ Kills + Deaths: **${minFrames.toLocaleString()}**\n\n📌 *บันทึกการตั้งค่าแล้ว ระบบกำลังเตรียมรายการ Battle เบื้องหลัง และจะตรวจสอบไฟต์ใหม่ทุกๆ 5 นาทีครับ*`, flags: 64 });
+            await interaction.editReply({ content: `✅ ตั้งค่า **Auto-Battle Tracker** สำเร็จเรียบร้อย!\n- 🌐 เซิร์ฟเวอร์: **EAST (ตายตัว)**\n- 📢 ห้องแจ้งเตือน: <#${channel.id}>\n- 🛡️ กิลด์ที่ติดตาม: **${guildName}**${targetGuildId ? ` (ID: ${targetGuildId})` : ''}\n- ⚔️ ขั้นต่ำ Kills + Deaths: **${minFrames.toLocaleString()}**\n\n📌 *บันทึกการตั้งค่าแล้ว ระบบกำลังเตรียมรายการ Battle เบื้องหลัง และจะตรวจสอบไฟต์ใหม่ทุกๆ 5 นาทีครับ*` });
 
             // Baseline asynchronously after the interaction has completed.
             void (async () => {
