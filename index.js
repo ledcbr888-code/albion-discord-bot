@@ -2084,6 +2084,32 @@ async function fetchGuildRecentBattles(guildOrConfig) {
         return matched;
     };
     if (targetGuildId) {
+        // Primary source: AlbionBB's JSON API. The HTML Guild page can return
+        // a Cloudflare/challenge variant on Render, while this endpoint accepts
+        // the stable Guild ID directly and returns the Guild's Battle IDs.
+        const apiUrl = 'https://api.albionbb.com/asia/battles';
+        try {
+            const response = await axios.get(apiUrl, {
+                timeout: 20000,
+                headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
+                params: { guildId: targetGuildId, minPlayers: 1, minGuildPlayers: 1, page: 1 }
+            });
+            const rows = Array.isArray(response.data) ? response.data : [];
+            const ids = rows.map(row => row?.albionId ?? row?.id ?? row?.battleId)
+                .filter(id => /^\d+$/.test(String(id)))
+                .map(String);
+            const unique = [...new Set(ids)];
+            if (unique.length) {
+                console.log(`✅ AlbionBB API Guild ID ${targetGuildId} (${targetGuild || 'unknown'}) returned ${unique.length} Battle ID(s).`);
+                return unique;
+            }
+            console.warn(`⚠️ AlbionBB API returned no Battle IDs for Guild ID ${targetGuildId}.`);
+        } catch (e) {
+            lastError = e;
+            console.warn(`⚠️ AlbionBB API Guild ID lookup failed for ${targetGuildId}: ${e.message}`);
+        }
+
+        // Secondary source: HTML page, retained as a fallback.
         const url=`https://east.albionbb.com/guilds/${encodeURIComponent(targetGuildId)}/battles`;
         try {
             const html = String(await cloudscraper.get(url,{timeout:20000}) || '');
