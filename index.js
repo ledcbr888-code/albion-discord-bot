@@ -5846,19 +5846,33 @@ client.on('interactionCreate', async interaction => {
             } else {
                 autoBattleConfigs.push(configData);
             }
-            const recentMatches = await fetchGuildRecentBattles(configData);
-            // When creating/reconfiguring the tracker, mark older visible fights as
-            // seen but leave the newest battle eligible for the next polling pass.
-            // This avoids silently skipping a just-published report during setup.
-            const existingIds = recentMatches.map(String);
-            const newestId = existingIds[0] || null;
-            for (const id of existingIds) {
-                if (id !== newestId) processedBattles.add(id);
-            }
-            if (newestId) processedBattles.delete(newestId);
             saveData();
 
-            return interaction.editReply({ content: `✅ ตั้งค่า **Auto-Battle Tracker** สำเร็จเรียบร้อย!\n- 🌐 เซิร์ฟเวอร์: **EAST (ตายตัว)**\n- 📢 ห้องแจ้งเตือน: <#${channel.id}>\n- 🛡️ กิลด์ที่ติดตาม: **${guildName}**${targetGuildId ? ` (ID: ${targetGuildId})` : ''}\n- ⚔️ ขั้นต่ำ Kills + Deaths: **${minFrames.toLocaleString()}**\n\n📌 *ระบบจะคอยตรวจสอบไฟต์การต่อสู้ใหม่ๆ ของกิลด์นี้ให้อัตโนมัติทุกๆ 5 นาทีครับ*`, flags: 64 });
+            // Reply before contacting AlbionBB/Official API. Those requests can
+            // take longer than Discord's interaction window and previously left
+            // the user stuck on "กำลังคิด…" even though the config was saved.
+            await interaction.editReply({ content: `✅ ตั้งค่า **Auto-Battle Tracker** สำเร็จเรียบร้อย!\n- 🌐 เซิร์ฟเวอร์: **EAST (ตายตัว)**\n- 📢 ห้องแจ้งเตือน: <#${channel.id}>\n- 🛡️ กิลด์ที่ติดตาม: **${guildName}**${targetGuildId ? ` (ID: ${targetGuildId})` : ''}\n- ⚔️ ขั้นต่ำ Kills + Deaths: **${minFrames.toLocaleString()}**\n\n📌 *บันทึกการตั้งค่าแล้ว ระบบกำลังเตรียมรายการ Battle เบื้องหลัง และจะตรวจสอบไฟต์ใหม่ทุกๆ 5 นาทีครับ*`, flags: 64 });
+
+            // Baseline asynchronously after the interaction has completed.
+            void (async () => {
+                try {
+                    const recentMatches = await fetchGuildRecentBattles(configData);
+                    const existingIds = Array.isArray(recentMatches) ? recentMatches.map(String) : [];
+                    // Mark older visible fights as seen but leave the newest one
+                    // eligible for the next polling pass.
+                    const newestId = existingIds[0] || null;
+                    for (const id of existingIds) {
+                        if (id !== newestId) processedBattles.add(id);
+                    }
+                    if (newestId) processedBattles.delete(newestId);
+                    saveData();
+                    console.log(`✅ Auto-Battle baseline completed for ${guildName}${targetGuildId ? ` (${targetGuildId})` : ''}: ${existingIds.length} battle(s).`);
+                } catch (err) {
+                    console.warn(`⚠️ Auto-Battle baseline failed for ${guildName}: ${err.message}`);
+                }
+            })();
+
+            return;
         }
 
         if (sub === 'list') {
