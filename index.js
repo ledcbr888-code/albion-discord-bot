@@ -5606,7 +5606,7 @@ async function pollAvaConfiguredChannels() {
     }
 }
 
-client.once('clientReady', async () => {
+client.once('ready', async () => {
     console.log(`✅ Logged in as ${client.user.tag}`);
     await migrateLegacyDataAfterReady();
     const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
@@ -6171,6 +6171,8 @@ client.on('messageCreate', async message => {
 });
 
 client.on('error', err => console.error('❌ Discord client error:', err));
+client.on('shardError', err => console.error('❌ Discord Gateway shard error:', err));
+client.on('shardDisconnect', (event, shardId) => console.error(`⚠️ Discord shard ${shardId} disconnected:`, event?.code || event));
 process.on('unhandledRejection', err => console.error('❌ Unhandled rejection:', err));
 process.on('uncaughtException', err => console.error('❌ Uncaught exception:', err));
 
@@ -6178,4 +6180,12 @@ console.log('🛡️ AUTO-BATTLE FIX V3 LOADED: Battle reports enabled');
 
 initializeTrackingPersistence()
     .catch(err => console.error('❌ Tracking persistence initialization failed:', err.message))
-    .finally(() => client.login(BOT_TOKEN));
+    .then(() => {
+        console.log('🔐 Connecting to Discord Gateway...');
+        return client.login(BOT_TOKEN);
+    })
+    .catch(err => {
+        console.error('❌ Discord login failed:', err?.message || err);
+        if (err?.code) console.error('❌ Discord login error code:', err.code);
+        process.exitCode = 1;
+    });
