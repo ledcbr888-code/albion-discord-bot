@@ -6182,10 +6182,14 @@ initializeTrackingPersistence()
     .catch(err => console.error('❌ Tracking persistence initialization failed:', err.message))
     .then(() => {
         console.log('🔐 Connecting to Discord Gateway...');
-        return client.login(BOT_TOKEN);
+        const loginTimeout = new Promise((_, reject) => {
+            setTimeout(() => reject(new Error('Discord Gateway login timed out after 45 seconds')), 45000);
+        });
+        return Promise.race([client.login(BOT_TOKEN), loginTimeout]);
     })
     .catch(err => {
         console.error('❌ Discord login failed:', err?.message || err);
         if (err?.code) console.error('❌ Discord login error code:', err.code);
-        process.exitCode = 1;
+        // Do not leave Render serving HTTP while the Discord bot is unusable.
+        setTimeout(() => process.exit(1), 1000);
     });
