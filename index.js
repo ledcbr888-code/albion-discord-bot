@@ -6171,25 +6171,163 @@ client.on('messageCreate', async message => {
 });
 
 client.on('error', err => console.error('❌ Discord client error:', err));
-client.on('shardError', err => console.error('❌ Discord Gateway shard error:', err));
-client.on('shardDisconnect', (event, shardId) => console.error(`⚠️ Discord shard ${shardId} disconnected:`, event?.code || event));
+client.on('warn', warning => console.warn('⚠️ discord.js warning:', warning));
+client.on('debug', info => {
+    // discord.js includes a partial token in this debug message; never print token material.
+    if (/Provided token:/i.test(String(info))) {
+        console.log('🔎 discord.js debug: token supplied (value hidden)');
+        return;
+    }
+    console.log('🔎 discord.js debug:', info);
+});
+client.on('shardError', err => console.error('❌ Discord Gateway shard error:', err?.stack || err));
+client.on('shardDisconnect', (event, shardId) => console.error(`⚠️ Discord shard ${shardId} disconnected:`, event?.code || event, event?.reason || ''));
+client.on('shardReconnecting', shardId => console.warn(`⚠️ Discord shard ${shardId} reconnecting`));
+client.on('shardResume', (shardId, replayedEvents) => console.log(`✅ Discord shard ${shardId} resumed; replayed events: ${replayedEvents}`));
 process.on('unhandledRejection', err => console.error('❌ Unhandled rejection:', err));
 process.on('uncaughtException', err => console.error('❌ Uncaught exception:', err));
 
 console.log('🛡️ AUTO-BATTLE FIX V3 LOADED: Battle reports enabled');
 
-initializeTrackingPersistence()
-    .catch(err => console.error('❌ Tracking persistence initialization failed:', err.message))
-    .then(() => {
-        console.log('🔐 Connecting to Discord Gateway...');
-        const loginTimeout = new Promise((_, reject) => {
-            setTimeout(() => reject(new Error('Discord Gateway login timed out after 45 seconds')), 45000);
+client.once('ready', () => {
+    console.log(`✅ Discord Gateway READY: ${client.user?.tag || client.user?.id || 'bot connected'}`);
+});
+client.on('shardReady', shardId => {
+    console.log(`✅ Discord shard ${shardId} is READY`);
+});
+client.on('shardReconnecting', shardId => {
+    console.warn(`⚠️ Discord shard ${shardId} reconnecting`);
+});
+
+// One bounded, unauthenticated discovery request plus one short WebSocket handshake test.
+// No bot token is sent to either diagnostic endpoint. This runs once per process start;
+// it does not poll/retry and always allows the normal discord.js login attempt to continue.
+async function diagnoseDiscordNetwork() {
+    let gatewayUrl = 'wss://gateway.discord.gg';
+    const controller = new AbortController();
+    const discoveryTimer = setTimeout(() => controller.abort(), 8000);
+    try {
+        console.log('🧪 Discord diagnostic 1/2: checking unauthenticated Gateway discovery (single request)...');
+        const response = await fetch('https://discord.com/api/v10/gateway', {
+            method: 'GET',
+            headers: { 'Accept': 'application/json', 'User-Agent': 'AlbionDiscordBot-GatewayDiagnostics/1.0' },
+            signal: controller.signal
         });
-        return Promise.race([client.login(BOT_TOKEN), loginTimeout]);
+        const contentType = String(response.headers.get('content-type') || '').split(';')[0];
+        const retryAfter = response.headers.get('retry-after');
+        if (!response.ok) {
+            console.warn('⚠️ Gateway discovery HTTP status:', response.status,
+                '| content-type:', contentType || 'unknown',
+                '| retry-after:', retryAfter || 'not provided');
+            // Do not read/log the response body: edge pages can be large and may contain
+            // infrastructure details. Do not retry this request.
+        } else {
+            const data = await response.json();
+            if (typeof data?.url === 'string' && /^wss:\/\//i.test(data.url)) {
+                gatewayUrl = data.url;
+                console.log('✅ Gateway discovery succeeded; a secure Gateway URL was returned.');
+            } else {
+                console.warn('⚠️ Gateway discovery returned HTTP success but no valid secure Gateway URL.');
+            }
+        }
+    } catch (err) {
+        console.warn('⚠️ Gateway discovery diagnostic failed:', err?.name === 'AbortError' ? 'timed out after 8 seconds' : (err?.message || String(err)));
+    } finally {
+        clearTimeout(discoveryTimer);
+    }
+
+    if (typeof globalThis.WebSocket !== 'function') {
+        console.warn('⚠️ WebSocket diagnostic skipped: global WebSocket is unavailable in this Node runtime.');
+        return;
+    }
+
+    let socket;
+    let settled = false;
+    await new Promise(resolve => {
+        const finish = (message, isError = false) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(wsTimer);
+            try { socket?.close(); } catch (_) {}
+            (isError ? console.warn : console.log)(message);
+            resolve();
+        };
+        const wsTimer = setTimeout(() => {
+            finish('⚠️ Gateway WebSocket handshake did not open within 6 seconds.', true);
+        }, 6000);
+        try {
+            const endpoint = new URL(gatewayUrl);
+            endpoint.searchParams.set('v', '10');
+            endpoint.searchParams.set('encoding', 'json');
+            console.log('🧪 Discord diagnostic 2/2: testing one unauthenticated WebSocket handshake...');
+            socket = new globalThis.WebSocket(endpoint.toString());
+            socket.addEventListener('open', () => {
+                finish('✅ Gateway WebSocket handshake succeeded (no IDENTIFY sent; this is only a network test).');
+            }, { once: true });
+            socket.addEventListener('error', () => {
+                finish('⚠️ Gateway WebSocket handshake failed; inspect Render outbound networking and the Gateway diagnostics above.', true);
+            }, { once: true });
+            socket.addEventListener('close', event => {
+                if (!settled) finish('⚠️ Gateway WebSocket closed before opening (close code ' + event.code + ').', true);
+            }, { once: true });
+        } catch (err) {
+            finish('⚠️ Gateway WebSocket diagnostic could not start: ' + (err?.message || String(err)), true);
+        }
+    });
+}
+
+initializeTrackingPersistence()
+    .catch(err => {
+        console.error('❌ Tracking persistence initialization failed:', err?.message || err);
+        throw err;
+    })
+    .then(async () => {
+        if (!BOT_TOKEN) {
+            throw new Error('BOT_TOKEN is missing or empty. Set Render Environment variable BOT_TOKEN (Bot Token from Discord Developer Portal).');
+        }
+
+        // Do not call unauthenticated /gateway discovery on every deploy.
+        // Render's shared IP can be rate-limited (HTTP 429); discord.js already
+        // knows the Gateway endpoint and should connect directly.
+        console.log('🔐 Connecting to Discord Gateway via discord.js (token is not logged)...');
+
+        // A watchdog reports the connection state once if login/READY is still pending.
+        // It does not restart the service or trigger any additional API requests.
+        let readyLogged = false;
+        client.once('ready', () => { readyLogged = true; });
+        const gatewayWatchdog = setTimeout(() => {
+            if (readyLogged || client.isReady()) return;
+            const managerStatus = client.ws?.status;
+            const shardStates = client.ws?.shards
+                ? [...client.ws.shards.values()].map(shard => ({
+                    id: shard.id,
+                    status: shard.status,
+                    ping: Number.isFinite(shard.ping) ? shard.ping : null
+                }))
+                : [];
+            console.error('⏱️ Discord Gateway watchdog: READY not received 25 seconds after login started.');
+            console.error('🔎 Gateway manager status:', managerStatus ?? 'unavailable');
+            console.error('🔎 Gateway shard state:', JSON.stringify(shardStates));
+            console.error('ℹ️ Use the discovery/WebSocket results above to distinguish API-edge problems from WebSocket connectivity. No token or headers are logged.');
+        }, 25000);
+        gatewayWatchdog.unref?.();
+
+        let loginTimer;
+        const loginTimeout = new Promise((_, reject) => {
+            loginTimer = setTimeout(() => reject(new Error('Discord Gateway login timed out after 45 seconds')), 45000);
+            loginTimer.unref?.();
+        });
+        try {
+            await Promise.race([client.login(BOT_TOKEN), loginTimeout]);
+            console.log('ℹ️ Discord login() resolved; waiting for Gateway READY event if it has not appeared yet.');
+        } finally {
+            clearTimeout(loginTimer);
+        }
     })
     .catch(err => {
-        console.error('❌ Discord login failed:', err?.message || err);
-        if (err?.code) console.error('❌ Discord login error code:', err.code);
-        // Do not leave Render serving HTTP while the Discord bot is unusable.
-        setTimeout(() => process.exit(1), 1000);
+        console.error('❌ Discord startup/login error:', err?.message || err);
+        if (err?.code) console.error('❌ Discord error code:', err.code);
+        console.error('⚠️ Keeping the Render web process alive to avoid a restart loop. Check the Gateway/REST error above before retrying.');
+        // Intentionally do not call process.exit(): repeated restarts can hammer
+        // an API endpoint that is already returning a long-lived Cloudflare 429.
     });
