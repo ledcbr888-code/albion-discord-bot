@@ -1802,18 +1802,17 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
         return true;
     });
 
-    // Threshold metrics must use exactly the same tracked rows that are
-    // rendered in the report: /add player plus /add guild, never the
-    // Auto-Battle source guild's full roster.
+    // Threshold metrics use the same tracked rows rendered in the report:
+    // /add player plus /add guild. The Auto-Battle threshold is total Fame;
+    // Kills and Deaths remain report statistics only.
     const metricRows = rows;
     let totalKills = 0, totalDeaths = 0, totalFame = 0;
-    let guildTotalFrames = 0;
     for (const p of metricRows) {
         totalKills += p.kills;
         totalDeaths += p.deaths;
         totalFame += p.fame;
-        guildTotalFrames += (p.kills + p.deaths);
     }
+    const guildTotalFrames = totalFame; // compatibility field; now tracked Fame
 
     let header = `\x1b[1;36m⚔️ ALBIONBB BATTLE REPORT\x1b[0m | \x1b[1;33m🆔 ${matchId}\x1b[0m\n`;
     header += `\x1b[1;33m🕒 Time:\x1b[0m \x1b[1;37m${formatUTCTime(battleTime)}\x1b[0m\n`;
@@ -2252,9 +2251,9 @@ async function checkAutoBattlesForGuild() {
                     }
                 );
                 const checkValue = config.minFrames;
-                // min_frames means total Kills + Deaths from tracked players/
-                // tracked guild members only. Fame must not trigger the alert.
-                if (result.guildTotalFrames >= checkValue) {
+                // min_frames is the minimum total Fame from tracked players/
+                // tracked guild members. Kills and Deaths are report statistics.
+                if (result.totalFame >= checkValue) {
                     const channel = await client.channels.fetch(config.channelId).catch(() => null);
                     if (!channel || typeof channel.send !== 'function') {
                         console.warn(`⚠️ Auto-Battle channel unavailable for Match ID ${latestMatchId}; will retry next poll.`);
@@ -2262,8 +2261,8 @@ async function checkAutoBattlesForGuild() {
                     }
                     const alertText =
                         `🚨 **Auto-Battle Alert!** ตรวจพบไฟต์ใหม่ของกิลด์ **${config.targetGuild}**\n` +
-                        `⚔️ รวม Kills + Deaths: \`${result.guildTotalFrames.toLocaleString()}\`\n` +
-                        `💰 Total Fame: \`${formatFame(result.totalFame)}\`\n` +
+                        `💰 Fame รวมของผู้ที่ติดตาม: \`${formatFame(result.totalFame)}\`\n` +
+                        `⚔️ Kills + Deaths: \`${(result.totalKills + result.totalDeaths).toLocaleString()}\`\n` +
                         `🔗 **Battle Link:** <${result.battleUrl}>`;
                     const reportFiles = Array.isArray(result.payload.files) ? result.payload.files : [];
                     if (reportFiles.length > 0) {
@@ -5529,7 +5528,7 @@ const commands = [
         .addSubcommand(s => s.setName('set').setDescription('ตั้งค่าระบบติดตามไฟต์อัตโนมัติ')
             .addChannelOption(o => o.setName('channel').setDescription('ห้องที่ต้องการให้แจ้งเตือน').addChannelTypes(ChannelType.GuildText).setRequired(true))
             .addStringOption(o => o.setName('guild').setDescription('ชื่อ Guild ที่ต้องการติดตาม').setRequired(true))
-            .addStringOption(o => o.setName('min_frames').setDescription('จำนวนขั้นต่ำ เช่น 200K (Kills + Deaths ของรายการติดตาม)').setRequired(true))
+            .addStringOption(o => o.setName('min_frames').setDescription('Fame ขั้นต่ำ เช่น 50K (Fame รวมของรายการติดตาม)').setRequired(true))
             .addStringOption(o => o.setName('guild_id').setDescription('Guild ID จาก AlbionBB เช่น 0SZ1Nlh7RfmuuuxS0lZ3kw')))
         .addSubcommand(s => s.setName('list').setDescription('แสดงรายชื่อกิลด์ที่ตั้งค่า Auto-Battle ในเซิร์ฟเวอร์นี้'))
         .addSubcommand(s => s.setName('remove').setDescription('ลบกิลด์ที่ตั้งค่า Auto-Battle ออก')
@@ -5890,12 +5889,18 @@ client.on('interactionCreate', async interaction => {
             } else {
                 autoBattleConfigs.push(configData);
             }
-            saveData();
+            // Acknowledge the Discord interaction before any synchronous file
+            // or persistence work. This prevents the command from remaining on
+            // "กำลังคิด…" even when the configuration has already been added.
+            await interaction.editReply({ content: `✅ ตั้งค่า **Auto-Battle Tracker** สำเร็จเรียบร้อย!\n- 🌐 เซิร์ฟเวอร์: **EAST (ตายตัว)**\n- 📢 ห้องแจ้งเตือน: <#${channel.id}>\n- 🛡️ กิลด์ที่ติดตาม: **${guildName}**${targetGuildId ? ` (ID: ${targetGuildId})` : ''}\n- 💰 Fame ขั้นต่ำ: **${formatFame(minFrames)}**\n\n📌 *บันทึกการตั้งค่าแล้ว ระบบกำลังเตรียมรายการ Battle เบื้องหลัง และจะตรวจสอบไฟต์ใหม่ทุกๆ 5 นาทีครับ*` });
 
-            // Reply before contacting AlbionBB/Official API. Those requests can
-            // take longer than Discord's interaction window and previously left
-            // the user stuck on "กำลังคิด…" even though the config was saved.
-            await interaction.editReply({ content: `✅ ตั้งค่า **Auto-Battle Tracker** สำเร็จเรียบร้อย!\n- 🌐 เซิร์ฟเวอร์: **EAST (ตายตัว)**\n- 📢 ห้องแจ้งเตือน: <#${channel.id}>\n- 🛡️ กิลด์ที่ติดตาม: **${guildName}**${targetGuildId ? ` (ID: ${targetGuildId})` : ''}\n- ⚔️ ขั้นต่ำ Kills + Deaths: **${minFrames.toLocaleString()}**\n\n📌 *บันทึกการตั้งค่าแล้ว ระบบกำลังเตรียมรายการ Battle เบื้องหลัง และจะตรวจสอบไฟต์ใหม่ทุกๆ 5 นาทีครับ*` });
+            // Persist after Discord has acknowledged the command. The in-memory
+            // config is already active for the running scheduler.
+            try {
+                if (!saveData()) console.warn(`⚠️ Auto-Battle config saved in memory but persistence failed for ${guildName}.`);
+            } catch (saveErr) {
+                console.error(`❌ Auto-Battle config persistence error for ${guildName}:`, saveErr.message);
+            }
 
             // Baseline asynchronously after the interaction has completed.
             void (async () => {
