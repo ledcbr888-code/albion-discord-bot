@@ -1812,7 +1812,7 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
         totalDeaths += p.deaths;
         totalFame += p.fame;
     }
-    const guildTotalFrames = totalFame; // compatibility field; now tracked Fame
+    const guildTotalFrames = totalKills + totalDeaths; // legacy field; threshold uses totalFame
 
     let header = `\x1b[1;36m⚔️ ALBIONBB BATTLE REPORT\x1b[0m | \x1b[1;33m🆔 ${matchId}\x1b[0m\n`;
     header += `\x1b[1;33m🕒 Time:\x1b[0m \x1b[1;37m${formatUTCTime(battleTime)}\x1b[0m\n`;
@@ -1888,9 +1888,14 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
 
     const attachments = [];
 
-    // One weapon report image per 20 tracked players; five cards per row.
+    // One weapon report image per 10 tracked players; five cards per row.
+    // This keeps the rendered image shorter so Discord does not scale the
+    // weapon icons down excessively in the message preview.
+    const playersPerReportPage = 10;
     const reportPages = [];
-    for (let offset = 0; offset < reportRosterRows.length; offset += 20) reportPages.push(reportRosterRows.slice(offset, offset + 20));
+    for (let offset = 0; offset < reportRosterRows.length; offset += playersPerReportPage) {
+        reportPages.push(reportRosterRows.slice(offset, offset + playersPerReportPage));
+    }
     if (!reportPages.length) reportPages.push([]);
     for (let pageIndex = 0; pageIndex < reportPages.length; pageIndex++) {
         const pageRows = reportPages[pageIndex];
@@ -1988,6 +1993,8 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
 
     return {
         matchId,
+        totalKills,
+        totalDeaths,
         totalFame,
         guildTotalFrames,
         battleUrl,
@@ -2262,8 +2269,8 @@ async function checkAutoBattlesForGuild() {
                     const alertText =
                         `🚨 **Auto-Battle Alert!** ตรวจพบไฟต์ใหม่ของกิลด์ **${config.targetGuild}**\n` +
                         `💰 Fame รวมของผู้ที่ติดตาม: \`${formatFame(result.totalFame)}\`\n` +
-                        `⚔️ Kills + Deaths: \`${(result.totalKills + result.totalDeaths).toLocaleString()}\`\n` +
-                        `🔗 **Battle Link:** <${result.battleUrl}>`;
+                        `⚔️ Kills + Deaths: \`${(Number(result.totalKills) + Number(result.totalDeaths)).toLocaleString()}\`\n` +
+                        `🔗 Battle Link: <${result.battleUrl}>`;
                     const reportFiles = Array.isArray(result.payload.files) ? result.payload.files : [];
                     if (reportFiles.length > 0) {
                         // Discord displays multiple image attachments side-by-side in one message.
