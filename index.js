@@ -5632,7 +5632,7 @@ const commands = [
         .addSubcommand(s => s.setName('status').setDescription('ดูห้องที่ตั้งค่าตรวจรูป AVA อัตโนมัติ'))
         .addSubcommand(s => s.setName('remove').setDescription('ยกเลิกการตรวจรูป AVA อัตโนมัติ'))
      ,new SlashCommandBuilder().setName('bandit').setDescription('แจ้งเตือนกิจกรรม Bandit Assault เซิร์ฟเวอร์ Asia')
-        .addSubcommand(s => s.setName('setup').setDescription('ตั้งค่าการแจ้งเตือน Bandit Assault ล่วงหน้า 20 นาที')
+        .addSubcommand(s => s.setName('setup').setDescription('ตั้งค่าการแจ้งเตือน Bandit Assault ล่วงหน้า 15 นาที')
             .addChannelOption(o => o.setName('channel').setDescription('ห้องที่ต้องการให้แจ้งเตือน').addChannelTypes(ChannelType.GuildText).setRequired(true))
             .addStringOption(o => o.setName('server').setDescription('เซิร์ฟเวอร์ของตาราง Bandit Assault').setRequired(true)
                 .addChoices({ name: '🌏 Asia (East)', value: 'asia' })))
