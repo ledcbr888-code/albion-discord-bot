@@ -3383,7 +3383,8 @@ function isAllowedAvaImageUrl(value) { try { const u = new URL(String(value || '
 function setAvaMessageState(guildId, messageId, state, details = '') {
  const cfg = getGuildConfig(String(guildId)); if (!cfg) return;
  if (!cfg.avaMessageStates || typeof cfg.avaMessageStates !== 'object') cfg.avaMessageStates = {};
- cfg.avaMessageStates[String(messageId)] = { state, updatedAt: Date.now(), details: String(details || '').slice(0, 300) };
+ const previous = cfg.avaMessageStates[String(messageId)];
+ cfg.avaMessageStates[String(messageId)] = { state, updatedAt: Date.now(), attempts: state === 'processing' ? (Number(previous?.attempts) || 0) + 1 : (Number(previous?.attempts) || 0), details: String(details || '').slice(0, 300) };
  const keys = Object.keys(cfg.avaMessageStates);
  if (keys.length > 500) for (const key of keys.sort((a,b) => (cfg.avaMessageStates[a]?.updatedAt || 0) - (cfg.avaMessageStates[b]?.updatedAt || 0)).slice(0, keys.length - 500)) delete cfg.avaMessageStates[key];
  saveData();
@@ -5672,9 +5673,14 @@ async function pollAvaConfiguredChannels() {
                     try { return BigInt(String(message.id)) > BigInt(previousId); }
                     catch (_) { return String(message.id) !== String(previousId); }
                 });
-                if (newer.length) {
+                const retryableFailures = messages.filter(message => {
+                    const state = getGuildConfig(String(guildId), false)?.avaMessageStates?.[String(message.id)];
+                    return state?.state === 'failed' && (Number(state.attempts) || 0) < 3 && Date.now() - (Number(state.updatedAt) || 0) >= 30000;
+                });
+                const workMessages = [...new Map([...newer, ...retryableFailures].map(message => [String(message.id), message])).values()];
+                if (workMessages.length) {
                     avaPollState.set(stateKey, latestId);
-                    for (const message of newer) {
+                    for (const message of workMessages) {
                         if (message.author?.bot) continue;
                         try {
                             await guildContext.run({ guildId }, async () => { await processAvaImageMessage(message); });
