@@ -3391,7 +3391,7 @@ function setAvaMessageState(guildId, messageId, state, details = '') {
 }
 function runAvaWithConcurrency(task) {
  if (avaActiveJobs < AVA_MAX_CONCURRENT) { avaActiveJobs++; return Promise.resolve().then(task).finally(() => { avaActiveJobs--; const next = avaWaitingJobs.shift(); if (next) next(); }); }
- if (avaWaitingJobs.length >= AVA_MAX_QUEUE) return Promise.resolve(false);
+ if (avaWaitingJobs.length >= AVA_MAX_QUEUE) { const gid = message?.guildId || message?.guild?.id; if (gid && message?.id) setAvaMessageState(gid, message.id, 'failed', 'AVA work queue full; retry scheduled'); return Promise.resolve(false); }
  return new Promise((resolve,reject) => { avaWaitingJobs.push(() => { avaActiveJobs++; Promise.resolve().then(task).then(resolve,reject).finally(() => { avaActiveJobs--; const next = avaWaitingJobs.shift(); if (next) next(); }); }); });
 }
 const avaPollState = new Map();
@@ -5142,9 +5142,11 @@ async function processAvaImageMessageInternal(message, fallbackAttachments = [])
     const priorState = getGuildConfig(String(messageGuildId), false)?.avaMessageStates?.[String(message.id)]?.state;
     if (priorState === 'succeeded' || avaProcessedMessages.has(message.id)) return true;
     if (avaProcessingMessages.has(String(message.id))) return true;
+    const now = Date.now();
+    if (avaUserRateLimit.size > 1000) for (const [key, stamp] of avaUserRateLimit) if (now - stamp > 10 * 60 * 1000) avaUserRateLimit.delete(key);
     const rateKey = String(message.author?.id || messageChannelId), lastRun = avaUserRateLimit.get(rateKey) || 0;
-    if (Date.now() - lastRun < AVA_USER_COOLDOWN_MS) { console.log('⏳ AVA rate limit: skipped rapid repeat from user=' + rateKey); return true; }
-    avaUserRateLimit.set(rateKey, Date.now()); avaProcessingMessages.add(String(message.id));
+    if (now - lastRun < AVA_USER_COOLDOWN_MS) { console.log('⏳ AVA rate limit: skipped rapid repeat from user=' + rateKey); return true; }
+    avaUserRateLimit.set(rateKey, now); avaProcessingMessages.add(String(message.id));
     setAvaMessageState(messageGuildId, message.id, 'processing');
 
     let status;
@@ -6308,11 +6310,11 @@ client.on('messageCreate', async message => {
     const guildConfig = getGuildConfig(message.guildId, false);
     const dedicatedBattleLinkChannel = guildConfig?.battleLinkChannelId;
     if (dedicatedBattleLinkChannel) {
+        if (message.channel.id !== dedicatedBattleLinkChannel) return;
         const rateKey = battleUrl, now = Date.now();
         for (const [key, stamp] of battleUrlRateLimit) if (now - stamp > 10 * 60 * 1000) battleUrlRateLimit.delete(key);
         if (battleUrlRateLimit.has(rateKey) && now - battleUrlRateLimit.get(rateKey) < BATTLE_URL_COOLDOWN_MS) { console.log('⏳ Battle URL rate limit: duplicate link suppressed'); return; }
         battleUrlRateLimit.set(rateKey, now);
-        if (message.channel.id !== dedicatedBattleLinkChannel) return;
     } else {
         // Preserve legacy /add guild channel behavior until /battlelink setup is configured.
         const matchingGuildConfig = targetGuilds.find(g => g.channelId === message.channel.id);
