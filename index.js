@@ -77,9 +77,21 @@ let githubPersistenceReady = false;
 let guildConfigs = {};
 let legacyMigration = null;
 let autoBattleCheckRunning = false;
+let banditSchedulerRunning = false;
+let avaPollRunning = false;
+let dailyAutoSchedulerRunning = false;
+const battleUrlRateLimit = new Map();
+const avaUserRateLimit = new Map();
+const AVA_MAX_CONCURRENT = 2;
+const AVA_MAX_QUEUE = 12;
+const AVA_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+let avaActiveJobs = 0;
+const avaWaitingJobs = [];
+const BATTLE_URL_COOLDOWN_MS = 12 * 1000;
+const AVA_USER_COOLDOWN_MS = 8 * 1000;
 
 function createDefaultGuildConfig() {
-    return { players: [], guilds: [], autoBattles: [], dailyAuto: [], dailyConfirmations: [], dailySourceStatus: {}, banditAuto: [], avaAuto: [], avaProcessedMessages: [], processedBattles: [], lastDailyReportDate: {}, lastBanditAlertKey: {}, battleLinkChannelId: null };
+    return { players: [], guilds: [], autoBattles: [], dailyAuto: [], dailyConfirmations: [], dailySourceStatus: {}, banditAuto: [], avaAuto: [], avaProcessedMessages: [], avaMessageStates: {}, processedBattles: [], lastDailyReportDate: {}, lastBanditAlertKey: {}, battleLinkChannelId: null };
 }
 function normalizeGuildConfig(raw = {}) {
     const cfg = raw && typeof raw === 'object' ? raw : {};
@@ -94,6 +106,7 @@ function normalizeGuildConfig(raw = {}) {
         banditAuto: Array.isArray(cfg.banditAuto) ? cfg.banditAuto : [],
         avaAuto: Array.isArray(cfg.avaAuto) ? cfg.avaAuto : [],
         avaProcessedMessages: cfg.avaProcessedMessages instanceof Set ? [...cfg.avaProcessedMessages].map(String).slice(-500) : (Array.isArray(cfg.avaProcessedMessages) ? cfg.avaProcessedMessages.map(String).slice(-500) : []),
+        avaMessageStates: cfg.avaMessageStates && typeof cfg.avaMessageStates === 'object' ? cfg.avaMessageStates : {},
         processedBattles: cfg.processedBattles instanceof Set ? [...cfg.processedBattles].map(String).slice(-1000) : (Array.isArray(cfg.processedBattles) ? cfg.processedBattles.map(String).slice(-1000) : []),
         lastDailyReportDate: cfg.lastDailyReportDate && typeof cfg.lastDailyReportDate === 'object' ? cfg.lastDailyReportDate : {},
         lastBanditAlertKey: cfg.lastBanditAlertKey && typeof cfg.lastBanditAlertKey === 'object' ? cfg.lastBanditAlertKey : {},
@@ -3363,6 +3376,21 @@ const AVA_IMAGE_EXTENSIONS = /\.(?:png|jpe?g|webp|gif)$/i;
 const avaOcrCache = new Map();
 const avaPendingSelections = new Map();
 const avaProcessingMessages = new Set();
+const AVA_ALLOWED_IMAGE_HOSTS = new Set(['cdn.discordapp.com', 'media.discordapp.net', 'images-ext-1.discordapp.net', 'images-ext-2.discordapp.net']);
+function isAllowedAvaImageUrl(value) { try { const u = new URL(String(value || '')); return u.protocol === 'https:' && AVA_ALLOWED_IMAGE_HOSTS.has(u.hostname.toLowerCase()); } catch (_) { return false; } }
+function setAvaMessageState(guildId, messageId, state, details = '') {
+ const cfg = getGuildConfig(String(guildId)); if (!cfg) return;
+ if (!cfg.avaMessageStates || typeof cfg.avaMessageStates !== 'object') cfg.avaMessageStates = {};
+ cfg.avaMessageStates[String(messageId)] = { state, updatedAt: Date.now(), details: String(details || '').slice(0, 300) };
+ const keys = Object.keys(cfg.avaMessageStates);
+ if (keys.length > 500) for (const key of keys.sort((a,b) => (cfg.avaMessageStates[a]?.updatedAt || 0) - (cfg.avaMessageStates[b]?.updatedAt || 0)).slice(0, keys.length - 500)) delete cfg.avaMessageStates[key];
+ saveData();
+}
+function runAvaWithConcurrency(task) {
+ if (avaActiveJobs < AVA_MAX_CONCURRENT) { avaActiveJobs++; return Promise.resolve().then(task).finally(() => { avaActiveJobs--; const next = avaWaitingJobs.shift(); if (next) next(); }); }
+ if (avaWaitingJobs.length >= AVA_MAX_QUEUE) return Promise.resolve(false);
+ return new Promise((resolve,reject) => { avaWaitingJobs.push(() => { avaActiveJobs++; Promise.resolve().then(task).then(resolve,reject).finally(() => { avaActiveJobs--; const next = avaWaitingJobs.shift(); if (next) next(); }); }); });
+}
 const avaPollState = new Map();
 const avaRawRetryTimers = new Map();
 const avaCanonicalMapCache = { names: [], expiresAt: 0, loading: null };
@@ -4982,7 +5010,7 @@ async function generateAvaRoadsCard(data, ocrText = '') {
     return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: 'ava-map-' + normalizeAvaSlug(data.name) + '.png' });
 }
 
-async function processAvaImageMessage(message, fallbackAttachments = []) {
+async function processAvaImageMessageInternal(message, fallbackAttachments = []) {
     // Never OCR images posted by bots, including this bot's own map report.
     // The raw gateway fallback calls this function directly and bypasses the
     // messageCreate author.bot guard.
@@ -5065,15 +5093,19 @@ async function processAvaImageMessage(message, fallbackAttachments = []) {
         for (const candidate of attachments) {
             if (!candidate?.url) continue;
             try {
+                if (!isAllowedAvaImageUrl(candidate.url)) continue;
                 const probe = await axios.get(candidate.url, {
                     responseType: 'arraybuffer',
-                    timeout: 15000,
+                    timeout: 8000,
+                    maxContentLength: AVA_MAX_IMAGE_BYTES,
+                    maxBodyLength: AVA_MAX_IMAGE_BYTES,
                     headers: {
                         'User-Agent': 'Mozilla/5.0',
                         Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
                     },
                     validateStatus: status => status >= 200 && status < 300
                 });
+                if (Buffer.byteLength(probe.data) > AVA_MAX_IMAGE_BYTES) continue;
                 await loadImage(Buffer.from(probe.data));
                 imageAttachments = [candidate];
                 console.log('🗺️ AVA decoded extensionless attachment: guild=' + messageGuildId +
@@ -5104,22 +5136,25 @@ async function processAvaImageMessage(message, fallbackAttachments = []) {
     console.log('🗺️ AVA image detected: guild=' + messageGuildId +
         ' channel=' + messageChannelId + ' file=' + (imageAttachments[0].name || 'unknown'));
 
-    if (avaProcessedMessages.has(message.id) || avaProcessingMessages.has(String(message.id))) return true;
-    avaProcessingMessages.add(String(message.id));
+    const priorState = getGuildConfig(String(messageGuildId), false)?.avaMessageStates?.[String(message.id)]?.state;
+    if (priorState === 'succeeded' || avaProcessedMessages.has(message.id)) return true;
+    if (avaProcessingMessages.has(String(message.id))) return true;
+    const rateKey = String(message.author?.id || messageChannelId), lastRun = avaUserRateLimit.get(rateKey) || 0;
+    if (Date.now() - lastRun < AVA_USER_COOLDOWN_MS) { console.log('⏳ AVA rate limit: skipped rapid repeat from user=' + rateKey); return true; }
+    avaUserRateLimit.set(rateKey, Date.now()); avaProcessingMessages.add(String(message.id));
+    setAvaMessageState(messageGuildId, message.id, 'processing');
 
     let status;
     try {
         status = await message.reply('🗺️ กำลังอ่านชื่อแมพ AVA จากรูป...');
     } catch (err) {
+        setAvaMessageState(messageGuildId, message.id, 'failed', 'Could not post OCR status reply: ' + err.message);
+        avaProcessingMessages.delete(String(message.id));
         console.error('❌ AVA reply failed:', err.message);
         return true;
     }
 
-    avaProcessedMessages.add(message.id);
-    if (avaProcessedMessages.size > 500) {
-        avaProcessedMessages.delete(avaProcessedMessages.values().next().value);
-    }
-    saveData();
+    // Do not mark the message processed yet: OCR/provider failures must remain retryable.
 
     try {
         const attachmentUrl = String(imageAttachments[0].url || '');
@@ -5131,8 +5166,11 @@ async function processAvaImageMessage(message, fallbackAttachments = []) {
         let lastImageError = null;
         for (const imageUrl of imageUrls) {
             try {
+                if (!isAllowedAvaImageUrl(imageUrl)) throw new Error('อนุญาตเฉพาะ URL รูปจาก Discord CDN เท่านั้น');
                 const imageResponse = await axios.get(imageUrl, {
                     responseType: 'arraybuffer',
+                    maxContentLength: AVA_MAX_IMAGE_BYTES,
+                    maxBodyLength: AVA_MAX_IMAGE_BYTES,
                     timeout: imageUrl === getDiscordOriginalAttachmentUrl(attachmentUrl) ? 3500 : 12000,
                     headers: {
                         'User-Agent': 'Mozilla/5.0',
@@ -5141,6 +5179,7 @@ async function processAvaImageMessage(message, fallbackAttachments = []) {
                     validateStatus: status => status >= 200 && status < 300
                 });
                 const candidateBuffer = Buffer.from(imageResponse.data);
+                if (candidateBuffer.length > AVA_MAX_IMAGE_BYTES) throw new Error('ไฟล์รูปใหญ่เกิน 10 MB');
                 await loadImage(candidateBuffer);
                 imageBuffer = candidateBuffer;
                 console.log('🗺️ AVA image source selected: ' + imageUrl.replace(/([?&](?:ex|is|hm)=)[^&]+/gi, '$1…'));
@@ -5148,6 +5187,7 @@ async function processAvaImageMessage(message, fallbackAttachments = []) {
             } catch (err) { lastImageError = err; }
         }
         if (!imageBuffer) throw lastImageError || new Error('ดาวน์โหลดรูปจาก Discord ไม่สำเร็จ');
+        if (imageBuffer.length > AVA_MAX_IMAGE_BYTES) throw new Error('ไฟล์รูปใหญ่เกิน 10 MB');
         const ocr = await detectAvaMapNameFromImage(imageBuffer);
         console.log('🗺️ AVA OCR result: ' + JSON.stringify({
             mapName: ocr?.mapName || '',
@@ -5207,6 +5247,10 @@ async function processAvaImageMessage(message, fallbackAttachments = []) {
                 '**เลือกชื่อแมพที่ใกล้เคียงกับในรูป:**',
             components: avaSelectionComponents(messageGuildId, token, suggestions)
         });
+        setAvaMessageState(messageGuildId, message.id, 'succeeded', 'OCR and map selector ready');
+        avaProcessedMessages.add(message.id);
+        if (avaProcessedMessages.size > 500) avaProcessedMessages.delete(avaProcessedMessages.values().next().value);
+        saveData();
 
         setTimeout(() => {
             const pending = avaPendingSelections.get(token);
@@ -5218,6 +5262,7 @@ async function processAvaImageMessage(message, fallbackAttachments = []) {
             }).catch(() => {});
         }, 120000);
     } catch (err) {
+        setAvaMessageState(messageGuildId, message.id, 'failed', err.message);
         console.error('❌ AVA image auto-check error:', err);
         await status.edit({
             content: '❌ ตรวจภาพ AVA ไม่สำเร็จ: ' + err.message
@@ -5229,16 +5274,22 @@ async function processAvaImageMessage(message, fallbackAttachments = []) {
     return true;
 }
 
+async function processAvaImageMessage(message, fallbackAttachments = []) { return runAvaWithConcurrency(() => processAvaImageMessageInternal(message, fallbackAttachments)); }
+
 // ----------------------------------------
 // AUTOMATED DAILY REPORT SCHEDULER
 // ----------------------------------------
 async function checkAndSendDailyAutoReports() {
+    if (dailyAutoSchedulerRunning) return;
+    dailyAutoSchedulerRunning = true;
+    try {
     const guilds = getAllGuildConfigs();
     for (const { guildId } of guilds) {
         await guildContext.run({ guildId }, async () => {
             await checkAndSendDailyAutoReportsForGuild();
         });
     }
+    } finally { dailyAutoSchedulerRunning = false; }
 }
 
 async function checkAndSendDailyAutoReportsForGuild() {
@@ -5485,12 +5536,16 @@ function banditAlertComponents(guildId, eventStamp, confirmedCount = 0) {
 }
 
 async function checkAndSendBanditAlerts() {
+    if (banditSchedulerRunning) return;
+    banditSchedulerRunning = true;
+    try {
     const guilds = getAllGuildConfigs();
     for (const { guildId } of guilds) {
         await guildContext.run({ guildId }, async () => {
             await checkAndSendBanditAlertsForGuild();
         });
     }
+    } finally { banditSchedulerRunning = false; }
 }
 
 async function checkAndSendBanditAlertsForGuild() {
@@ -5582,6 +5637,9 @@ const commands = [
 
 
 async function pollAvaConfiguredChannels() {
+    if (avaPollRunning) return;
+    avaPollRunning = true;
+    try {
     const seenChannels = new Set();
 
     for (const [guildId, cfg] of Object.entries(guildConfigs || {})) {
@@ -5634,6 +5692,7 @@ async function pollAvaConfiguredChannels() {
     for (const key of avaPollState.keys()) {
         if (!seenChannels.has(key)) avaPollState.delete(key);
     }
+    } finally { avaPollRunning = false; }
 }
 
 client.once('ready', async () => {
@@ -5650,7 +5709,7 @@ client.once('ready', async () => {
         console.log(`🛡️ Auto-Battle initialized: marked ${seeded} existing battle(s) as already seen. No historical backlog will be reported.`);
     }, 5000);
 
-    setInterval(checkAutoBattles, 5 * 60 * 1000);
+    setInterval(() => checkAutoBattles().catch(err => console.error('❌ Auto-Battle scheduler error:', err)), 5 * 60 * 1000);
     setTimeout(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA initial poll error:', err)), 3000);
     setInterval(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA poll error:', err)), 5000);
     fetchBattleHubMapIndex()
@@ -6236,6 +6295,10 @@ client.on('messageCreate', async message => {
     }
     const match = message.content.match(/https?:\/\/(?:east\.)?albionbb\.com\/battles\/[^\s]+/i);
     if (!match) return;
+    const battleUrl = match[0].replace(/[)>\],.]+$/, ''), rateKey = battleUrl, now = Date.now();
+    for (const [key, stamp] of battleUrlRateLimit) if (now - stamp > 10 * 60 * 1000) battleUrlRateLimit.delete(key);
+    if (battleUrlRateLimit.has(rateKey) && now - battleUrlRateLimit.get(rateKey) < BATTLE_URL_COOLDOWN_MS) { console.log('⏳ Battle URL rate limit: duplicate link suppressed'); return; }
+    battleUrlRateLimit.set(rateKey, now);
 
     const guildConfig = getGuildConfig(message.guildId, false);
     const dedicatedBattleLinkChannel = guildConfig?.battleLinkChannelId;
@@ -6249,7 +6312,7 @@ client.on('messageCreate', async message => {
 
     try {
         const status = await message.reply('⏳ กำลังดึงสถิติและสร้างรายงานจาก Official Albion API...');
-        await processBattleReport(match[0], status, true);
+        await processBattleReport(battleUrl, status, true);
     } catch (err) { console.error('❌ messageCreate error:', err); }
     });
 });
