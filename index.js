@@ -79,7 +79,7 @@ let legacyMigration = null;
 let autoBattleCheckRunning = false;
 
 function createDefaultGuildConfig() {
-    return { players: [], guilds: [], autoBattles: [], dailyAuto: [], dailyConfirmations: [], dailySourceStatus: {}, banditAuto: [], avaAuto: [], avaProcessedMessages: [], processedBattles: [], lastDailyReportDate: {}, lastBanditAlertKey: {} };
+    return { players: [], guilds: [], autoBattles: [], dailyAuto: [], dailyConfirmations: [], dailySourceStatus: {}, banditAuto: [], avaAuto: [], avaProcessedMessages: [], processedBattles: [], lastDailyReportDate: {}, lastBanditAlertKey: {}, battleLinkChannelId: null };
 }
 function normalizeGuildConfig(raw = {}) {
     const cfg = raw && typeof raw === 'object' ? raw : {};
@@ -96,7 +96,8 @@ function normalizeGuildConfig(raw = {}) {
         avaProcessedMessages: cfg.avaProcessedMessages instanceof Set ? [...cfg.avaProcessedMessages].map(String).slice(-500) : (Array.isArray(cfg.avaProcessedMessages) ? cfg.avaProcessedMessages.map(String).slice(-500) : []),
         processedBattles: cfg.processedBattles instanceof Set ? [...cfg.processedBattles].map(String).slice(-1000) : (Array.isArray(cfg.processedBattles) ? cfg.processedBattles.map(String).slice(-1000) : []),
         lastDailyReportDate: cfg.lastDailyReportDate && typeof cfg.lastDailyReportDate === 'object' ? cfg.lastDailyReportDate : {},
-        lastBanditAlertKey: cfg.lastBanditAlertKey && typeof cfg.lastBanditAlertKey === 'object' ? cfg.lastBanditAlertKey : {}
+        lastBanditAlertKey: cfg.lastBanditAlertKey && typeof cfg.lastBanditAlertKey === 'object' ? cfg.lastBanditAlertKey : {},
+        battleLinkChannelId: typeof cfg.battleLinkChannelId === 'string' ? cfg.battleLinkChannelId : null
     };
 }
 function getGuildConfig(guildId, create = true) {
@@ -2007,11 +2008,23 @@ async function processBattleReport(input, targetContext, isMessage = false) {
         const matchId = extractMatchId(input);
         const guildId = currentGuildId();
         const guildConfig = guildId ? getGuildConfig(guildId, false) : null;
-        const { payload } = await buildBattleReportPayload(matchId, targetGuilds, {
+        const battleResult = await buildBattleReportPayload(matchId, targetGuilds, {
             guildId,
             trackedPlayers: Array.isArray(guildConfig?.players) ? guildConfig.players : []
         });
+        const payload = battleResult.payload;
         const files = Array.isArray(payload.files) ? payload.files : [];
+        if (isMessage && guildConfig?.battleLinkChannelId && targetContext?.channel?.id === guildConfig.battleLinkChannelId) {
+            const totalKills = Number(battleResult.totalKills) || 0;
+            const totalDeaths = Number(battleResult.totalDeaths) || 0;
+            const battleUrl = battleResult.battleUrl || `https://east.albionbb.com/battles/${matchId}`;
+            payload.content = `🚨 **Battle การต่อสู้ของกิลด์**\n` +
+                `⚔️ **Kills:** ${totalKills.toLocaleString()}\n` +
+                `☠️ **Deaths:** ${totalDeaths.toLocaleString()}\n` +
+                `➕ **Kills + Deaths:** ${(totalKills + totalDeaths).toLocaleString()}\n` +
+                `🔗 **Battle Link:** <${battleUrl}>` +
+                (files.length ? '\n🖼️ **Battle Report:** รายงานแบบรูปภาพด้านล่าง' : '');
+        }
 
         if (files.length > 1) {
             const firstPayload = {
@@ -5537,6 +5550,11 @@ const commands = [
     new SlashCommandBuilder().setName('remove').setDescription('ลบรายการติดตาม')
         .addSubcommand(s => s.setName('guild').setDescription('ลบกิลด์').addStringOption(o => o.setName('name').setDescription('ชื่อกิลด์').setRequired(true)))
         .addSubcommand(s => s.setName('player').setDescription('ลบผู้เล่น').addStringOption(o => o.setName('name').setDescription('ชื่อผู้เล่น').setRequired(true))),
+    new SlashCommandBuilder().setName('battlelink').setDescription('จัดการระบบรายงานเมื่อมีคนวางลิงก์ Battle')
+        .addSubcommand(s => s.setName('setup').setDescription('ตั้งค่าห้องสำหรับตรวจลิงก์ Battle อัตโนมัติ')
+            .addChannelOption(o => o.setName('channel').setDescription('ห้องที่ให้บอทตรวจลิงก์ AlbionBB').addChannelTypes(ChannelType.GuildText).setRequired(true)))
+        .addSubcommand(s => s.setName('status').setDescription('ดูห้องที่ตั้งค่าตรวจลิงก์ Battle'))
+        .addSubcommand(s => s.setName('remove').setDescription('ยกเลิกระบบตรวจลิงก์ Battle')),
     new SlashCommandBuilder().setName('autobattle').setDescription('จัดการระบบติดตามไฟต์อัตโนมัติ')
         .addSubcommand(s => s.setName('set').setDescription('ตั้งค่าระบบติดตามไฟต์อัตโนมัติ')
             .addChannelOption(o => o.setName('channel').setDescription('ห้องที่ต้องการให้แจ้งเตือน').addChannelTypes(ChannelType.GuildText).setRequired(true))
@@ -5890,6 +5908,26 @@ client.on('interactionCreate', async interaction => {
         }
     }
 
+    if (commandName === 'battlelink') {
+        const sub = interaction.options.getSubcommand();
+        const config = getGuildConfig(interaction.guildId, true);
+        if (sub === 'setup') {
+            const channel = interaction.options.getChannel('channel');
+            config.battleLinkChannelId = channel.id;
+            saveData();
+            return interaction.reply({ content: `✅ ตั้งค่ารายงาน Battle Link แล้ว\n📢 ห้องตรวจลิงก์: <#${channel.id}>\nเมื่อมีการวางลิงก์ AlbionBB ในห้องนี้ บอทจะรายงาน Kills, Deaths และผลรวม พร้อมภาพ Battle Report ถ้าสร้างภาพสำเร็จ`, flags: 64 });
+        }
+        if (sub === 'status') {
+            return interaction.reply({ content: config.battleLinkChannelId ? `🔗 ระบบ Battle Link: เปิดใช้งาน\n📢 ห้อง: <#${config.battleLinkChannelId}>` : 'ℹ️ ยังไม่ได้ตั้งค่าระบบ Battle Link ใช้ /battlelink setup เพื่อตั้งค่าห้อง', flags: 64 });
+        }
+        if (sub === 'remove') {
+            if (!config.battleLinkChannelId) return interaction.reply({ content: 'ℹ️ ยังไม่ได้ตั้งค่าระบบ Battle Link', flags: 64 });
+            config.battleLinkChannelId = null;
+            saveData();
+            return interaction.reply({ content: '🗑️ ยกเลิกระบบ Battle Link แล้ว โดยไม่เปลี่ยนการตั้งค่า /add guild หรือ /autobattle', flags: 64 });
+        }
+    }
+
     if (commandName === 'autobattle') {
         const sub = interaction.options.getSubcommand();
 
@@ -6199,9 +6237,14 @@ client.on('messageCreate', async message => {
     const match = message.content.match(/https?:\/\/(?:east\.)?albionbb\.com\/battles\/[^\s]+/i);
     if (!match) return;
 
-    const matchingGuildConfig = targetGuilds.find(g => g.channelId === message.channel.id);
-    if (targetGuilds.some(g => g.channelId) && !matchingGuildConfig) {
-        return; 
+    const guildConfig = getGuildConfig(message.guildId, false);
+    const dedicatedBattleLinkChannel = guildConfig?.battleLinkChannelId;
+    if (dedicatedBattleLinkChannel) {
+        if (message.channel.id !== dedicatedBattleLinkChannel) return;
+    } else {
+        // Preserve legacy /add guild channel behavior until /battlelink setup is configured.
+        const matchingGuildConfig = targetGuilds.find(g => g.channelId === message.channel.id);
+        if (targetGuilds.some(g => g.channelId) && !matchingGuildConfig) return;
     }
 
     try {
