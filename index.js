@@ -5307,7 +5307,7 @@ const BANDIT_ASSAULT_SCHEDULE_UTC = [
     { hour: 19, chance: 30 },
     { hour: 21, chance: 20 }
 ];
-const BANDIT_ALERT_WINDOW_MINUTES = 20;
+const BANDIT_ALERT_WINDOW_MINUTES = 15;
 const BANDIT_SERVER_NAMES = { asia: 'Asia (East)' };
 
 function getNextBanditAssault(now = new Date()) {
@@ -5460,8 +5460,12 @@ async function generateBanditCard(event, minutesUntil) {
     return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: 'bandit-assault.png' });
 }
 
-function banditAlertComponents(guildId) {
+function banditAlertComponents(guildId, eventStamp, confirmedCount = 0) {
     return new ActionRowBuilder().addComponents(
+        new ButtonBuilder()
+            .setCustomId(`bandit_confirm:${guildId}:${eventStamp}`)
+            .setLabel(`ยืนยันการเกิด (${confirmedCount})`)
+            .setStyle(ButtonStyle.Success),
         new ButtonBuilder().setCustomId(`bandit_toggle:${guildId}`).setLabel('เปิด/ปิดแจ้งเตือน').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId(`bandit_status:${guildId}`).setLabel('ดูรอบถัดไป').setStyle(ButtonStyle.Primary)
     );
@@ -5507,7 +5511,7 @@ async function checkAndSendBanditAlertsForGuild() {
                 const alertMessage = await channel.send({
                     content: `⚔️ **BANDIT ASSAULT — ASIA**\nกำลังจะเริ่มใน **${banditCountdownText(minutesUntil)}**\n🕒 เวลาเริ่ม: **${ictTime} น. (ICT)**\n🎲 โอกาสเกิด: **${chanceLabel}**`,
                     files: [card],
-                    components: [banditAlertComponents(config.guildId)]
+                    components: [banditAlertComponents(config.guildId, String(event.start.getTime()), (config.banditConfirmations?.[String(event.start.getTime())] || []).length)]
                 });
                 config.lastMessageId = alertMessage.id;
                 config.lastEventKey = key;
@@ -5789,7 +5793,30 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (interaction.isButton()) {
-        const [action, guildId] = interaction.customId.split(':');
+        const [action, guildId, eventStamp] = interaction.customId.split(':');
+        if (action === 'bandit_confirm') {
+            const config = banditAutoConfigs.find(c => c.guildId === guildId);
+            if (!config) return interaction.reply({ content: '❌ ไม่พบการตั้งค่า Bandit Assault นี้', ephemeral: true });
+            if (interaction.message?.id !== config.lastMessageId) {
+                return interaction.reply({ content: 'ℹ️ ปุ่มนี้เป็นการแจ้งเตือนรอบเก่าแล้ว', ephemeral: true });
+            }
+            const eventKey = new Date(Number(eventStamp)).toISOString();
+            if (config.lastEventKey !== eventKey) {
+                return interaction.reply({ content: 'ℹ️ ปุ่มนี้เป็นการแจ้งเตือนรอบเก่าแล้ว', ephemeral: true });
+            }
+            if (!config.banditConfirmations || typeof config.banditConfirmations !== 'object') config.banditConfirmations = {};
+            const voters = Array.isArray(config.banditConfirmations[eventStamp]) ? config.banditConfirmations[eventStamp] : [];
+            if (voters.includes(interaction.user.id)) {
+                return interaction.reply({ content: `คุณยืนยันรอบนี้แล้ว (รวม ${voters.length} คน)`, ephemeral: true });
+            }
+            voters.push(interaction.user.id);
+            config.banditConfirmations[eventStamp] = voters;
+            saveData();
+            await interaction.update({
+                components: [banditAlertComponents(guildId, eventStamp, voters.length)]
+            });
+            return;
+        }
         if (action === 'bandit_toggle') {
             const config = banditAutoConfigs.find(c => c.guildId === guildId);
             if (!config) return interaction.reply({ content: '❌ ยังไม่ได้ตั้งค่า Bandit Assault สำหรับเซิร์ฟเวอร์นี้', ephemeral: true });
