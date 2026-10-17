@@ -17,6 +17,8 @@ const {
 
 const cloudscraper = require('cloudscraper');
 const axios = require('axios');
+// Global safety net: every Axios request has a finite timeout unless a call sets a stricter one.
+axios.defaults.timeout = 20000;
 const cheerio = require('cheerio');
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const { execFile } = require('child_process');
@@ -6295,14 +6297,15 @@ client.on('messageCreate', async message => {
     }
     const match = message.content.match(/https?:\/\/(?:east\.)?albionbb\.com\/battles\/[^\s]+/i);
     if (!match) return;
-    const battleUrl = match[0].replace(/[)>\],.]+$/, ''), rateKey = battleUrl, now = Date.now();
-    for (const [key, stamp] of battleUrlRateLimit) if (now - stamp > 10 * 60 * 1000) battleUrlRateLimit.delete(key);
-    if (battleUrlRateLimit.has(rateKey) && now - battleUrlRateLimit.get(rateKey) < BATTLE_URL_COOLDOWN_MS) { console.log('⏳ Battle URL rate limit: duplicate link suppressed'); return; }
-    battleUrlRateLimit.set(rateKey, now);
+    const battleUrl = match[0].replace(/[)>\],.]+$/, '');
 
     const guildConfig = getGuildConfig(message.guildId, false);
     const dedicatedBattleLinkChannel = guildConfig?.battleLinkChannelId;
     if (dedicatedBattleLinkChannel) {
+        const rateKey = battleUrl, now = Date.now();
+        for (const [key, stamp] of battleUrlRateLimit) if (now - stamp > 10 * 60 * 1000) battleUrlRateLimit.delete(key);
+        if (battleUrlRateLimit.has(rateKey) && now - battleUrlRateLimit.get(rateKey) < BATTLE_URL_COOLDOWN_MS) { console.log('⏳ Battle URL rate limit: duplicate link suppressed'); return; }
+        battleUrlRateLimit.set(rateKey, now);
         if (message.channel.id !== dedicatedBattleLinkChannel) return;
     } else {
         // Preserve legacy /add guild channel behavior until /battlelink setup is configured.
