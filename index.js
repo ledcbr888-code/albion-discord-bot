@@ -6311,15 +6311,16 @@ client.on('messageCreate', async message => {
     const dedicatedBattleLinkChannel = guildConfig?.battleLinkChannelId;
     if (dedicatedBattleLinkChannel) {
         if (message.channel.id !== dedicatedBattleLinkChannel) return;
-        const rateKey = battleUrl, now = Date.now();
-        for (const [key, stamp] of battleUrlRateLimit) if (now - stamp > 10 * 60 * 1000) battleUrlRateLimit.delete(key);
-        if (battleUrlRateLimit.has(rateKey) && now - battleUrlRateLimit.get(rateKey) < BATTLE_URL_COOLDOWN_MS) { console.log('⏳ Battle URL rate limit: duplicate link suppressed'); return; }
-        battleUrlRateLimit.set(rateKey, now);
     } else {
         // Preserve legacy /add guild channel behavior until /battlelink setup is configured.
         const matchingGuildConfig = targetGuilds.find(g => g.channelId === message.channel.id);
         if (targetGuilds.some(g => g.channelId) && !matchingGuildConfig) return;
     }
+
+    const rateKey = battleUrl, now = Date.now();
+    for (const [key, stamp] of battleUrlRateLimit) if (now - stamp > 10 * 60 * 1000) battleUrlRateLimit.delete(key);
+    if (battleUrlRateLimit.has(rateKey) && now - battleUrlRateLimit.get(rateKey) < BATTLE_URL_COOLDOWN_MS) { console.log('⏳ Battle URL rate limit: duplicate link suppressed'); return; }
+    battleUrlRateLimit.set(rateKey, now);
 
     try {
         const status = await message.reply('⏳ กำลังดึงสถิติและสร้างรายงานจาก Official Albion API...');
