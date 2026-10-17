@@ -3389,7 +3389,7 @@ function setAvaMessageState(guildId, messageId, state, details = '') {
  if (keys.length > 500) for (const key of keys.sort((a,b) => (cfg.avaMessageStates[a]?.updatedAt || 0) - (cfg.avaMessageStates[b]?.updatedAt || 0)).slice(0, keys.length - 500)) delete cfg.avaMessageStates[key];
  saveData();
 }
-function runAvaWithConcurrency(task) {
+function runAvaWithConcurrency(task, message) {
  if (avaActiveJobs < AVA_MAX_CONCURRENT) { avaActiveJobs++; return Promise.resolve().then(task).finally(() => { avaActiveJobs--; const next = avaWaitingJobs.shift(); if (next) next(); }); }
  if (avaWaitingJobs.length >= AVA_MAX_QUEUE) { const gid = message?.guildId || message?.guild?.id; if (gid && message?.id) setAvaMessageState(gid, message.id, 'failed', 'AVA work queue full; retry scheduled'); return Promise.resolve(false); }
  return new Promise((resolve,reject) => { avaWaitingJobs.push(() => { avaActiveJobs++; Promise.resolve().then(task).then(resolve,reject).finally(() => { avaActiveJobs--; const next = avaWaitingJobs.shift(); if (next) next(); }); }); });
@@ -5279,7 +5279,7 @@ async function processAvaImageMessageInternal(message, fallbackAttachments = [])
     return true;
 }
 
-async function processAvaImageMessage(message, fallbackAttachments = []) { return runAvaWithConcurrency(() => processAvaImageMessageInternal(message, fallbackAttachments)); }
+async function processAvaImageMessage(message, fallbackAttachments = []) { return runAvaWithConcurrency(() => processAvaImageMessageInternal(message, fallbackAttachments), message); }
 
 // ----------------------------------------
 // AUTOMATED DAILY REPORT SCHEDULER
