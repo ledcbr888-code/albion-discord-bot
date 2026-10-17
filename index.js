@@ -2269,7 +2269,9 @@ async function checkAutoBattlesForGuild() {
                     const alertText =
                         `🚨 **Auto-Battle Alert!** ตรวจพบไฟต์ใหม่ของกิลด์ **${config.targetGuild}**\n` +
                         `💰 Fame รวมของผู้ที่ติดตาม: \`${formatFame(result.totalFame)}\`\n` +
-                        `⚔️ Kills + Deaths: \`${(Number(result.totalKills) + Number(result.totalDeaths)).toLocaleString()}\`\n` +
+                        `⚔️ Kills: \`${Number(result.totalKills).toLocaleString()}\`\n` +
+                        `☠️ Deaths: \`${Number(result.totalDeaths).toLocaleString()}\`\n` +
+                        `➕ Kills + Deaths: \`${(Number(result.totalKills) + Number(result.totalDeaths)).toLocaleString()}\`\n` +
                         `🔗 Battle Link: <${result.battleUrl}>`;
                     const reportFiles = Array.isArray(result.payload.files) ? result.payload.files : [];
                     if (reportFiles.length > 0) {
