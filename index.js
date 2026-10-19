@@ -1,4 +1,4 @@
-// AUTO-BATTLE FIX V3 (STABLE CANVAS) + DAILY BONUS COMMAND & AUTOMATION
+// AUTO-BATTLE FIX V3 (STABLE CANVAS) + AVA + BANDIT AUTOMATION
 const {
     Client,
     GatewayIntentBits,
@@ -17,6 +17,8 @@ const {
 
 const cloudscraper = require('cloudscraper');
 const axios = require('axios');
+// Global safety net: every Axios request has a finite timeout unless a call sets a stricter one.
+axios.defaults.timeout = 20000;
 const cheerio = require('cheerio');
 const { createCanvas, loadImage, GlobalFonts } = require('@napi-rs/canvas');
 const { execFile } = require('child_process');
@@ -77,9 +79,20 @@ let githubPersistenceReady = false;
 let guildConfigs = {};
 let legacyMigration = null;
 let autoBattleCheckRunning = false;
+let banditSchedulerRunning = false;
+let avaPollRunning = false;
+const battleUrlRateLimit = new Map();
+const avaUserRateLimit = new Map();
+const AVA_MAX_CONCURRENT = 2;
+const AVA_MAX_QUEUE = 12;
+const AVA_MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+let avaActiveJobs = 0;
+const avaWaitingJobs = [];
+const BATTLE_URL_COOLDOWN_MS = 12 * 1000;
+const AVA_USER_COOLDOWN_MS = 8 * 1000;
 
 function createDefaultGuildConfig() {
-    return { players: [], guilds: [], autoBattles: [], dailyAuto: [], dailyConfirmations: [], dailySourceStatus: {}, banditAuto: [], avaAuto: [], avaProcessedMessages: [], processedBattles: [], lastDailyReportDate: {}, lastBanditAlertKey: {} };
+    return { players: [], guilds: [], autoBattles: [], banditAuto: [], avaAuto: [], avaProcessedMessages: [], avaMessageStates: {}, processedBattles: [], lastBanditAlertKey: {}, battleLinkChannelId: null };
 }
 function normalizeGuildConfig(raw = {}) {
     const cfg = raw && typeof raw === 'object' ? raw : {};
@@ -88,15 +101,13 @@ function normalizeGuildConfig(raw = {}) {
         players: Array.isArray(cfg.players) ? cfg.players.map(String).filter(Boolean) : [],
         guilds: Array.isArray(cfg.guilds) ? cfg.guilds : [],
         autoBattles: Array.isArray(cfg.autoBattles) ? cfg.autoBattles : [],
-        dailyAuto: Array.isArray(cfg.dailyAuto) ? cfg.dailyAuto : [],
-        dailyConfirmations: Array.isArray(cfg.dailyConfirmations) ? cfg.dailyConfirmations : [],
-        dailySourceStatus: cfg.dailySourceStatus && typeof cfg.dailySourceStatus === 'object' ? cfg.dailySourceStatus : {},
         banditAuto: Array.isArray(cfg.banditAuto) ? cfg.banditAuto : [],
         avaAuto: Array.isArray(cfg.avaAuto) ? cfg.avaAuto : [],
         avaProcessedMessages: cfg.avaProcessedMessages instanceof Set ? [...cfg.avaProcessedMessages].map(String).slice(-500) : (Array.isArray(cfg.avaProcessedMessages) ? cfg.avaProcessedMessages.map(String).slice(-500) : []),
+        avaMessageStates: cfg.avaMessageStates && typeof cfg.avaMessageStates === 'object' ? cfg.avaMessageStates : {},
         processedBattles: cfg.processedBattles instanceof Set ? [...cfg.processedBattles].map(String).slice(-1000) : (Array.isArray(cfg.processedBattles) ? cfg.processedBattles.map(String).slice(-1000) : []),
-        lastDailyReportDate: cfg.lastDailyReportDate && typeof cfg.lastDailyReportDate === 'object' ? cfg.lastDailyReportDate : {},
-        lastBanditAlertKey: cfg.lastBanditAlertKey && typeof cfg.lastBanditAlertKey === 'object' ? cfg.lastBanditAlertKey : {}
+        lastBanditAlertKey: cfg.lastBanditAlertKey && typeof cfg.lastBanditAlertKey === 'object' ? cfg.lastBanditAlertKey : {},
+        battleLinkChannelId: typeof cfg.battleLinkChannelId === 'string' ? cfg.battleLinkChannelId : null
     };
 }
 function getGuildConfig(guildId, create = true) {
@@ -130,11 +141,10 @@ function scopedSet(field) {
 }
 const scopedNames = {
     targetPlayers: ['players','array'], targetGuilds: ['guilds','array'],
-    autoBattleConfigs: ['autoBattles','array'], dailyAutoConfigs: ['dailyAuto','array'],
-    dailyPlayerConfirmations: ['dailyConfirmations','array'], dailySourceStatus: ['dailySourceStatus','object'],
+    autoBattleConfigs: ['autoBattles','array'],
     banditAutoConfigs: ['banditAuto','array'], avaAutoConfigs: ['avaAuto','array'],
     avaProcessedMessages: ['avaProcessedMessages','set'], processedBattles: ['processedBattles','set'],
-    lastDailyReportDate: ['lastDailyReportDate','object'], lastBanditAlertKey: ['lastBanditAlertKey','object']
+    lastBanditAlertKey: ['lastBanditAlertKey','object']
 };
 for (const [name, [field, type]] of Object.entries(scopedNames)) {
     Object.defineProperty(globalThis, name, { configurable: true, get() { return type === 'set' ? scopedSet(field) : type === 'object' ? scopedObject(field) : scopedArray(field); }, set(value) { const cfg = currentGuildConfig(); if (!cfg) return; cfg[field] = type === 'set' ? [...(value || [])].map(String) : value; } });
@@ -154,18 +164,16 @@ async function migrateLegacyDataAfterReady() {
         if (entry.name && !cfg.guilds.some(x => String(x.name).toLowerCase() === String(entry.name).toLowerCase())) cfg.guilds.push({ name: entry.name, channelId: entry.channelId || null });
         inferred.set(gid, (inferred.get(gid) || 0) + 1);
     }
-    for (const field of ['autoBattles','dailyAuto','banditAuto','avaAuto']) for (const item of (Array.isArray(legacy[field === 'autoBattles' ? 'autoBattles' : field]) ? legacy[field === 'autoBattles' ? 'autoBattles' : field] : [])) {
+    for (const field of ['autoBattles','banditAuto','avaAuto']) for (const item of (Array.isArray(legacy[field]) ? legacy[field] : [])) {
         if (!item?.guildId) continue;
         const cfg = getGuildConfig(item.guildId);
         if (!cfg[field].some(x => JSON.stringify(x) === JSON.stringify(item))) cfg[field].push(item);
     }
-    const known = [...new Set([...inferred.keys(), ...(legacy.autoBattles || []).map(x => x?.guildId).filter(Boolean), ...(legacy.dailyAuto || []).map(x => x?.guildId).filter(Boolean)])];
+    const known = [...new Set([...inferred.keys(), ...(legacy.autoBattles || []).map(x => x?.guildId).filter(Boolean)])];
     const target = inferred.size === 1 ? [...inferred.keys()][0] : (known.length === 1 ? known[0] : (client.guilds.cache.size === 1 ? client.guilds.cache.first().id : null));
     if (target) {
         const cfg = getGuildConfig(target);
         for (const p of (legacy.players || [])) if (!cfg.players.some(x => x.toLowerCase() === String(p).toLowerCase())) cfg.players.push(String(p));
-        cfg.dailyConfirmations = Array.isArray(legacy.dailyConfirmations) ? legacy.dailyConfirmations : cfg.dailyConfirmations;
-        cfg.dailySourceStatus = legacy.dailySourceStatus || cfg.dailySourceStatus;
         cfg.processedBattles = Array.isArray(legacy.processedBattles) ? legacy.processedBattles.slice(-1000) : cfg.processedBattles;
     }
     saveData();
@@ -876,21 +884,6 @@ function getApiPlayers(apiData) {
     if (!apiData?.players) return [];
     const list = Array.isArray(apiData.players) ? apiData.players : Object.values(apiData.players);
     return list.map(objectToPlayer).filter(Boolean);
-}
-
-function getWeaponRenderUrls(weapon, quality = 1) {
-    const id = normalizeAlbionItemId(weapon);
-    if (!id) return [];
-    const baseId = id.replace(/@\d+$/, '');
-    const q = Math.max(1, Math.min(5, Number(quality) || 1));
-    const encoded = encodeURIComponent(id);
-    const encodedBase = encodeURIComponent(baseId);
-    return [
-        `https://render.albiononline.com/v1/item/${encoded}.png?quality=${q}&size=64`,
-        `https://render.albiononline.com/v1/item/${encodedBase}.png?quality=${q}&size=64`,
-        `https://render.albiononline.com/v1/item/${encoded}`,
-        `https://gameinfo.albiononline.com/api/gameinfo/items/${encoded}`
-    ];
 }
 
 function drawRoundRect(ctx, x, y, w, h, r) {
@@ -2007,11 +2000,23 @@ async function processBattleReport(input, targetContext, isMessage = false) {
         const matchId = extractMatchId(input);
         const guildId = currentGuildId();
         const guildConfig = guildId ? getGuildConfig(guildId, false) : null;
-        const { payload } = await buildBattleReportPayload(matchId, targetGuilds, {
+        const battleResult = await buildBattleReportPayload(matchId, targetGuilds, {
             guildId,
             trackedPlayers: Array.isArray(guildConfig?.players) ? guildConfig.players : []
         });
+        const payload = battleResult.payload;
         const files = Array.isArray(payload.files) ? payload.files : [];
+        if (isMessage && guildConfig?.battleLinkChannelId && targetContext?.channel?.id === guildConfig.battleLinkChannelId) {
+            const totalKills = Number(battleResult.totalKills) || 0;
+            const totalDeaths = Number(battleResult.totalDeaths) || 0;
+            const battleUrl = battleResult.battleUrl || `https://east.albionbb.com/battles/${matchId}`;
+            payload.content = `🚨 **Battle การต่อสู้ของกิลด์**\n` +
+                `⚔️ **Kills:** ${totalKills.toLocaleString()}\n` +
+                `☠️ **Deaths:** ${totalDeaths.toLocaleString()}\n` +
+                `➕ **Kills + Deaths:** ${(totalKills + totalDeaths).toLocaleString()}\n` +
+                `🔗 **Battle Link:** <${battleUrl}>` +
+                (files.length ? '\n🖼️ **Battle Report:** รายงานแบบรูปภาพด้านล่าง' : '');
+        }
 
         if (files.length > 1) {
             const firstPayload = {
@@ -2269,7 +2274,9 @@ async function checkAutoBattlesForGuild() {
                     const alertText =
                         `🚨 **Auto-Battle Alert!** ตรวจพบไฟต์ใหม่ของกิลด์ **${config.targetGuild}**\n` +
                         `💰 Fame รวมของผู้ที่ติดตาม: \`${formatFame(result.totalFame)}\`\n` +
-                        `⚔️ Kills + Deaths: \`${(Number(result.totalKills) + Number(result.totalDeaths)).toLocaleString()}\`\n` +
+                        `⚔️ Kills: \`${Number(result.totalKills).toLocaleString()}\`\n` +
+                        `☠️ Deaths: \`${Number(result.totalDeaths).toLocaleString()}\`\n` +
+                        `➕ Kills + Deaths: \`${(Number(result.totalKills) + Number(result.totalDeaths)).toLocaleString()}\`\n` +
                         `🔗 Battle Link: <${result.battleUrl}>`;
                     const reportFiles = Array.isArray(result.payload.files) ? result.payload.files : [];
                     if (reportFiles.length > 0) {
@@ -2303,768 +2310,6 @@ async function checkAutoBattlesForGuild() {
         autoBattleCheckRunning = false;
     }
 }
-
-// ---------------------------
-// HELPER FOR DAILY BONUS
-// ---------------------------
-// Albion's public GameInfo API does NOT expose a /dailyactivity endpoint.
-// Daily production bonuses are published/recorded by third-party trackers.
-// AO-SAGE publicly shows the current bonus for all three live servers.
-const DAILY_BONUS_SOURCE = 'https://ao-sage.com/today';
-const DAILY_CACHE_FILE = path.join(__dirname, 'daily-bonus-cache.json');
-
-// Albion Data Project confirms live festivities from multiple game clients.
-// It may return 404 when a server has no confirmed snapshot yet, so it is a
-// fallback only and must never replace one server's data with another server's.
-const AODP_FESTIVITIES_URLS = {
-    west: 'https://west.albion-online-data.com/api/v2/stats/festivities',
-    asia: 'https://east.albion-online-data.com/api/v2/stats/festivities',
-    europe: 'https://europe.albion-online-data.com/api/v2/stats/festivities'
-};
-
-const SERVER_NAMES = {
-    west: 'Americas (West)',
-    asia: 'Asia (East)',
-    europe: 'Europe (EU)'
-};
-
-// Daily production bonus reset times. Asia resets at 00:00 UTC (07:00 Thai),
-// while Americas and Europe reset at 10:00 UTC (17:00 Thai).
-const DAILY_RESET_UTC_HOURS = {
-    asia: 0,
-    west: 10,
-    europe: 10
-};
-
-function getDailyResetText(serverKey) {
-    const utcHour = DAILY_RESET_UTC_HOURS[serverKey] ?? 10;
-    const thaiHour = (utcHour + 7) % 24;
-    return `⏳ ${String(thaiHour).padStart(2, '0')}:00 น. ไทย (${String(utcHour).padStart(2, '0')}:00 UTC)`;
-}
-
-const DAILY_SERVER_LABELS = {
-    west: 'Americas',
-    asia: 'Asia',
-    europe: 'Europe'
-};
-
-const DAILY_CATEGORY_META = {
-    cloth_helmet: { label: 'Cloth Cowl', city: 'Thetford', baseBonus: 15 },
-    cloth_robe: { label: 'Cloth Robes', city: 'Fort Sterling', baseBonus: 15 },
-    cloth_boots: { label: 'Cloth Sandals', city: 'Bridgewatch', baseBonus: 15 },
-    crossbow: { label: 'Crossbow', city: 'Bridgewatch', baseBonus: 15 },
-    cursestaff: { label: 'Cursed Staff', city: 'Bridgewatch', baseBonus: 15 },
-    dagger: { label: 'Dagger', city: 'Bridgewatch', baseBonus: 15 },
-    plate_armor: { label: 'Plate Armor', city: 'Bridgewatch', baseBonus: 15 },
-    stone: { label: 'Stone', city: 'Bridgewatch', baseBonus: 40 },
-    hammer: { label: 'Hammer', city: 'Fort Sterling', baseBonus: 15 },
-    holystaff: { label: 'Holy Staff', city: 'Fort Sterling', baseBonus: 15 },
-    plate_helmet: { label: 'Plate Helmet', city: 'Fort Sterling', baseBonus: 15 },
-    spear: { label: 'Spear', city: 'Fort Sterling', baseBonus: 15 },
-    wood: { label: 'Wood', city: 'Fort Sterling', baseBonus: 40 },
-    arcane_staff: { label: 'Arcane Staff', city: 'Lymhurst', baseBonus: 15 },
-    bow: { label: 'Bow', city: 'Lymhurst', baseBonus: 15 },
-    fiber: { label: 'Fiber', city: 'Lymhurst', baseBonus: 40 },
-    leather_helmet: { label: 'Leather Hood', city: 'Lymhurst', baseBonus: 15 },
-    leather_shoes: { label: 'Leather Shoes', city: 'Lymhurst', baseBonus: 15 },
-    sword: { label: 'Sword', city: 'Lymhurst', baseBonus: 15 },
-    axe: { label: 'Axe', city: 'Martlock', baseBonus: 15 },
-    froststaff: { label: 'Frost Staff', city: 'Martlock', baseBonus: 15 },
-    hide: { label: 'Hide', city: 'Martlock', baseBonus: 40 },
-    offhand: { label: 'Off-Hand', city: 'Martlock', baseBonus: 15 },
-    plate_boots: { label: 'Plate Boots', city: 'Martlock', baseBonus: 15 },
-    quarterstaff: { label: 'Quarterstaff', city: 'Martlock', baseBonus: 15 },
-    firestaff: { label: 'Fire Staff', city: 'Thetford', baseBonus: 15 },
-    leather_jacket: { label: 'Leather Jackets', city: 'Thetford', baseBonus: 15 },
-    mace: { label: 'Mace', city: 'Thetford', baseBonus: 15 },
-    naturestaff: { label: 'Nature Staff', city: 'Thetford', baseBonus: 15 },
-    ore: { label: 'Ore', city: 'Thetford', baseBonus: 40 },
-    food: { label: 'Food', city: 'Caerleon', baseBonus: 15 },
-    gathering_gear: { label: 'Gathering Gear', city: 'Caerleon', baseBonus: 15 },
-    shapeshifter_staff: { label: 'Shapeshifter Staff', city: 'Caerleon', baseBonus: 15 },
-    tool: { label: 'Tool', city: 'Caerleon', baseBonus: 15 },
-    war_gloves: { label: 'War Gloves', city: 'Caerleon', baseBonus: 15 },
-    bag: { label: 'Bag', city: 'Brecilien', baseBonus: 15 },
-    cape: { label: 'Cape', city: 'Brecilien', baseBonus: 15 },
-    potion: { label: 'Potion', city: 'Brecilien', baseBonus: 15 }
-};
-
-const DAILY_CATEGORY_ALIASES = {
-    cloth_cowl: 'cloth_helmet',
-    cloth_helmet: 'cloth_helmet',
-    cloth_robe: 'cloth_robe',
-    cloth_sandals: 'cloth_boots',
-    leather_hood: 'leather_helmet',
-    leather_jackets: 'leather_jacket',
-    arcane_staff: 'arcane_staff',
-    frost_staff: 'froststaff',
-    holy_staff: 'holystaff',
-    fire_staff: 'firestaff',
-    nature_staff: 'naturestaff',
-    quarter_staff: 'quarterstaff',
-    gathering_equipment: 'gathering_gear',
-    shapeshifterstaff: 'shapeshifter_staff',
-    war_glove: 'war_gloves',
-    off_hand: 'offhand'
-};
-
-const DAILY_CATEGORY_ITEM_IDS = {
-    'Cloth Robes': ['T4_CLOTH_ROBE', 'T5_CLOTH_ROBE', 'T6_CLOTH_ROBE', 'T7_CLOTH_ROBE', 'T8_CLOTH_ROBE', 'T4_CLOTH_ROBE@1', 'T5_CLOTH_ROBE@1', 'T6_CLOTH_ROBE@1', 'T7_CLOTH_ROBE@1'],
-    'Leather Jackets': ['T4_LEATHER_JACKET', 'T5_LEATHER_JACKET', 'T6_LEATHER_JACKET', 'T7_LEATHER_JACKET', 'T8_LEATHER_JACKET', 'T4_LEATHER_JACKET@1', 'T5_LEATHER_JACKET@1', 'T6_LEATHER_JACKET@1', 'T7_LEATHER_JACKET@1'],
-    'Cloth Cowl': ['T4_CLOTH_COWL', 'T5_CLOTH_COWL', 'T6_CLOTH_COWL', 'T7_CLOTH_COWL', 'T8_CLOTH_COWL', 'T4_CLOTH_COWL@1', 'T5_CLOTH_COWL@1', 'T6_CLOTH_COWL@1', 'T7_CLOTH_COWL@1'],
-    'Nature Staff': ['T4_MAIN_NATURESTAFF', 'T5_MAIN_NATURESTAFF', 'T6_MAIN_NATURESTAFF', 'T7_MAIN_NATURESTAFF', 'T8_MAIN_NATURESTAFF', 'T4_MAIN_NATURESTAFF@1', 'T5_MAIN_NATURESTAFF@1', 'T6_MAIN_NATURESTAFF@1', 'T7_MAIN_NATURESTAFF@1']
-};
-
-const DAILY_CATEGORY_ICON_URLS = {
-    'Cloth Robes': 'https://render.albiononline.com/v1/destiny/Cloth%20Robe%20Crafter.png?locale=en',
-    'Leather Jackets': 'https://render.albiononline.com/v1/destiny/Leather%20Jacket%20Crafter.png?locale=en',
-    'Cloth Cowl': 'https://render.albiononline.com/v1/destiny/Cloth%20Cowl%20Crafter.png?locale=en',
-    'Nature Staff': 'https://render.albiononline.com/v1/destiny/Nature%20Staff%20Crafter.png?locale=en'
-};
-const dailyIconCache = new Map();
-const DAILY_CATEGORY_ICON_ITEM_FALLBACKS = {
-    'Cloth Cowl': ['T4_HEAD_CLOTH_SET1', 'T4_CLOTH_COWL'],
-    'Cloth Robes': ['T4_ARMOR_CLOTH_SET1', 'T4_CLOTH_ROBE'],
-    'Cloth Sandals': ['T4_SHOES_CLOTH_SET1', 'T4_CLOTH_SHOES'],
-    'Leather Hood': ['T4_HEAD_LEATHER_SET1', 'T4_LEATHER_HOOD'],
-    'Leather Jackets': ['T4_ARMOR_LEATHER_SET1', 'T4_LEATHER_JACKET'],
-    'Leather Shoes': ['T4_SHOES_LEATHER_SET1', 'T4_LEATHER_SHOES'],
-    'Plate Helmet': ['T4_HEAD_PLATE_SET1', 'T4_PLATE_HELMET'],
-    'Plate Armor': ['T4_ARMOR_PLATE_SET1', 'T4_PLATE_ARMOR'],
-    'Plate Boots': ['T4_SHOES_PLATE_SET1', 'T4_PLATE_BOOTS'],
-    'Sword': ['T4_MAIN_SWORD'], 'Axe': ['T4_MAIN_AXE'], 'Spear': ['T4_MAIN_SPEAR'],
-    'Dagger': ['T4_MAIN_DAGGER'], 'Mace': ['T4_MAIN_MACE'], 'Hammer': ['T4_MAIN_HAMMER'],
-    'Crossbow': ['T4_2H_CROSSBOW'], 'Bow': ['T4_2H_BOW'], 'Cursed Staff': ['T4_MAIN_CURSEDSTAFF'],
-    'Fire Staff': ['T4_MAIN_FIRESTAFF'], 'Frost Staff': ['T4_MAIN_FROSTSTAFF'],
-    'Nature Staff': ['T4_MAIN_NATURESTAFF'], 'Holy Staff': ['T4_MAIN_HOLYSTAFF'],
-    'Arcane Staff': ['T4_MAIN_ARCANESTAFF'], 'Quarterstaff': ['T4_MAIN_QUARTERSTAFF'],
-    'Off-Hand': ['T4_OFF_BOOK', 'T4_OFF_TORCH'], 'War Gloves': ['T4_MAIN_WARGLOVES'],
-    'Shapeshifter Staff': ['T4_MAIN_SHAPESHIFTERSTAFF'],
-    'Stone': ['T4_ROCK'], 'Wood': ['T4_WOOD'], 'Ore': ['T4_ORE'], 'Hide': ['T4_HIDE'], 'Fiber': ['T4_FIBER'],
-    'Food': ['T4_MEAL_ROASTED_PORK'], 'Gathering Gear': ['T4_GATHERER_GATHERINGSET1'],
-    'Tool': ['T4_TOOL_PICKAXE'], 'Bag': ['T4_BAG'], 'Cape': ['T4_CAPE'], 'Potion': ['T4_POTION_HEAL'],
-    'Caerleon': ['T4_CAPE'],
-};
-
-function getDailyIconItemIds(categoryKey) {
-    return DAILY_CATEGORY_ITEM_IDS[categoryKey] || DAILY_CATEGORY_ICON_ITEM_FALLBACKS[categoryKey] || [];
-}
-
-function buildDailyCategoryIconUrls(categoryKey) {
-    const names = {
-        'Cloth Cowl': 'Cloth Cowl Crafter', 'Cloth Robes': 'Cloth Robe Crafter', 'Cloth Sandals': 'Cloth Sandals Crafter',
-        'Leather Hood': 'Leather Hood Crafter', 'Leather Jackets': 'Leather Jacket Crafter', 'Leather Shoes': 'Leather Shoes Crafter',
-        'Plate Helmet': 'Plate Helmet Crafter', 'Plate Armor': 'Plate Armor Crafter', 'Plate Boots': 'Plate Boots Crafter',
-        'Sword': 'Sword Crafter', 'Axe': 'Axe Crafter', 'Spear': 'Spear Crafter', 'Dagger': 'Dagger Crafter',
-        'Mace': 'Mace Crafter', 'Hammer': 'Hammer Crafter', 'Crossbow': 'Crossbow Crafter', 'Bow': 'Bow Crafter',
-        'Cursed Staff': 'Cursed Staff Crafter', 'Fire Staff': 'Fire Staff Crafter', 'Frost Staff': 'Frost Staff Crafter',
-        'Nature Staff': 'Nature Staff Crafter', 'Holy Staff': 'Holy Staff Crafter', 'Arcane Staff': 'Arcane Staff Crafter',
-        'Quarterstaff': 'Quarterstaff Crafter', 'War Gloves': 'War Gloves Crafter', 'Shapeshifter Staff': 'Shapeshifter Staff Crafter',
-        'Stone': 'Stone Mason Crafter', 'Wood': 'Wood Crafter', 'Ore': 'Ore Miner Crafter', 'Hide': 'Hide Tanner Crafter', 'Fiber': 'Fiber Weaver Crafter'
-    };
-    const name = names[categoryKey];
-    return name ? `https://render.albiononline.com/v1/destiny/${encodeURIComponent(name)}.png?locale=en` : null;
-}
-
-
-function dailyCategoryKey(raw) {
-    const key = String(raw || '').toLowerCase().replace(/^common_|^rare_/, '').replace(/-/g, '_');
-    return DAILY_CATEGORY_ALIASES[key] || key;
-}
-
-function loadDailyCache() {
-    try {
-        if (!fs.existsSync(DAILY_CACHE_FILE)) return null;
-        const cached = JSON.parse(fs.readFileSync(DAILY_CACHE_FILE, 'utf8'));
-        return cached && typeof cached === 'object' ? cached : null;
-    } catch (err) {
-        console.warn('⚠️ Daily cache read failed:', err.message);
-        return null;
-    }
-}
-
-function saveDailyCache(serverKey, data) {
-    try {
-        const cache = loadDailyCache() || {};
-        const previous = cache[serverKey];
-        const oldSignature = (previous?.entries || []).map(x => `${x.category}|${x.city}|${x.dailyBonus}`).sort().join('||');
-        const newSignature = (data?.entries || []).map(x => `${x.category}|${x.city}|${x.dailyBonus}`).sort().join('||');
-        const changed = Boolean(oldSignature && newSignature && oldSignature !== newSignature);
-        data.changed = changed;
-        if (changed) data.changedAt = new Date().toISOString();
-        cache[serverKey] = { ...data, changed, changedAt: changed ? new Date().toISOString() : previous?.changedAt, cachedAt: new Date().toISOString() };
-        fs.writeFileSync(DAILY_CACHE_FILE, JSON.stringify(cache, null, 2), 'utf8');
-    } catch (err) {
-        console.warn('⚠️ Daily cache write failed:', err.message);
-    }
-}
-
-function setDailySourceStatus(serverKey, patch) {
-    const cfg = currentGuildConfig();
-    if (!cfg) return;
-    cfg.dailySourceStatus[serverKey] = { ...(cfg.dailySourceStatus[serverKey] || {}), ...patch, checkedAt: new Date().toISOString() };
-    saveData();
-}
-
-function getCommunityDailyData(serverKey) {
-    const today = getExpectedDailyDate();
-    const rows = currentGuildConfig()?.dailyConfirmations?.filter(x => x.server === serverKey && x.date === today) || [];
-    if (!rows.length) return null;
-    const entries = rows.filter((item, index, all) => all.findIndex(x => x.category === item.category) === index)
-        .map(x => ({ category: x.category, city: x.city, baseBonus: Number(x.baseBonus) || 15, dailyBonus: Number(x.dailyBonus) || 10 }))
-        .slice(0, 2);
-    if (!entries.length) return null;
-    return { entries, source: 'COMMUNITY', stale: false, date: today, confirmations: rows.length, fetchedAt: new Date().toISOString() };
-}
-
-function dailyDataSignature(data) {
-    return (data?.entries || []).map(x => `${x.category}|${x.city}|${x.dailyBonus}`).sort().join('||');
-}
-
-function parseAodpDailyBonus(serverKey, payload) {
-    if (!payload || !Array.isArray(payload.Events)) return null;
-
-    const entries = payload.Events
-        .filter(event => Number(event?.Kind) === 2 && String(event?.Category || '').toUpperCase() === 'GENERAL')
-        .map(event => {
-            const rawName = String(event.UniqueName || '');
-            const key = dailyCategoryKey(rawName);
-            const meta = DAILY_CATEGORY_META[key];
-            if (!meta) return null;
-            return {
-                category: meta.label,
-                city: meta.city,
-                baseBonus: meta.baseBonus,
-                dailyBonus: /^RARE_/i.test(rawName) ? 20 : 10
-            };
-        })
-        .filter(Boolean)
-        .filter((item, index, all) => all.findIndex(x => x.category === item.category) === index)
-        .slice(0, 2);
-
-    if (!entries.length) return null;
-    return {
-        entries,
-        raw: `AODP ${payload.Server || serverKey}`,
-        source: 'AODP',
-        stale: false,
-        date: payload.ConfirmedAt || new Date().toISOString()
-    };
-}
-
-function cleanDailyText(value) {
-    return String(value || '')
-        .replace(/\u00a0/g, ' ')
-        .replace(/\s+/g, ' ')
-        .trim();
-}
-
-function extractDailyServerBlock(bodyText, serverKey) {
-    const label = DAILY_SERVER_LABELS[serverKey];
-    if (!label) return '';
-
-    const text = cleanDailyText(bodyText);
-    const labels = Object.values(DAILY_SERVER_LABELS);
-    const positions = [];
-
-    // Find every standalone server heading. We intentionally keep only occurrences
-    // that have another server heading after them; this avoids matching the FAQ/footer.
-    const re = new RegExp(`\\b${label}\\b`, 'g');
-    let match;
-    while ((match = re.exec(text)) !== null) {
-        positions.push(match.index);
-    }
-
-    for (const start of positions) {
-        const nextPositions = labels
-            .filter(x => x !== label)
-            .map(x => {
-                const m = text.slice(start + label.length).match(new RegExp(`\\b${x}\\b`));
-                return m ? start + label.length + m.index : Infinity;
-            })
-            .filter(Number.isFinite)
-            .sort((a, b) => a - b);
-
-        const end = nextPositions.length ? nextPositions[0] : Math.min(text.length, start + 1200);
-        const block = text.slice(start, end);
-
-        // The homepage has a short card list for each server. A useful block normally
-        // contains at least one percentage pair (+10%/+20%).
-        if (/\+\d+%\s+\+\d+%/.test(block)) return block;
-    }
-
-    return '';
-}
-
-function parseDailyBonusBlock(block) {
-    const result = {
-        entries: [],
-        raw: cleanDailyText(block)
-    };
-
-    if (!block) return result;
-
-    // Remove the server heading itself so it cannot become part of the category name.
-    block = cleanDailyText(block).replace(/^(Americas|Asia|Europe)\b/i, '').trim();
-
-    // Parse known category/city labels instead of a greedy generic expression.
-    // The generic parser could consume both cards and return stale-looking data.
-    const categoryNames = Object.values(DAILY_CATEGORY_META)
-        .map(x => x.label)
-        .sort((a, b) => b.length - a.length)
-        .map(x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-        .join('|');
-    const cityNames = [...new Set(Object.values(DAILY_CATEGORY_META).map(x => x.city))]
-        .sort((a, b) => b.length - a.length)
-        .map(x => x.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
-        .join('|');
-    const pairRe = new RegExp(`(${categoryNames})\\s+(${cityNames})\\s+\\+(\\d+)%\\s+\\+(\\d+)%`, 'gi');
-    let match;
-    while ((match = pairRe.exec(block)) !== null) {
-        const category = cleanDailyText(match[1]);
-        const city = cleanDailyText(match[2]);
-        const baseBonus = Number(match[3]);
-        const dailyBonus = Number(match[4]);
-        if (!category || !city) continue;
-
-        // Avoid accidental matches from unrelated page text.
-        if (category.length > 70 || city.length > 45) continue;
-        result.entries.push({ category, city, baseBonus, dailyBonus });
-    }
-
-    // Deduplicate cards that may appear more than once in the HTML.
-    const seen = new Set();
-    result.entries = result.entries.filter(item => {
-        const key = `${item.category}|${item.city}|${item.baseBonus}|${item.dailyBonus}`;
-        if (seen.has(key)) return false;
-        seen.add(key);
-        return true;
-    }).slice(0, 2);
-
-    return result;
-}
-
-function extractDailyPageDate(html, serverKey) {
-    const label = DAILY_SERVER_LABELS[serverKey];
-    if (!label) return '';
-    const source = String(html || '');
-    const patterns = [
-        new RegExp('region:"' + serverKey + '"[^}]{0,300}?date:"(\\d{4}-\\d{2}-\\d{2})"', 'i'),
-        new RegExp('"' + serverKey + '"\\s*:\\s*\\{[^}]{0,300}?"date"\\s*:\\s*"(\\d{4}-\\d{2}-\\d{2})"', 'i')
-    ];
-    for (const re of patterns) {
-        const match = source.match(re);
-        if (match) return match[1];
-    }
-    // AO-SAGE /today can render current cards without the legacy embedded date.
-    // Accept today's date only when the requested server block contains parsed bonus data.
-    const $ = cheerio.load(source);
-    $('img').each((_, element) => {
-        const image = $(element);
-        const alt = image.attr('alt') || image.attr('title') || '';
-        if (alt) image.replaceWith(' ' + alt.replace(/^Image\s*/i, '') + ' ');
-    });
-    const block = extractDailyServerBlock($('body').text().replace(/\s+/g, ' ').trim(), serverKey);
-    const parsed = parseDailyBonusBlock(block);
-    if (parsed.entries.length >= 1) return getExpectedDailyDate();
-    return '';
-}
-
-function getExpectedDailyDate() {
-    return new Date().toISOString().slice(0, 10);
-}
-
-function formatIctTime(dateValue) {
-    const date = new Date(dateValue || Date.now());
-    return date.toLocaleTimeString('en-GB', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit' });
-}
-
-function getNextResetInfo(serverKey) {
-    const resetHour = DAILY_RESET_UTC_HOURS[serverKey] ?? 10;
-    const now = new Date();
-    const next = new Date(now);
-    next.setUTCHours(resetHour, 0, 0, 0);
-    if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
-    const minutes = Math.max(0, Math.floor((next - now) / 60000));
-    return {
-        clock: `${String((resetHour + 7) % 24).padStart(2, '0')}:00 ICT`,
-        countdown: `${Math.floor(minutes / 60)}h ${minutes % 60}m`
-    };
-}
-
-async function fetchDailyBonus(serverKey) {
-    const aodpUrl = AODP_FESTIVITIES_URLS[serverKey];
-    const aoPromise = axios.get(DAILY_BONUS_SOURCE, {
-        timeout: 8000,
-        headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'text/html,application/xhtml+xml' },
-        validateStatus: status => status >= 200 && status < 300
-    });
-    const aodpPromise = aodpUrl ? axios.get(aodpUrl, {
-        timeout: 5000,
-        headers: { 'User-Agent': 'BOTBOSS Daily Bonus/1.0', Accept: 'application/json' },
-        validateStatus: status => status >= 200 && status < 300
-    }) : Promise.reject(new Error('No AODP URL configured'));
-    const [aoResult, aodpResult] = await Promise.allSettled([aoPromise, aodpPromise]);
-
-    if (aoResult.status === 'fulfilled') {
-        const html = aoResult.value.data;
-        const $ = cheerio.load(html);
-        // AO-SAGE stores category names in image alt text; .text() drops those labels.
-        $('img').each((_, element) => {
-            const image = $(element);
-            const alt = image.attr('alt') || image.attr('title') || '';
-            if (alt) image.replaceWith(' ' + alt.replace(/^Image\s*/i, '') + ' ');
-        });
-        const pageText = $('body').text().replace(/\s+/g, ' ').trim();
-        const block = extractDailyServerBlock(pageText, serverKey);
-        const parsed = parseDailyBonusBlock(block);
-        const pageDate = extractDailyPageDate(html, serverKey);
-        if (pageDate === getExpectedDailyDate() && parsed.entries.length) {
-            parsed.source = 'AO-SAGE'; parsed.stale = false; parsed.date = pageDate; parsed.fetchedAt = new Date().toISOString();
-            setDailySourceStatus(serverKey, { aoSage: 'confirmed', aoSageDate: pageDate });
-            saveDailyCache(serverKey, parsed);
-            console.log(`✅ Daily bonus source connected: ${serverKey} -> AO-SAGE`);
-            return parsed;
-        }
-        setDailySourceStatus(serverKey, { aoSage: 'waiting', aoSageDate: pageDate || null });
-        console.warn(`⚠️ AO-SAGE ${serverKey} has no confirmed snapshot for ${getExpectedDailyDate()}`);
-    } else console.warn(`⚠️ AO-SAGE request failed (${serverKey}):`, aoResult.reason?.message || 'unknown error');
-
-    if (aodpResult.status === 'fulfilled') {
-        const parsed = parseAodpDailyBonus(serverKey, aodpResult.value.data);
-        if (parsed && String(parsed.date || '').slice(0, 10) === getExpectedDailyDate()) {
-            parsed.fetchedAt = new Date().toISOString(); saveDailyCache(serverKey, parsed);
-            setDailySourceStatus(serverKey, { aodp: 'confirmed', aodpDate: getExpectedDailyDate() });
-            console.log(`✅ Daily bonus fallback connected: ${serverKey} -> ${aodpUrl}`);
-            return parsed;
-        }
-        setDailySourceStatus(serverKey, { aodp: 'waiting' });
-        console.warn(`⚠️ AODP has no confirmed snapshot for ${serverKey}`);
-    } else console.warn(`⚠️ AODP request failed (${serverKey}):`, aodpResult.reason?.message || 'unavailable');
-
-    const community = getCommunityDailyData(serverKey);
-    if (community) {
-        setDailySourceStatus(serverKey, { community: 'confirmed', confirmations: community.confirmations });
-        saveDailyCache(serverKey, community);
-        return community;
-    }
-
-    // Fallback 2: use the last confirmed value for the same server only.
-    const cache = loadDailyCache();
-    const cached = cache?.[serverKey];
-    const currentServerDate = getExpectedDailyDate();
-    const cachedDate = String(cached?.date || cached?.cachedAt || '').slice(0, 10);
-    if (cached?.entries?.length && cachedDate === currentServerDate) {
-        console.warn(`⚠️ Using stale daily bonus cache for ${serverKey}, cached at ${cached.cachedAt || 'unknown time'}`);
-        return {
-            ...cached,
-            source: cached.source || 'CACHE',
-            stale: true
-        };
-    }
-
-    if (cached?.entries?.length) {
-        console.warn(`⚠️ Ignoring old daily bonus cache for ${serverKey}: ${cachedDate || 'unknown date'} (today is ${currentServerDate})`);
-    }
-
-    return null;
-}
-
-async function generateDailyBonusEmbed(serverChoice) {
-    const serverDisplayName = SERVER_NAMES[serverChoice] || 'Albion Server';
-    const dailyData = await fetchDailyBonus(serverChoice, currentGuildId());
-
-    if (!dailyData) return null;
-
-    const entries = dailyData.entries || [];
-    const bonusLines = entries.map((item, index) =>
-        `${index + 1}. **${item.category}** — **+${item.dailyBonus}% Daily Bonus**\n   🏙️ Best Craft City: **${item.city}** (+${item.baseBonus}%)`
-    ).join('\n\n');
-
-    const sourceLabel = dailyData.stale
-        ? `⚠️ ${dailyData.source || 'CACHE'} — ข้อมูลล่าสุดที่ยืนยันได้ (อาจไม่ใช่โบนัสของวันนี้)`
-        : `${dailyData.source || 'AO-SAGE'} — ข้อมูลประจำวันที่ ${String(dailyData.date || '').slice(0, 10)} หลังการรีเซ็ตประจำวัน`;
-
-    return new EmbedBuilder()
-        .setColor(0xF1C40F)
-        .setTitle('✨ **ALBION ONLINE — DAILY BONUS REPORT** ✨')
-        .setDescription(`📢 **โบนัสประจำวัน**\n\`\`\`ansi\n\x1b[1;33m🌐 Server: ${serverDisplayName}\x1b[0m\n\`\`\``)
-        .addFields(
-            {
-                name: '🎯 **หมวดหมู่โบนัสวันนี้ (DAILY BONUS)**',
-                value: bonusLines || 'ไม่พบข้อมูลโบนัสสำหรับเซิร์ฟเวอร์นี้',
-                inline: false
-            },
-            {
-                name: '📝 **แหล่งข้อมูล**',
-                value: sourceLabel,
-                inline: false
-            },
-            {
-                name: '⏰ **เวลาการรีเซ็ต**',
-                value: getDailyResetText(serverChoice),
-                inline: false
-            }
-        )
-        .setThumbnail('https://render.albiononline.com/v1/spell/T6_GVGSEASONREWARD_FAMEBUFF_SPELL.png')
-        .setFooter({ text: 'Albion Online Daily Bonus • Powered by BOTBOSS', iconURL: client.user.displayAvatarURL() })
-        .setTimestamp();
-}
-
-async function loadDailyItemIcon(itemId) {
-    const urls = [
-        `https://render.albiononline.com/v1/item/${encodeURIComponent(itemId)}.png?quality=1&size=96`,
-        `https://render.albiononline.com/v1/item/${encodeURIComponent(itemId)}.png?size=96`
-    ];
-    for (const url of urls) {
-        try {
-            const response = await axios.get(url, {
-                responseType: 'arraybuffer',
-                timeout: 8000,
-                headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'image/png,image/*,*/*;q=0.8' },
-                validateStatus: status => status >= 200 && status < 300
-            });
-            if (response.data?.length > 100) return await loadImage(Buffer.from(response.data));
-        } catch (_) {}
-    }
-    return null;
-}
-
-async function loadDailyCategoryIcon(category) {
-    const aliases = {
-        'Cloth Robe': 'Cloth Robes', 'Leather Jacket': 'Leather Jackets', 'Nature Staves': 'Nature Staff',
-        'Cloth Helmet': 'Cloth Cowl', 'Cloth Boots': 'Cloth Sandals', 'Leather Helmet': 'Leather Hood',
-        'Leather Boot': 'Leather Shoes', 'Plate Helmet': 'Plate Helmet'
-    };
-    const categoryKey = aliases[String(category).trim()] || String(category).trim();
-    if (dailyIconCache.has(categoryKey)) return dailyIconCache.get(categoryKey);
-
-    const urls = [...new Set([DAILY_CATEGORY_ICON_URLS[categoryKey], buildDailyCategoryIconUrls(categoryKey)].filter(Boolean))];
-    for (const url of urls) {
-        try {
-            const response = await axios.get(url, {
-                responseType: 'arraybuffer', timeout: 8000,
-                headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'image/png,image/*,*/*;q=0.8' },
-                validateStatus: status => status >= 200 && status < 300
-            });
-            if (response.data?.length > 100) {
-                const image = await loadImage(Buffer.from(response.data));
-                dailyIconCache.set(categoryKey, image);
-                return image;
-            }
-        } catch (err) {
-            console.warn(`⚠️ Daily category icon failed (${categoryKey}):`, err.message);
-        }
-    }
-
-    // Use several real Albion item icons as fallback. This fixes the old
-    // behaviour where only four categories had item-id fallbacks.
-    const itemIds = getDailyIconItemIds(categoryKey);
-    for (const itemId of itemIds) {
-        const fallback = await loadDailyItemIcon(itemId);
-        if (fallback) {
-            dailyIconCache.set(categoryKey, fallback);
-            return fallback;
-        }
-    }
-    return null;
-}
-
-async function preloadDailyIcons() {
-    await Promise.all(Object.keys(DAILY_CATEGORY_ICON_URLS).map(category => loadDailyCategoryIcon(category)));
-    console.log(`✅ Preloaded ${dailyIconCache.size} Daily Bonus icons`);
-}
-
-function drawCategoryPlaceholder(ctx, category, x, y, size) {
-    const initials = String(category || 'DB').split(/\s+/).map(x => x[0]).join('').slice(0, 3).toUpperCase();
-    ctx.save();
-    ctx.fillStyle = '#3d2917'; ctx.strokeStyle = '#d39a45'; ctx.lineWidth = 4;
-    ctx.beginPath(); ctx.arc(x + size / 2, y + size / 2, size / 2 - 8, 0, Math.PI * 2); ctx.fill(); ctx.stroke();
-    ctx.fillStyle = '#ffe0a3'; ctx.font = `900 ${Math.floor(size * 0.22)}px Arial, sans-serif`;
-    ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(initials, x + size / 2, y + size / 2);
-    ctx.restore();
-}
-
-function drawCityBadge(ctx, city, x, y, size) {
-    const cityStyles = {
-        'Fort Sterling': { fill: '#f4f1e8', accent: '#b8d9e4', text: '#23313a', mark: 'FS' },
-        Thetford: { fill: '#4f285f', accent: '#d7a0ed', text: '#fff0ff', mark: 'TH' },
-        Bridgewatch: { fill: '#77502d', accent: '#f0c06a', text: '#fff0c8', mark: 'BW' },
-        Lymhurst: { fill: '#315640', accent: '#9bd29f', text: '#eaffea', mark: 'LY' },
-        Martlock: { fill: '#4b5365', accent: '#bfc8dd', text: '#f4f6ff', mark: 'MA' },
-        Caerleon: { fill: '#242326', accent: '#aaa5b5', text: '#f4f0ff', mark: 'CA' },
-        Brecilien: { fill: '#40576b', accent: '#9fc4d4', text: '#e9f7ff', mark: 'BR' }
-    };
-    const style = cityStyles[city] || { fill: '#4b4037', accent: '#d2b273', text: '#fff4df', mark: String(city || 'CT').slice(0, 2).toUpperCase() };
-    ctx.save();
-    ctx.shadowColor = 'rgba(0, 0, 0, 0.45)';
-    ctx.shadowBlur = 12;
-    ctx.fillStyle = style.fill;
-    ctx.beginPath();
-    ctx.arc(x + size / 2, y + size / 2, size / 2, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.shadowBlur = 0;
-    ctx.strokeStyle = style.accent;
-    ctx.lineWidth = 3;
-    ctx.stroke();
-    ctx.fillStyle = style.accent;
-    ctx.beginPath();
-    ctx.moveTo(x + size / 2, y + size - 7);
-    ctx.lineTo(x + size / 2 - 10, y + size / 2 + 8);
-    ctx.lineTo(x + size / 2 + 10, y + size / 2 + 8);
-    ctx.closePath();
-    ctx.fill();
-    ctx.fillStyle = style.fill;
-    ctx.beginPath();
-    ctx.arc(x + size / 2, y + size / 2 - 2, 8, 0, Math.PI * 2);
-    ctx.fill();
-    ctx.fillStyle = style.text;
-    ctx.font = `900 ${Math.max(12, Math.floor(size * 0.22))}px Arial, sans-serif`;
-    ctx.textAlign = 'center';
-    ctx.fillText(style.mark, x + size / 2, y + size / 2 + 5);
-    ctx.textAlign = 'left';
-    ctx.restore();
-}
-
-async function generateDailyBonusCard(serverChoice) {
-    const dailyData = await fetchDailyBonus(serverChoice);
-    if (!dailyData?.entries?.length) return null;
-
-    const entries = dailyData.entries.slice(0, 2);
-    // Render at 1.5x resolution so Discord's preview keeps the text and
-    // large bonus icon sharper while all layout coordinates stay unchanged.
-    const width = 960;
-    const height = 1140;
-    const renderScale = 1.5;
-    const canvas = createCanvas(Math.round(width * renderScale), Math.round(height * renderScale));
-    const ctx = canvas.getContext('2d');
-    ctx.scale(renderScale, renderScale);
-    const bg = ctx.createLinearGradient(0, 0, width, height);
-    bg.addColorStop(0, '#080706');
-    bg.addColorStop(0.5, '#120e0b');
-    bg.addColorStop(1, '#060505');
-    ctx.fillStyle = bg;
-    ctx.fillRect(0, 0, width, height);
-
-    const dateText = String(dailyData.date || new Date().toISOString()).slice(0, 10)
-        .split('-').reverse().join(' ');
-    const resetText = serverChoice === 'asia' ? 'resets 00:00 UTC' : 'resets 10:00 UTC';
-    const nextReset = getNextResetInfo(serverChoice);
-    const statusText = dailyData.stale ? 'STALE DATA' : dailyData.source === 'COMMUNITY' ? 'COMMUNITY CONFIRMED' : dailyData.changed ? 'UPDATED TODAY' : 'CONFIRMED TODAY';
-    const statusFill = dailyData.stale ? '#6d3429' : dailyData.source === 'COMMUNITY' ? '#5b4b18' : '#28543f';
-    ctx.fillStyle = '#9a8b80';
-    ctx.font = 'bold 15px Arial, sans-serif';
-    ctx.letterSpacing = '3px';
-    ctx.fillText(`DAILY PRODUCTION BONUS`, 44, 43);
-    ctx.fillStyle = '#e0a83a';
-    ctx.font = 'bold 13px Arial, sans-serif';
-    ctx.fillText(String(serverChoice).toUpperCase(), 264, 43);
-    ctx.fillStyle = '#c9c0b8';
-    ctx.font = 'bold 14px Arial, sans-serif';
-    ctx.fillText(`${dateText}   ${resetText}`, 326, 43);
-    drawRoundRect(ctx, 690, 24, 220, 30, 15);
-    ctx.fillStyle = statusFill;
-    ctx.fill();
-    ctx.strokeStyle = dailyData.stale ? '#b45d45' : '#55a679';
-    ctx.lineWidth = 1;
-    ctx.stroke();
-    ctx.fillStyle = '#f4eadf';
-    ctx.font = '900 12px Arial, sans-serif';
-    ctx.textAlign = 'center';
-    ctx.fillText(statusText, 800, 44);
-    ctx.textAlign = 'left';
-    ctx.fillStyle = '#28201b';
-    ctx.fillRect(44, 58, width - 88, 1);
-
-    const gap = 18;
-    const cardX = 44;
-    const cardY = 78;
-    const cardW = width - 88;
-    const cardH = 470;
-
-    const rounded = (x, y, w, h, r, fill, stroke) => {
-        drawRoundRect(ctx, x, y, w, h, r);
-        ctx.fillStyle = fill; ctx.fill();
-        if (stroke) { ctx.strokeStyle = stroke; ctx.lineWidth = 1; ctx.stroke(); }
-    };
-
-    const iconTasks = entries.map(async entry => ({
-        category: await loadDailyCategoryIcon(entry.category)
-    }));
-    const iconSets = await Promise.all(iconTasks);
-
-    entries.forEach((entry, index) => {
-        const x = cardX;
-        const y = cardY + index * (cardH + gap);
-        const border = entry.dailyBonus >= 20 ? '#d47a24' : '#553a20';
-        rounded(x, y, cardW, cardH, 14, '#17120f', border);
-        ctx.fillStyle = '#b39b87';
-        ctx.font = 'bold 15px Arial, sans-serif';
-        ctx.fillText('PRODUCTION BONUS', x + 30, y + 34);
-
-        const title = String(entry.category).toUpperCase();
-        ctx.fillStyle = '#f2eee9';
-        ctx.font = '900 40px Arial, sans-serif';
-        ctx.fillText(title, x + 30, y + 92, cardW - 320);
-        rounded(x + cardW - 168, y + 52, 126, 52, 26,
-            entry.dailyBonus >= 20 ? '#71320e' : '#4a2b0c',
-            entry.dailyBonus >= 20 ? '#f09a38' : '#b87824');
-        ctx.fillStyle = entry.dailyBonus >= 20 ? '#ffd18b' : '#f0b34c';
-        ctx.font = '900 27px Arial, sans-serif';
-        ctx.textAlign = 'center';
-        ctx.fillText(`+${entry.dailyBonus}%${entry.dailyBonus >= 20 ? ' HIGH' : ''}`, x + cardW - 105, y + 88);
-        ctx.textAlign = 'left';
-
-        ctx.fillStyle = '#33251c';
-        ctx.fillRect(x + 30, y + 115, cardW - 60, 1);
-        ctx.fillStyle = '#b0a095';
-        ctx.font = 'bold 14px Arial, sans-serif';
-        ctx.fillText('BEST CRAFT CITY', x + 30, y + 144);
-        ctx.fillStyle = '#eee7df';
-        ctx.font = 'bold 23px Arial, sans-serif';
-        ctx.fillText(`${entry.city}  +${entry.baseBonus}%`, x + 30, y + 176, cardW - 410);
-
-        const iconData = iconSets[index] || { items: [], category: null };
-        // Keep one prominent category icon beside the Best Craft City details.
-        // It is intentionally separated from the city badge in the lower-right.
-        if (iconData.category) {
-            try { ctx.drawImage(iconData.category, x + cardW / 2 - 140, y + 126, 280, 280); } catch (_) {}
-        } else drawCategoryPlaceholder(ctx, entry.category, x + cardW / 2 - 140, y + 126, 280);
-
-        // Decorative crafting route panel uses a city badge at bottom-right.
-        ctx.fillStyle = '#a99a8f';
-        ctx.font = 'bold 14px Arial, sans-serif';
-        ctx.fillText('CRAFTING ROUTE', x + 32, y + 424);
-        ctx.fillStyle = '#c2a36a';
-        ctx.font = 'bold 17px Arial, sans-serif';
-        ctx.fillText('BONUS CITY VERIFIED', x + 32, y + 450);
-        ctx.strokeStyle = '#46352a';
-        ctx.lineWidth = 1;
-        ctx.beginPath();
-        ctx.moveTo(x + 32, y + 458);
-        ctx.lineTo(x + cardW - 150, y + 458);
-        ctx.stroke();
-        drawCityBadge(ctx, entry.city, x + cardW - 106, y + cardH - 105, 66);
-        ctx.fillStyle = '#d9c3a0';
-        ctx.font = 'bold 12px Arial, sans-serif';
-        ctx.fillText(entry.city, x + cardW - 190, y + cardH - 38, 82);
-
-        // Price/volume data is not available from the current source, so keep
-        // this area intentionally empty instead of rendering overlapping N/A text.
-    });
-
-    const footer = dailyData.stale
-        ? `STALE CACHE — ${String(dailyData.date || '').slice(0, 10)}`
-        : `${dailyData.source || 'AO-SAGE'}${dailyData.confirmations ? ` (${dailyData.confirmations} confirmations)` : ''}${dailyData.changed ? ' — BONUS CHANGED' : ''} — UPDATED ${formatIctTime(dailyData.fetchedAt)}`;
-    ctx.fillStyle = '#6c5f55';
-    ctx.font = 'bold 13px Arial, sans-serif';
-    ctx.fillText(footer, 44, height - 38);
-    ctx.fillStyle = '#a99172';
-    ctx.fillText(`NEXT RESET ${nextReset.clock}  •  IN ${nextReset.countdown}`, 44, height - 16);
-
-    return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: 'daily-production-bonus.png' });
-}
-
 
 // ----------------------------------------
 // AVALON (AVA) MAP CHECK
@@ -3348,6 +2593,22 @@ const AVA_IMAGE_EXTENSIONS = /\.(?:png|jpe?g|webp|gif)$/i;
 const avaOcrCache = new Map();
 const avaPendingSelections = new Map();
 const avaProcessingMessages = new Set();
+const AVA_ALLOWED_IMAGE_HOSTS = new Set(['cdn.discordapp.com', 'media.discordapp.net', 'images-ext-1.discordapp.net', 'images-ext-2.discordapp.net']);
+function isAllowedAvaImageUrl(value) { try { const u = new URL(String(value || '')); return u.protocol === 'https:' && AVA_ALLOWED_IMAGE_HOSTS.has(u.hostname.toLowerCase()); } catch (_) { return false; } }
+function setAvaMessageState(guildId, messageId, state, details = '') {
+ const cfg = getGuildConfig(String(guildId)); if (!cfg) return;
+ if (!cfg.avaMessageStates || typeof cfg.avaMessageStates !== 'object') cfg.avaMessageStates = {};
+ const previous = cfg.avaMessageStates[String(messageId)];
+ cfg.avaMessageStates[String(messageId)] = { state, updatedAt: Date.now(), attempts: state === 'processing' ? (Number(previous?.attempts) || 0) + 1 : (Number(previous?.attempts) || 0), details: String(details || '').slice(0, 300) };
+ const keys = Object.keys(cfg.avaMessageStates);
+ if (keys.length > 500) for (const key of keys.sort((a,b) => (cfg.avaMessageStates[a]?.updatedAt || 0) - (cfg.avaMessageStates[b]?.updatedAt || 0)).slice(0, keys.length - 500)) delete cfg.avaMessageStates[key];
+ saveData();
+}
+function runAvaWithConcurrency(task, message) {
+ if (avaActiveJobs < AVA_MAX_CONCURRENT) { avaActiveJobs++; return Promise.resolve().then(task).finally(() => { avaActiveJobs--; const next = avaWaitingJobs.shift(); if (next) next(); }); }
+ if (avaWaitingJobs.length >= AVA_MAX_QUEUE) { const gid = message?.guildId || message?.guild?.id; if (gid && message?.id) setAvaMessageState(gid, message.id, 'failed', 'AVA work queue full; retry scheduled'); return Promise.resolve(false); }
+ return new Promise((resolve,reject) => { avaWaitingJobs.push(() => { avaActiveJobs++; Promise.resolve().then(task).then(resolve,reject).finally(() => { avaActiveJobs--; const next = avaWaitingJobs.shift(); if (next) next(); }); }); });
+}
 const avaPollState = new Map();
 const avaRawRetryTimers = new Map();
 const avaCanonicalMapCache = { names: [], expiresAt: 0, loading: null };
@@ -3372,24 +2633,6 @@ function extractMapNamesFromOcr(text) {
     }
     for (const m of raw.matchAll(/\b([A-Za-z]{3,18})\s*-\s*([A-Za-z]{3,18})\b/g)) add(`${m[1]}-${m[2]}`);
     return found;
-}
-
-function extractMapNameFromOcr(text) {
-    return extractMapNamesFromOcr(text)[0] || null;
-}
-
-async function renderAvaOcrCrop(imageBuffer) {
-    const image = await loadImage(imageBuffer);
-    const scale = 3;
-    const width = Math.max(1, Math.round(image.width * scale));
-    const sourceCropHeight = Math.max(1, Math.min(image.height * 0.72, 900));
-    const cropHeight = Math.max(1, Math.round(sourceCropHeight * scale));
-    const canvas = createCanvas(width, cropHeight);
-    const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#ffffff';
-    ctx.fillRect(0, 0, width, cropHeight);
-    ctx.drawImage(image, 0, 0, width, Math.round(image.height * scale));
-    return canvas.toBuffer('image/png');
 }
 
 async function ocrWithSystemTesseract(buffer, psm = 6) {
@@ -4723,27 +3966,6 @@ async function downloadAvaImageBuffer(data, mapName) {
     throw lastError || new Error('ไม่พบไฟล์รูปแมฟที่ใช้งานได้');
 }
 
-function createAvaResultEmbed(data, mapName, attachmentAvailable) {
-    const counts = data?.counts || {};
-    const line = items => items.filter(([, value]) => Number(value) > 0)
-        .map(([label, value]) => label + ' ' + value).join(' • ') || 'ไม่มีข้อมูล';
-    const embed = new EmbedBuilder()
-        .setColor(0x2dd4bf)
-        .setTitle('🗺️ AVA CHECK — ' + (data?.name || mapName))
-        .setDescription('🛡️ **Tier:** ' + (data?.tier || 'ไม่พบข้อมูล') +
-            '\n🌀 **Connection:** ' + formatAvaConnection(data?.connection))
-        .addFields(
-            { name: '📦 กล่อง', value: line([['🟢 เขียว', counts['Green chest']], ['🔵 น้ำเงิน', counts['Blue chest']], ['🟡 ทอง', counts['Gold chest']]]) },
-            { name: '⛏️ ทรัพยากร', value: line([['🪨 หินใหญ่', counts.Stone], ['⛏️ แร่', counts.Ore], ['🪵 ไม้', counts.Wood], ['🦌 หนัง', counts.Hide], ['🌿 เส้นใย', counts.Fiber]]) },
-            { name: '🏰 ดันเจี้ยน', value: line([['🟣 ดันเดี่ยว', counts['Solo dungeon']], ['🔴 ดันกลุ่ม', counts['Group dungeon']]]) }
-        )
-        .setFooter({ text: 'ข้อมูลจาก AVA sources' })
-        .setTimestamp();
-    if (attachmentAvailable) embed.setImage('attachment://ava-map.png');
-    else if (data?.mapImage) embed.setImage(data.mapImage);
-    return embed;
-}
-
 function avaIdentityFallback(mapName) {
     const name = normalizeAvaOcrMapName(mapName);
     const slug = normalizeAvaSlug(name);
@@ -4810,164 +4032,7 @@ async function loadAvaCardIcon(name) {
     } catch (_) { return null; }
 }
 
-function drawAvaStatBox(ctx, x, y, w, title, rows, accent) {
-    drawRoundRect(ctx, x, y, w, 185, 18); ctx.fillStyle = '#11151d'; ctx.fill(); ctx.strokeStyle = accent; ctx.lineWidth = 2; ctx.stroke();
-    ctx.fillStyle = accent; ctx.font = '900 22px Arial, sans-serif'; ctx.fillText(title, x + 20, y + 40);
-    rows.forEach((row, rowIndex) => {
-        row.forEach((item, colIndex) => {
-            const itemX = x + 18 + colIndex * 250;
-            const itemY = y + 58 + rowIndex * 40;
-            if (item.icon) ctx.drawImage(item.icon, itemX, itemY, 30, 30);
-            ctx.fillStyle = '#f1f5f9'; ctx.font = '700 22px Arial, sans-serif';
-            ctx.fillText(`${item.label}  ${item.value}`, itemX + 38, itemY + 24);
-        });
-    });
-}
-
-async function generateAvaRoadsCard(data, ocrText = '') {
-    const width = 2400, height = 1800;
-    const mapHeight = 1320, panelY = 1340, panelHeight = 420;
-    const canvas = createCanvas(width, height);
-    const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#05070b';
-    ctx.fillRect(0, 0, width, height);
-
-    const canonicalDisplayName = normalizeAvaOcrMapName(data?.name || ocrText);
-    let mapImage = await downloadImageForCanvas(data.mapImage);
-    if (!mapImage) {
-        const slug = normalizeAvaSlug(canonicalDisplayName);
-        const fallbackImageUrls = [
-            'https://albionbattlehub.com/images/avalon/' + encodeURIComponent(slug) + '.webp',
-            'https://albionbattlehub.com/api/og/avalon?slug=' + encodeURIComponent(slug)
-        ];
-        for (const imageUrl of fallbackImageUrls) {
-            mapImage = await downloadImageForCanvas(imageUrl);
-            if (mapImage) {
-                console.log('🗺️ AVA canonical map image fallback used: ' + imageUrl);
-                break;
-            }
-        }
-    }
-    if (!mapImage) {
-        ctx.fillStyle = '#f1f5f9';
-        ctx.font = '900 52px Arial, sans-serif';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText('MAP IMAGE NOT AVAILABLE', width / 2, mapHeight / 2);
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'alphabetic';
-    } else {
-        // Fill the entire map panel so there are no black side bars.
-        // Crop only the excess edges when the source aspect ratio differs.
-        const scale = Math.max(width / mapImage.width, mapHeight / mapImage.height);
-        const dw = Math.round(mapImage.width * scale);
-        const dh = Math.round(mapImage.height * scale);
-        const dx = Math.round((width - dw) / 2);
-        const dy = Math.round((mapHeight - dh) / 2);
-        ctx.imageSmoothingEnabled = true;
-        ctx.imageSmoothingQuality = 'high';
-        ctx.save();
-        ctx.beginPath();
-        ctx.rect(0, 0, width, mapHeight);
-        ctx.clip();
-        ctx.drawImage(mapImage, dx, dy, dw, dh);
-        ctx.restore();
-    }
-
-    ctx.fillStyle = '#0d121b';
-    ctx.fillRect(0, panelY, width, panelHeight);
-    ctx.strokeStyle = '#263447';
-    ctx.lineWidth = 3;
-    ctx.beginPath();
-    ctx.moveTo(36, panelY);
-    ctx.lineTo(width - 36, panelY);
-    ctx.stroke();
-    // Use ASCII-only labels here to avoid missing-glyph squares on hosts without Thai fonts.
-    const tierText = String(data?.tier || '').match(/\bT\s*([468])\b/i);
-    const tierLabel = tierText ? 'T' + tierText[1] : 'TIER UNKNOWN';
-    ctx.fillStyle = '#f1f5f9';
-    ctx.font = '900 34px Arial, sans-serif';
-    ctx.fillText(canonicalDisplayName + '  |  ' + tierLabel, 56, panelY + 48);
-    ctx.fillStyle = '#94a3b8';
-    ctx.font = '700 20px Arial, sans-serif';
-    ctx.fillText('AVA MAP POINTS OF INTEREST', 56, panelY + 82);
-
-    const counts = data?.counts || {};
-    const chestCategoryTotal =
-        (Number(counts['Green chest']) || 0) +
-        (Number(counts['Blue chest']) || 0) +
-        (Number(counts['Gold chest']) || 0);
-    const dungeonCategoryTotal =
-        (Number(counts['Solo dungeon']) || 0) +
-        (Number(counts['Group dungeon']) || 0);
-    const hasCategoryCounts = chestCategoryTotal + dungeonCategoryTotal > 0;
-    const hasVerifiedTotals = data?.countsAvailable === true ||
-        Number(data?.countsAvailable) === 1 ||
-        Number.isFinite(data?.recordedChestTotal) ||
-        Number.isFinite(data?.recordedDungeonTotal);
-    const items = [
-        { key: 'Green', label: 'Green chest', count: Number(counts['Green chest']) || 0, kind: 'chest', accent: '#22c55e', known: hasCategoryCounts },
-        { key: 'Blue', label: 'Blue chest', count: Number(counts['Blue chest']) || 0, kind: 'chest', accent: '#3b82f6', known: hasCategoryCounts },
-        { key: 'Gold', label: 'Gold chest', count: Number(counts['Gold chest']) || 0, kind: 'chest', accent: '#fbbf24', known: hasCategoryCounts },
-        { key: 'SoloDungeon', label: 'Solo dungeon', count: Number(counts['Solo dungeon']) || 0, kind: 'dungeon', accent: '#a78bfa', known: hasCategoryCounts },
-        { key: 'GroupDungeon', label: 'Group dungeon', count: Number(counts['Group dungeon']) || 0, kind: 'dungeon', accent: '#f87171', known: hasCategoryCounts }
-    ];
-    const cols = 5, gap = 18, left = 56, itemW = 440, itemH = 126;
-    for (let i = 0; i < items.length; i++) {
-        const item = items[i];
-        const col = i % cols;
-        const row = Math.floor(i / cols);
-        const x = left + col * (itemW + gap);
-        const y = panelY + 106 + row * 138;
-        drawRoundRect(ctx, x, y, itemW, itemH, 16);
-        ctx.fillStyle = '#151e2b';
-        ctx.fill();
-        ctx.strokeStyle = item.accent;
-        ctx.lineWidth = 2;
-        ctx.stroke();
-
-        // Use the actual PNG assets committed in /ava-icons; never depend on emoji fonts.
-        const icon = await loadAvaCardIcon(item.key);
-        if (icon) {
-            const iconSize = 76;
-            const scale = Math.min(iconSize / icon.width, iconSize / icon.height);
-            const iw = Math.round(icon.width * scale);
-            const ih = Math.round(icon.height * scale);
-            ctx.drawImage(icon, x + 22 + Math.round((iconSize - iw) / 2), y + 25 + Math.round((iconSize - ih) / 2), iw, ih);
-        } else {
-            // Visible fallback if a PNG is missing from the deployed checkout.
-            ctx.save();
-            ctx.strokeStyle = item.accent;
-            ctx.lineWidth = 5;
-            if (item.kind === 'chest') {
-                ctx.strokeRect(x + 28, y + 49, 64, 38);
-                ctx.strokeRect(x + 28, y + 37, 64, 17);
-                ctx.beginPath();
-                ctx.moveTo(x + 60, y + 38);
-                ctx.lineTo(x + 60, y + 86);
-                ctx.stroke();
-            } else {
-                ctx.strokeRect(x + 34, y + 34, 52, 58);
-                ctx.beginPath();
-                ctx.moveTo(x + 43, y + 60);
-                ctx.lineTo(x + 77, y + 60);
-                ctx.stroke();
-            }
-            ctx.restore();
-        }
-
-        ctx.fillStyle = '#cbd5e1';
-        ctx.font = '700 24px Arial, sans-serif';
-        ctx.fillText(item.label, x + 116, y + 48, itemW - 132);
-        ctx.fillStyle = '#f8fafc';
-        ctx.font = '900 42px Arial, sans-serif';
-        const value = item.known || hasVerifiedTotals ? String(item.count) : 'N/A';
-        ctx.fillText(value, x + 116, y + 96);
-    }
-    return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: 'ava-map-' + normalizeAvaSlug(data.name) + '.png' });
-}
-
-async function processAvaImageMessage(message, fallbackAttachments = []) {
+async function processAvaImageMessageInternal(message, fallbackAttachments = []) {
     // Never OCR images posted by bots, including this bot's own map report.
     // The raw gateway fallback calls this function directly and bypasses the
     // messageCreate author.bot guard.
@@ -5050,15 +4115,19 @@ async function processAvaImageMessage(message, fallbackAttachments = []) {
         for (const candidate of attachments) {
             if (!candidate?.url) continue;
             try {
+                if (!isAllowedAvaImageUrl(candidate.url)) continue;
                 const probe = await axios.get(candidate.url, {
                     responseType: 'arraybuffer',
-                    timeout: 15000,
+                    timeout: 8000,
+                    maxContentLength: AVA_MAX_IMAGE_BYTES,
+                    maxBodyLength: AVA_MAX_IMAGE_BYTES,
                     headers: {
                         'User-Agent': 'Mozilla/5.0',
                         Accept: 'image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8'
                     },
                     validateStatus: status => status >= 200 && status < 300
                 });
+                if (Buffer.byteLength(probe.data) > AVA_MAX_IMAGE_BYTES) continue;
                 await loadImage(Buffer.from(probe.data));
                 imageAttachments = [candidate];
                 console.log('🗺️ AVA decoded extensionless attachment: guild=' + messageGuildId +
@@ -5089,22 +4158,27 @@ async function processAvaImageMessage(message, fallbackAttachments = []) {
     console.log('🗺️ AVA image detected: guild=' + messageGuildId +
         ' channel=' + messageChannelId + ' file=' + (imageAttachments[0].name || 'unknown'));
 
-    if (avaProcessedMessages.has(message.id) || avaProcessingMessages.has(String(message.id))) return true;
-    avaProcessingMessages.add(String(message.id));
+    const priorState = getGuildConfig(String(messageGuildId), false)?.avaMessageStates?.[String(message.id)]?.state;
+    if (priorState === 'succeeded' || avaProcessedMessages.has(message.id)) return true;
+    if (avaProcessingMessages.has(String(message.id))) return true;
+    const now = Date.now();
+    if (avaUserRateLimit.size > 1000) for (const [key, stamp] of avaUserRateLimit) if (now - stamp > 10 * 60 * 1000) avaUserRateLimit.delete(key);
+    const rateKey = String(message.author?.id || messageChannelId), lastRun = avaUserRateLimit.get(rateKey) || 0;
+    if (now - lastRun < AVA_USER_COOLDOWN_MS) { console.log('⏳ AVA rate limit: skipped rapid repeat from user=' + rateKey); return true; }
+    avaUserRateLimit.set(rateKey, now); avaProcessingMessages.add(String(message.id));
+    setAvaMessageState(messageGuildId, message.id, 'processing');
 
     let status;
     try {
         status = await message.reply('🗺️ กำลังอ่านชื่อแมพ AVA จากรูป...');
     } catch (err) {
+        setAvaMessageState(messageGuildId, message.id, 'failed', 'Could not post OCR status reply: ' + err.message);
+        avaProcessingMessages.delete(String(message.id));
         console.error('❌ AVA reply failed:', err.message);
         return true;
     }
 
-    avaProcessedMessages.add(message.id);
-    if (avaProcessedMessages.size > 500) {
-        avaProcessedMessages.delete(avaProcessedMessages.values().next().value);
-    }
-    saveData();
+    // Do not mark the message processed yet: OCR/provider failures must remain retryable.
 
     try {
         const attachmentUrl = String(imageAttachments[0].url || '');
@@ -5116,8 +4190,11 @@ async function processAvaImageMessage(message, fallbackAttachments = []) {
         let lastImageError = null;
         for (const imageUrl of imageUrls) {
             try {
+                if (!isAllowedAvaImageUrl(imageUrl)) throw new Error('อนุญาตเฉพาะ URL รูปจาก Discord CDN เท่านั้น');
                 const imageResponse = await axios.get(imageUrl, {
                     responseType: 'arraybuffer',
+                    maxContentLength: AVA_MAX_IMAGE_BYTES,
+                    maxBodyLength: AVA_MAX_IMAGE_BYTES,
                     timeout: imageUrl === getDiscordOriginalAttachmentUrl(attachmentUrl) ? 3500 : 12000,
                     headers: {
                         'User-Agent': 'Mozilla/5.0',
@@ -5126,6 +4203,7 @@ async function processAvaImageMessage(message, fallbackAttachments = []) {
                     validateStatus: status => status >= 200 && status < 300
                 });
                 const candidateBuffer = Buffer.from(imageResponse.data);
+                if (candidateBuffer.length > AVA_MAX_IMAGE_BYTES) throw new Error('ไฟล์รูปใหญ่เกิน 10 MB');
                 await loadImage(candidateBuffer);
                 imageBuffer = candidateBuffer;
                 console.log('🗺️ AVA image source selected: ' + imageUrl.replace(/([?&](?:ex|is|hm)=)[^&]+/gi, '$1…'));
@@ -5133,6 +4211,7 @@ async function processAvaImageMessage(message, fallbackAttachments = []) {
             } catch (err) { lastImageError = err; }
         }
         if (!imageBuffer) throw lastImageError || new Error('ดาวน์โหลดรูปจาก Discord ไม่สำเร็จ');
+        if (imageBuffer.length > AVA_MAX_IMAGE_BYTES) throw new Error('ไฟล์รูปใหญ่เกิน 10 MB');
         const ocr = await detectAvaMapNameFromImage(imageBuffer);
         console.log('🗺️ AVA OCR result: ' + JSON.stringify({
             mapName: ocr?.mapName || '',
@@ -5192,6 +4271,10 @@ async function processAvaImageMessage(message, fallbackAttachments = []) {
                 '**เลือกชื่อแมพที่ใกล้เคียงกับในรูป:**',
             components: avaSelectionComponents(messageGuildId, token, suggestions)
         });
+        setAvaMessageState(messageGuildId, message.id, 'succeeded', 'OCR and map selector ready');
+        avaProcessedMessages.add(message.id);
+        if (avaProcessedMessages.size > 500) avaProcessedMessages.delete(avaProcessedMessages.values().next().value);
+        saveData();
 
         setTimeout(() => {
             const pending = avaPendingSelections.get(token);
@@ -5203,6 +4286,7 @@ async function processAvaImageMessage(message, fallbackAttachments = []) {
             }).catch(() => {});
         }, 120000);
     } catch (err) {
+        setAvaMessageState(messageGuildId, message.id, 'failed', err.message);
         console.error('❌ AVA image auto-check error:', err);
         await status.edit({
             content: '❌ ตรวจภาพ AVA ไม่สำเร็จ: ' + err.message
@@ -5214,98 +4298,24 @@ async function processAvaImageMessage(message, fallbackAttachments = []) {
     return true;
 }
 
-// ----------------------------------------
-// AUTOMATED DAILY REPORT SCHEDULER
-// ----------------------------------------
-async function checkAndSendDailyAutoReports() {
-    const guilds = getAllGuildConfigs();
-    for (const { guildId } of guilds) {
-        await guildContext.run({ guildId }, async () => {
-            await checkAndSendDailyAutoReportsForGuild();
-        });
-    }
-}
-
-async function checkAndSendDailyAutoReportsForGuild() {
-    if (!dailyAutoConfigs.length) return;
-
-    const now = new Date();
-    const utcHours = now.getUTCHours();
-    const utcMinutes = now.getUTCMinutes();
-    const todayStr = now.toISOString().split('T')[0];
-
-    // Each server has its own reset clock. Asia resets at 00:00 UTC (07:00
-    // Thai), while Americas/Europe reset at 10:00 UTC (17:00 Thai).
-    for (const config of dailyAutoConfigs) {
-        const serverKey = config.serverChoice || 'asia';
-        const resetHour = DAILY_RESET_UTC_HOURS[serverKey] ?? 10;
-        const afterDailyReset = utcHours > resetHour || (utcHours === resetHour && utcMinutes >= 5);
-        const reportKey = `${config.guildId}:${serverKey}:${todayStr}`;
-        if (!afterDailyReset) continue;
-
-        try {
-            const channel = await client.channels.fetch(config.channelId).catch(() => null);
-            if (!channel) continue;
-
-            console.log(`⏰ Triggering ${serverKey} daily bonus report...`);
-            const card = await generateDailyBonusCard(serverKey);
-            if (card) {
-                const latest = loadDailyCache()?.[serverKey];
-                const signature = dailyDataSignature(latest);
-                if (signature && lastDailyReportDate[reportKey] === signature) continue;
-                await channel.send({
-                    content: `📢 **รายงานโบนัสรายวันอัตโนมัติประจำวันที่ ${todayStr}**${latest?.changed ? '\n🔄 ตรวจพบข้อมูลโบนัสเปลี่ยนแปลง' : ''}`,
-                    files: [card]
-                });
-                lastDailyReportDate[reportKey] = signature || true;
-                saveData();
-            } else {
-                // Do not mark the report as sent and do not publish yesterday's
-                // data. The next scheduler tick retries until today's snapshot
-                // becomes available (useful when the game opens late).
-                console.warn(`⏳ ${serverKey} daily data is not ready; retrying next minute`);
-            }
-        } catch (err) {
-            console.error(`❌ Automated Daily Report failed for channel ${config.channelId}:`, err.message);
-        }
-    }
-}
-
-function getDailyRetryDelayMs(serverKey = 'asia') {
-    const now = new Date();
-    const resetHour = DAILY_RESET_UTC_HOURS[serverKey] ?? 10;
-    const minutesSinceReset = ((now.getUTCHours() - resetHour + 24) % 24) * 60 + now.getUTCMinutes();
-    if (minutesSinceReset < 60) return 30 * 1000;
-    if (minutesSinceReset < 180) return 60 * 1000;
-    return 60 * 1000;
-}
-
-function scheduleDailyAutoCheck() {
-    const serverKeys = [...new Set(dailyAutoConfigs.map(x => x.serverChoice || 'asia'))];
-    const delay = serverKeys.length ? Math.min(...serverKeys.map(getDailyRetryDelayMs)) : getDailyRetryDelayMs('asia');
-    setTimeout(async () => {
-        try { await checkAndSendDailyAutoReports(); }
-        finally { scheduleDailyAutoCheck(); }
-    }, delay);
-}
+async function processAvaImageMessage(message, fallbackAttachments = []) { return runAvaWithConcurrency(() => processAvaImageMessageInternal(message, fallbackAttachments), message); }
 
 // ----------------------------------------
 // BANDIT ASSAULT (ASIA) SCHEDULE & ALERTS
 // Source: user-provided Asia schedule reference image.
 // ----------------------------------------
 const BANDIT_ASSAULT_SCHEDULE_UTC = [
+    // Asia (East) local times in ICT: 09:00, 12:00, 14:00, 16:00, 18:00, 20:00, 22:00.
+    // Stored as UTC hours because the scheduler builds dates with setUTCHours().
     { hour: 2, chance: 30 },
     { hour: 5, chance: 30 },
     { hour: 7, chance: 50 },
     { hour: 9, chance: 60 },
     { hour: 11, chance: 40 },
     { hour: 13, chance: 60 },
-    { hour: 15, chance: 60 },
-    { hour: 17, chance: 60 },
-    { hour: 19, chance: 30 },
-    { hour: 21, chance: 20 }
+    { hour: 15, chance: 60 }
 ];
-const BANDIT_ALERT_WINDOW_MINUTES = 20;
+const BANDIT_ALERT_WINDOW_MINUTES = 15;
 const BANDIT_SERVER_NAMES = { asia: 'Asia (East)' };
 
 function getNextBanditAssault(now = new Date()) {
@@ -5394,84 +4404,35 @@ function loadBanditArtwork() {
     return banditArtworkPromise;
 }
 
-async function generateBanditCard(event, minutesUntil) {
-    const width = 960;
-    const height = 560;
-    const scale = 1.5;
-    const canvas = createCanvas(width * scale, height * scale);
-    const ctx = canvas.getContext('2d');
-    ctx.scale(scale, scale);
-    const style = getBanditChanceStyle(event.chance);
-    const [caerleonBackground, caerleonCoin] = await loadBanditArtwork();
-    const ictTime = event.start.toLocaleTimeString('th-TH', { timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', hour12: false });
-    const dateText = event.start.toLocaleDateString('en-GB', { timeZone: 'Asia/Bangkok', day: '2-digit', month: 'long', year: 'numeric' });
-
-    if (caerleonBackground) drawCoverImage(ctx, caerleonBackground, 0, 0, width, height);
-    else { ctx.fillStyle = '#120e12'; ctx.fillRect(0, 0, width, height); }
-    ctx.fillStyle = 'rgba(5, 5, 10, 0.70)'; ctx.fillRect(0, 0, width, height);
-    const vignette = ctx.createRadialGradient(width / 2, height / 2, 90, width / 2, height / 2, 620);
-    vignette.addColorStop(0, 'rgba(0,0,0,0.02)'); vignette.addColorStop(1, 'rgba(0,0,0,0.62)');
-    ctx.fillStyle = vignette; ctx.fillRect(0, 0, width, height);
-    ctx.strokeStyle = style.accent; ctx.lineWidth = 2; ctx.strokeRect(26, 26, width - 52, height - 52);
-    ctx.strokeStyle = '#6d4531'; ctx.lineWidth = 1; ctx.strokeRect(34, 34, width - 68, height - 68);
-    if (caerleonCoin) { ctx.save(); ctx.shadowColor = 'rgba(0,0,0,.75)'; ctx.shadowBlur = 14; drawCoverImage(ctx, caerleonCoin, 48, 30, 58, 58); ctx.restore(); }
-    else drawCaerleonCrest(ctx, 52, 34, 50);
-    drawBanditSword(ctx, 850, 34, 52, style.accent);
-    ctx.fillStyle = '#d6b27a'; ctx.font = "900 15px 'Bandit Display', sans-serif";
-    ctx.fillText('BANDIT ASSAULT', 120, 62);
-    ctx.fillStyle = '#e0a83a'; ctx.font = "900 14px 'Bandit Display', sans-serif";
-    ctx.fillText('ASIA (EAST)', 260, 62);
-    ctx.fillStyle = '#c9c0b8'; ctx.font = "600 14px 'Bandit Display', sans-serif";
-    ctx.fillText(`${dateText}  •  STARTS ${ictTime} ICT`, 390, 62);
-
-    drawRoundRect(ctx, 52, 92, 856, 408, 18);
-    ctx.fillStyle = 'rgba(12, 10, 14, 0.92)'; ctx.fill(); ctx.strokeStyle = '#6b4430'; ctx.stroke();
-    ctx.fillStyle = '#a38f80'; ctx.font = "700 14px 'Bandit Display', sans-serif";
-    ctx.fillText('EVENT FORECAST', 86, 132);
-    ctx.fillStyle = '#f5eee7'; ctx.font = "900 45px 'Bandit Serif', serif";
-    ctx.fillText('BANDIT ASSAULT', 86, 190);
-    ctx.fillStyle = style.text; ctx.font = "900 72px 'Bandit Serif', serif";
-    ctx.fillText(`${event.chance}%`, 86, 285);
-    ctx.fillStyle = '#a38f80'; ctx.font = "700 16px 'Bandit Display', sans-serif";
-    ctx.fillText('CHANCE OF OCCURRENCE', 94, 318);
-    drawRoundRect(ctx, 90, 350, 285, 46, 23); ctx.fillStyle = style.fill; ctx.fill(); ctx.strokeStyle = style.accent; ctx.stroke();
-    ctx.fillStyle = style.text; ctx.font = "900 17px 'Bandit Display', sans-serif"; ctx.textAlign = 'center';
-    ctx.fillText(style.label, 232, 380); ctx.textAlign = 'left';
-    ctx.fillStyle = '#2b2528'; ctx.fillRect(90, 414, 285, 10);
-    ctx.fillStyle = style.accent; ctx.fillRect(90, 414, Math.max(12, 285 * Math.min(100, event.chance) / 100), 10);
-    ctx.fillStyle = '#8d7770'; ctx.font = "700 12px 'Bandit Display', sans-serif";
-    ctx.fillText('CAERLEON  //  OUTLANDS  //  FACTION WARFARE', 90, 452);
-
-    ctx.fillStyle = '#d9c6b7'; ctx.font = "800 18px 'Bandit Display', sans-serif";
-    ctx.fillText(`STARTS IN  ${banditCountdownImageText(minutesUntil)}`, 500, 190, 330);
-    ctx.fillStyle = '#e0a83a'; ctx.font = "900 42px 'Bandit Serif', serif";
-    ctx.fillText(`${ictTime} ICT`, 500, 250);
-    ctx.fillStyle = '#9e8e83'; ctx.font = "600 15px 'Bandit Display', sans-serif";
-    ctx.fillText('Schedule source: Asia reference table', 500, 292);
-    ctx.fillText('Probability is a forecast, not a guarantee', 500, 322);
-    ctx.fillStyle = '#6e5b4e'; ctx.fillRect(500, 355, 330, 1);
-    ctx.fillStyle = '#cbb5a1'; ctx.font = "700 15px 'Bandit Display', sans-serif";
-    ctx.fillText('Next check runs every minute', 500, 390);
-    ctx.fillStyle = '#887366'; ctx.font = "600 13px 'Bandit Display', sans-serif";
-    ctx.fillText(`EVENT KEY  ${event.start.toISOString()}`, 500, 430);
-    ctx.fillText('BOTBOSS • BANDIT ALERT', 52, 532);
-    return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: 'bandit-assault.png' });
-}
-
-function banditAlertComponents(guildId) {
+function banditAlertComponents(guildId, eventStamp, confirmedCount = 0, notOccurredCount = 0, hasBanditRole = false) {
     return new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId(`bandit_toggle:${guildId}`).setLabel('เปิด/ปิดแจ้งเตือน').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder()
+            .setCustomId(`bandit_confirm:${guildId}:${eventStamp}`)
+            .setLabel(`ยืนยันการเกิด (${confirmedCount})`)
+            .setStyle(ButtonStyle.Success),
+        new ButtonBuilder()
+            .setCustomId(`bandit_notoccur:${guildId}:${eventStamp}`)
+            .setLabel(`ไม่เกิด (${notOccurredCount})`)
+            .setStyle(ButtonStyle.Danger),
+        new ButtonBuilder()
+            .setCustomId(`bandit_role:${guildId}`)
+            .setLabel(hasBanditRole ? 'กดอีกครั้งยกเลิกรับแจ้งเตือน' : 'กดเพื่อรับยศแจ้งเตือน')
+            .setStyle(hasBanditRole ? ButtonStyle.Secondary : ButtonStyle.Primary),
         new ButtonBuilder().setCustomId(`bandit_status:${guildId}`).setLabel('ดูรอบถัดไป').setStyle(ButtonStyle.Primary)
     );
 }
 
 async function checkAndSendBanditAlerts() {
+    if (banditSchedulerRunning) return;
+    banditSchedulerRunning = true;
+    try {
     const guilds = getAllGuildConfigs();
     for (const { guildId } of guilds) {
         await guildContext.run({ guildId }, async () => {
             await checkAndSendBanditAlertsForGuild();
         });
     }
+    } finally { banditSchedulerRunning = false; }
 }
 
 async function checkAndSendBanditAlertsForGuild() {
@@ -5501,11 +4462,43 @@ async function checkAndSendBanditAlertsForGuild() {
                         console.warn(`⚠️ Could not delete previous Bandit alert ${config.lastMessageId}:`, err.message);
                     });
                 }
-                const card = await generateBanditCard(event, minutesUntil);
+                const imageHour = event.start.toLocaleTimeString('en-GB', {
+                    timeZone: 'Asia/Bangkok', hour: '2-digit', hour12: false
+                });
+                const imageName = `bandit-${imageHour}00.png`;
+                const imagePath = path.join(__dirname, 'assets', imageName);
+                if (!fs.existsSync(imagePath)) {
+                    throw new Error(`Bandit image asset not found: ${imagePath}`);
+                }
+                const card = new AttachmentBuilder(imagePath, { name: imageName });
+                const eventStamp = String(event.start.getTime());
+                // Resolve the BANDIT role from the actual Discord server each alert.
+                // This repairs saved configs where banditRoleId is missing or stale.
+                const alertGuild = channel.guild || await client.guilds.fetch(config.guildId).catch(() => null);
+                let banditRole = null;
+                if (alertGuild && config.banditRoleId) {
+                    banditRole = await alertGuild.roles.fetch(config.banditRoleId).catch(() => null);
+                }
+                if (!banditRole && alertGuild) {
+                    banditRole = alertGuild.roles.cache.find(role => role.name.toUpperCase() === 'BANDIT') || null;
+                    if (!banditRole) {
+                        const allRoles = await alertGuild.roles.fetch().catch(() => null);
+                        banditRole = allRoles?.find(role => role.name.toUpperCase() === 'BANDIT') || null;
+                    }
+                }
+                const roleId = banditRole?.id || null;
+                if (roleId && config.banditRoleId !== roleId) {
+                    config.banditRoleId = roleId;
+                    saveData();
+                }
+                if (!roleId) {
+                    console.warn(`⚠️ BANDIT role not found in guild ${config.guildId}; alert will be sent without a role mention.`);
+                }
                 const alertMessage = await channel.send({
-                    content: `⚔️ **BANDIT ASSAULT — ASIA**\nกำลังจะเริ่มใน **${banditCountdownText(minutesUntil)}**\n🕒 เวลาเริ่ม: **${ictTime} น. (ICT)**\n🎲 โอกาสเกิด: **${chanceLabel}**`,
+                    content: `${roleId ? `<@&${roleId}> ` : ''}⚔️ **BANDIT ASSAULT — ASIA**\nกำลังจะเริ่มใน **${banditCountdownText(minutesUntil)}**\n🕒 เวลาเริ่ม: **${ictTime} น.**\n🎲 โอกาสเกิด: **${chanceLabel}**`,
                     files: [card],
-                    components: [banditAlertComponents(config.guildId)]
+                    allowedMentions: { parse: [], roles: roleId ? [roleId] : [] },
+                    components: [banditAlertComponents(config.guildId, eventStamp, (config.banditConfirmations?.[eventStamp] || []).length, (config.banditNotOccurred?.[eventStamp] || []).length)]
                 });
                 config.lastMessageId = alertMessage.id;
                 config.lastEventKey = key;
@@ -5531,6 +4524,11 @@ const commands = [
     new SlashCommandBuilder().setName('remove').setDescription('ลบรายการติดตาม')
         .addSubcommand(s => s.setName('guild').setDescription('ลบกิลด์').addStringOption(o => o.setName('name').setDescription('ชื่อกิลด์').setRequired(true)))
         .addSubcommand(s => s.setName('player').setDescription('ลบผู้เล่น').addStringOption(o => o.setName('name').setDescription('ชื่อผู้เล่น').setRequired(true))),
+    new SlashCommandBuilder().setName('battlelink').setDescription('จัดการระบบรายงานเมื่อมีคนวางลิงก์ Battle')
+        .addSubcommand(s => s.setName('setup').setDescription('ตั้งค่าห้องสำหรับตรวจลิงก์ Battle อัตโนมัติ')
+            .addChannelOption(o => o.setName('channel').setDescription('ห้องที่ให้บอทตรวจลิงก์ AlbionBB').addChannelTypes(ChannelType.GuildText).setRequired(true)))
+        .addSubcommand(s => s.setName('status').setDescription('ดูห้องที่ตั้งค่าตรวจลิงก์ Battle'))
+        .addSubcommand(s => s.setName('remove').setDescription('ยกเลิกระบบตรวจลิงก์ Battle')),
     new SlashCommandBuilder().setName('autobattle').setDescription('จัดการระบบติดตามไฟต์อัตโนมัติ')
         .addSubcommand(s => s.setName('set').setDescription('ตั้งค่าระบบติดตามไฟต์อัตโนมัติ')
             .addChannelOption(o => o.setName('channel').setDescription('ห้องที่ต้องการให้แจ้งเตือน').addChannelTypes(ChannelType.GuildText).setRequired(true))
@@ -5548,7 +4546,7 @@ const commands = [
         .addSubcommand(s => s.setName('status').setDescription('ดูห้องที่ตั้งค่าตรวจรูป AVA อัตโนมัติ'))
         .addSubcommand(s => s.setName('remove').setDescription('ยกเลิกการตรวจรูป AVA อัตโนมัติ'))
      ,new SlashCommandBuilder().setName('bandit').setDescription('แจ้งเตือนกิจกรรม Bandit Assault เซิร์ฟเวอร์ Asia')
-        .addSubcommand(s => s.setName('setup').setDescription('ตั้งค่าการแจ้งเตือน Bandit Assault ล่วงหน้า 20 นาที')
+        .addSubcommand(s => s.setName('setup').setDescription('ตั้งค่าการแจ้งเตือน Bandit Assault ล่วงหน้า 15 นาที')
             .addChannelOption(o => o.setName('channel').setDescription('ห้องที่ต้องการให้แจ้งเตือน').addChannelTypes(ChannelType.GuildText).setRequired(true))
             .addStringOption(o => o.setName('server').setDescription('เซิร์ฟเวอร์ของตาราง Bandit Assault').setRequired(true)
                 .addChoices({ name: '🌏 Asia (East)', value: 'asia' })))
@@ -5558,6 +4556,9 @@ const commands = [
 
 
 async function pollAvaConfiguredChannels() {
+    if (avaPollRunning) return;
+    avaPollRunning = true;
+    try {
     const seenChannels = new Set();
 
     for (const [guildId, cfg] of Object.entries(guildConfigs || {})) {
@@ -5588,9 +4589,14 @@ async function pollAvaConfiguredChannels() {
                     try { return BigInt(String(message.id)) > BigInt(previousId); }
                     catch (_) { return String(message.id) !== String(previousId); }
                 });
-                if (newer.length) {
+                const retryableFailures = messages.filter(message => {
+                    const state = getGuildConfig(String(guildId), false)?.avaMessageStates?.[String(message.id)];
+                    return state?.state === 'failed' && (Number(state.attempts) || 0) < 3 && Date.now() - (Number(state.updatedAt) || 0) >= 30000;
+                });
+                const workMessages = [...new Map([...newer, ...retryableFailures].map(message => [String(message.id), message])).values()];
+                if (workMessages.length) {
                     avaPollState.set(stateKey, latestId);
-                    for (const message of newer) {
+                    for (const message of workMessages) {
                         if (message.author?.bot) continue;
                         try {
                             await guildContext.run({ guildId }, async () => { await processAvaImageMessage(message); });
@@ -5610,6 +4616,7 @@ async function pollAvaConfiguredChannels() {
     for (const key of avaPollState.keys()) {
         if (!seenChannels.has(key)) avaPollState.delete(key);
     }
+    } finally { avaPollRunning = false; }
 }
 
 client.once('ready', async () => {
@@ -5626,7 +4633,7 @@ client.once('ready', async () => {
         console.log(`🛡️ Auto-Battle initialized: marked ${seeded} existing battle(s) as already seen. No historical backlog will be reported.`);
     }, 5000);
 
-    setInterval(checkAutoBattles, 5 * 60 * 1000);
+    setInterval(() => checkAutoBattles().catch(err => console.error('❌ Auto-Battle scheduler error:', err)), 5 * 60 * 1000);
     setTimeout(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA initial poll error:', err)), 3000);
     setInterval(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA poll error:', err)), 5000);
     fetchBattleHubMapIndex()
@@ -5751,10 +4758,12 @@ client.on('interactionCreate', async interaction => {
                         console.warn('⚠️ AVA image attachment fallback for ' + selectedName + ': ' + imageErr.message);
                     }
 
-                    const tierLabel = String(data.tier || '').match(/T[468]/i)?.[0]?.toUpperCase() ||
-                        (String(data.name || '').toLowerCase().includes('sasitos-umogaum') ? 'T4' : 'Tier unavailable');
+                    const tierLabel = String(data.tier || '').match(/T\s*\d+/i)?.[0]?.replace(/\s+/g, '').toUpperCase() ||
+                        (String(data.name || '').toLowerCase().includes('sasitos-umogaum') ? 'T4' : 'T?');
+                    // Restore the original AVA report format: send only the large map image.
+                    // Do not include map metadata text or provider links in the report message,
+                    // because Discord can render them as an embed alongside the image.
                     const reportPayload = {
-                        content: '🗺️ **' + data.name + '** • **' + tierLabel + '**',
                         ...(imageBuffer ? { files: [new AttachmentBuilder(imageBuffer, { name: 'ava-map.png' })] } : {})
                     };
                     // Upload through the channel message endpoint instead of
@@ -5764,7 +4773,7 @@ client.on('interactionCreate', async interaction => {
                     if (interaction.channel?.send) {
                         await interaction.channel.send(reportPayload);
                         await interaction.editReply({
-                            content: '✅ ส่งรูปข้อมูลแมฟ **' + data.name + '** แล้ว',
+                            content: '✅ ส่งรูปข้อมูลแมฟ **' + data.name + ' (' + tierLabel + ')** แล้ว',
                             components: []
                         });
                     } else {
@@ -5787,7 +4796,63 @@ client.on('interactionCreate', async interaction => {
     }
 
     if (interaction.isButton()) {
-        const [action, guildId] = interaction.customId.split(':');
+        const [action, guildId, eventStamp] = interaction.customId.split(':');
+        if (action === 'bandit_confirm') {
+            const config = banditAutoConfigs.find(c => c.guildId === guildId);
+            if (!config) return interaction.reply({ content: '❌ ไม่พบการตั้งค่า Bandit Assault นี้', ephemeral: true });
+            if (interaction.message?.id !== config.lastMessageId) {
+                return interaction.reply({ content: 'ℹ️ ปุ่มนี้เป็นการแจ้งเตือนรอบเก่าแล้ว', ephemeral: true });
+            }
+            const eventKey = new Date(Number(eventStamp)).toISOString();
+            if (config.lastEventKey !== eventKey) {
+                return interaction.reply({ content: 'ℹ️ ปุ่มนี้เป็นการแจ้งเตือนรอบเก่าแล้ว', ephemeral: true });
+            }
+            if (!config.banditConfirmations || typeof config.banditConfirmations !== 'object') config.banditConfirmations = {};
+            const voters = Array.isArray(config.banditConfirmations[eventStamp]) ? config.banditConfirmations[eventStamp] : [];
+            if (voters.includes(interaction.user.id)) {
+                return interaction.reply({ content: `คุณยืนยันรอบนี้แล้ว (รวม ${voters.length} คน)`, ephemeral: true });
+            }
+            if (!config.banditNotOccurred || typeof config.banditNotOccurred !== 'object') config.banditNotOccurred = {};
+            config.banditNotOccurred[eventStamp] = (config.banditNotOccurred[eventStamp] || []).filter(id => id !== interaction.user.id);
+            voters.push(interaction.user.id);
+            config.banditConfirmations[eventStamp] = voters;
+            saveData();
+            await interaction.update({ components: [banditAlertComponents(guildId, eventStamp, voters.length, (config.banditNotOccurred[eventStamp] || []).length)] });
+            return;
+        }
+        if (action === 'bandit_notoccur') {
+            const config = banditAutoConfigs.find(c => c.guildId === guildId);
+            if (!config) return interaction.reply({ content: '❌ ไม่พบการตั้งค่า Bandit Assault นี้', ephemeral: true });
+            if (interaction.message?.id !== config.lastMessageId || config.lastEventKey !== new Date(Number(eventStamp)).toISOString()) return interaction.reply({ content: 'ℹ️ ปุ่มนี้เป็นการแจ้งเตือนรอบเก่าแล้ว', ephemeral: true });
+            if (!config.banditNotOccurred || typeof config.banditNotOccurred !== 'object') config.banditNotOccurred = {};
+            const voters = Array.isArray(config.banditNotOccurred[eventStamp]) ? config.banditNotOccurred[eventStamp] : [];
+            if (voters.includes(interaction.user.id)) return interaction.reply({ content: `คุณกดไม่เกิดรอบนี้แล้ว (รวม ${voters.length} คน)`, ephemeral: true });
+            if (!config.banditConfirmations || typeof config.banditConfirmations !== 'object') config.banditConfirmations = {};
+            config.banditConfirmations[eventStamp] = (config.banditConfirmations[eventStamp] || []).filter(id => id !== interaction.user.id);
+            voters.push(interaction.user.id);
+            config.banditNotOccurred[eventStamp] = voters;
+            saveData();
+            await interaction.update({ components: [banditAlertComponents(guildId, eventStamp, (config.banditConfirmations[eventStamp] || []).length, voters.length)] });
+            return;
+        }
+        if (['bandit_role', 'bandit_role_remove', 'bandit_role_add'].includes(action)) {
+            const config = banditAutoConfigs.find(c => c.guildId === guildId);
+            if (!config?.banditRoleId || !interaction.guild) return interaction.reply({ content: '❌ ยังไม่พบยศ BANDIT ของเซิร์ฟเวอร์นี้ ให้ผู้ดูแลใช้ /bandit setup ใหม่', ephemeral: true });
+            const role = await interaction.guild.roles.fetch(config.banditRoleId).catch(() => null);
+            const member = await interaction.guild.members.fetch(interaction.user.id).catch(() => null);
+            if (!role || !member) return interaction.reply({ content: '❌ ไม่พบยศหรือสมาชิกในเซิร์ฟเวอร์', ephemeral: true });
+            const botMember = interaction.guild.members.me || await interaction.guild.members.fetchMe().catch(() => null);
+            if (!botMember?.permissions.has(PermissionsBitField.Flags.ManageRoles) || role.position >= botMember.roles.highest.position) return interaction.reply({ content: '❌ บอทไม่มีสิทธิ์จัดการยศ BANDIT โปรดให้สิทธิ์ Manage Roles และย้ายยศบอทให้อยู่สูงกว่ายศ BANDIT', ephemeral: true });
+            const shouldRemove = action === 'bandit_role_remove' || (action === 'bandit_role' && member.roles.cache.has(role.id));
+            if (shouldRemove) {
+                if (member.roles.cache.has(role.id)) await member.roles.remove(role, 'ผู้ใช้ยกเลิกรับการแจ้งเตือน Bandit');
+                const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`bandit_role_add:${guildId}`).setLabel('กดเพื่อรับยศแจ้งเตือน').setStyle(ButtonStyle.Primary));
+                return interaction.reply({ content: '🔕 ยกเลิกรับแจ้งเตือนแล้ว หากต้องการรับอีกครั้งกดปุ่มด้านล่าง', components: [row], ephemeral: true });
+            }
+            if (!member.roles.cache.has(role.id)) await member.roles.add(role, 'ผู้ใช้สมัครรับการแจ้งเตือน Bandit');
+            const row = new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`bandit_role_remove:${guildId}`).setLabel('กดอีกครั้งยกเลิกรับแจ้งเตือน').setStyle(ButtonStyle.Danger));
+            return interaction.reply({ content: '✅ ได้รับยศ BANDIT แล้ว เมื่อมีแจ้งเตือนจะถูกแท็กยศนี้', components: [row], ephemeral: true });
+        }
         if (action === 'bandit_toggle') {
             const config = banditAutoConfigs.find(c => c.guildId === guildId);
             if (!config) return interaction.reply({ content: '❌ ยังไม่ได้ตั้งค่า Bandit Assault สำหรับเซิร์ฟเวอร์นี้', ephemeral: true });
@@ -5858,6 +4923,26 @@ client.on('interactionCreate', async interaction => {
             const before = targetPlayers.length; targetPlayers = targetPlayers.filter(x => x.toLowerCase() !== name.toLowerCase());
             if (before === targetPlayers.length) return interaction.reply({ content: `❌ ไม่พบผู้เล่น **${name}**`, flags: 64 });
             saveData(); return interaction.reply({ content: `🗑️ ลบผู้เล่น **${name}** แล้ว`, flags: 64 });
+        }
+    }
+
+    if (commandName === 'battlelink') {
+        const sub = interaction.options.getSubcommand();
+        const config = getGuildConfig(interaction.guildId, true);
+        if (sub === 'setup') {
+            const channel = interaction.options.getChannel('channel');
+            config.battleLinkChannelId = channel.id;
+            saveData();
+            return interaction.reply({ content: `✅ ตั้งค่ารายงาน Battle Link แล้ว\n📢 ห้องตรวจลิงก์: <#${channel.id}>\nเมื่อมีการวางลิงก์ AlbionBB ในห้องนี้ บอทจะรายงาน Kills, Deaths และผลรวม พร้อมภาพ Battle Report ถ้าสร้างภาพสำเร็จ`, flags: 64 });
+        }
+        if (sub === 'status') {
+            return interaction.reply({ content: config.battleLinkChannelId ? `🔗 ระบบ Battle Link: เปิดใช้งาน\n📢 ห้อง: <#${config.battleLinkChannelId}>` : 'ℹ️ ยังไม่ได้ตั้งค่าระบบ Battle Link ใช้ /battlelink setup เพื่อตั้งค่าห้อง', flags: 64 });
+        }
+        if (sub === 'remove') {
+            if (!config.battleLinkChannelId) return interaction.reply({ content: 'ℹ️ ยังไม่ได้ตั้งค่าระบบ Battle Link', flags: 64 });
+            config.battleLinkChannelId = null;
+            saveData();
+            return interaction.reply({ content: '🗑️ ยกเลิกระบบ Battle Link แล้ว โดยไม่เปลี่ยนการตั้งค่า /add guild หรือ /autobattle', flags: 64 });
         }
     }
 
@@ -6046,11 +5131,20 @@ client.on('interactionCreate', async interaction => {
             const channel = interaction.options.getChannel('channel');
             const server = interaction.options.getString('server') || 'asia';
             const previousConfig = banditAutoConfigs.find(c => c.guildId === interaction.guildId);
+            const me = interaction.guild?.members?.me || await interaction.guild?.members?.fetchMe?.().catch(() => null);
+            if (!me?.permissions.has(PermissionsBitField.Flags.ManageRoles)) return interaction.reply({ content: '❌ บอทต้องมีสิทธิ์ Manage Roles เพื่อสร้างและมอบยศ BANDIT อัตโนมัติ', ephemeral: true });
+            let banditRole = interaction.guild.roles.cache.find(r => r.name === 'BANDIT');
+            if (!banditRole) banditRole = await interaction.guild.roles.create({ name: 'BANDIT', color: 0x000000, mentionable: true, reason: 'Bandit Assault alert role created by /bandit setup' });
+            else if (banditRole.color !== 0x000000 || !banditRole.mentionable) banditRole = await banditRole.edit({ color: 0x000000, mentionable: true, reason: 'Normalize Bandit alert role settings' });
+            if (banditRole.position >= me.roles.highest.position) return interaction.reply({ content: '❌ ยศ BANDIT อยู่สูงกว่าหรือเท่ากับยศบอท กรุณาลากยศบอทให้อยู่เหนือ BANDIT แล้วใช้ /bandit setup อีกครั้ง', ephemeral: true });
             const configData = {
                 guildId: interaction.guildId,
                 channelId: channel.id,
                 server,
                 enabled: true,
+                banditRoleId: banditRole.id,
+                banditConfirmations: previousConfig?.banditConfirmations || {},
+                banditNotOccurred: previousConfig?.banditNotOccurred || {},
                 lastMessageId: previousConfig?.lastMessageId || null,
                 lastEventKey: previousConfig?.lastEventKey || null
             };
@@ -6169,15 +5263,26 @@ client.on('messageCreate', async message => {
     }
     const match = message.content.match(/https?:\/\/(?:east\.)?albionbb\.com\/battles\/[^\s]+/i);
     if (!match) return;
+    const battleUrl = match[0].replace(/[)>\],.]+$/, '');
 
-    const matchingGuildConfig = targetGuilds.find(g => g.channelId === message.channel.id);
-    if (targetGuilds.some(g => g.channelId) && !matchingGuildConfig) {
-        return; 
+    const guildConfig = getGuildConfig(message.guildId, false);
+    const dedicatedBattleLinkChannel = guildConfig?.battleLinkChannelId;
+    if (dedicatedBattleLinkChannel) {
+        if (message.channel.id !== dedicatedBattleLinkChannel) return;
+    } else {
+        // Preserve legacy /add guild channel behavior until /battlelink setup is configured.
+        const matchingGuildConfig = targetGuilds.find(g => g.channelId === message.channel.id);
+        if (targetGuilds.some(g => g.channelId) && !matchingGuildConfig) return;
     }
+
+    const rateKey = battleUrl, now = Date.now();
+    for (const [key, stamp] of battleUrlRateLimit) if (now - stamp > 10 * 60 * 1000) battleUrlRateLimit.delete(key);
+    if (battleUrlRateLimit.has(rateKey) && now - battleUrlRateLimit.get(rateKey) < BATTLE_URL_COOLDOWN_MS) { console.log('⏳ Battle URL rate limit: duplicate link suppressed'); return; }
+    battleUrlRateLimit.set(rateKey, now);
 
     try {
         const status = await message.reply('⏳ กำลังดึงสถิติและสร้างรายงานจาก Official Albion API...');
-        await processBattleReport(match[0], status, true);
+        await processBattleReport(battleUrl, status, true);
     } catch (err) { console.error('❌ messageCreate error:', err); }
     });
 });
@@ -6214,80 +5319,6 @@ client.on('shardReconnecting', shardId => {
 // One bounded, unauthenticated discovery request plus one short WebSocket handshake test.
 // No bot token is sent to either diagnostic endpoint. This runs once per process start;
 // it does not poll/retry and always allows the normal discord.js login attempt to continue.
-async function diagnoseDiscordNetwork() {
-    let gatewayUrl = 'wss://gateway.discord.gg';
-    const controller = new AbortController();
-    const discoveryTimer = setTimeout(() => controller.abort(), 8000);
-    try {
-        console.log('🧪 Discord diagnostic 1/2: checking unauthenticated Gateway discovery (single request)...');
-        const response = await fetch('https://discord.com/api/v10/gateway', {
-            method: 'GET',
-            headers: { 'Accept': 'application/json', 'User-Agent': 'AlbionDiscordBot-GatewayDiagnostics/1.0' },
-            signal: controller.signal
-        });
-        const contentType = String(response.headers.get('content-type') || '').split(';')[0];
-        const retryAfter = response.headers.get('retry-after');
-        if (!response.ok) {
-            console.warn('⚠️ Gateway discovery HTTP status:', response.status,
-                '| content-type:', contentType || 'unknown',
-                '| retry-after:', retryAfter || 'not provided');
-            // Do not read/log the response body: edge pages can be large and may contain
-            // infrastructure details. Do not retry this request.
-        } else {
-            const data = await response.json();
-            if (typeof data?.url === 'string' && /^wss:\/\//i.test(data.url)) {
-                gatewayUrl = data.url;
-                console.log('✅ Gateway discovery succeeded; a secure Gateway URL was returned.');
-            } else {
-                console.warn('⚠️ Gateway discovery returned HTTP success but no valid secure Gateway URL.');
-            }
-        }
-    } catch (err) {
-        console.warn('⚠️ Gateway discovery diagnostic failed:', err?.name === 'AbortError' ? 'timed out after 8 seconds' : (err?.message || String(err)));
-    } finally {
-        clearTimeout(discoveryTimer);
-    }
-
-    if (typeof globalThis.WebSocket !== 'function') {
-        console.warn('⚠️ WebSocket diagnostic skipped: global WebSocket is unavailable in this Node runtime.');
-        return;
-    }
-
-    let socket;
-    let settled = false;
-    await new Promise(resolve => {
-        const finish = (message, isError = false) => {
-            if (settled) return;
-            settled = true;
-            clearTimeout(wsTimer);
-            try { socket?.close(); } catch (_) {}
-            (isError ? console.warn : console.log)(message);
-            resolve();
-        };
-        const wsTimer = setTimeout(() => {
-            finish('⚠️ Gateway WebSocket handshake did not open within 6 seconds.', true);
-        }, 6000);
-        try {
-            const endpoint = new URL(gatewayUrl);
-            endpoint.searchParams.set('v', '10');
-            endpoint.searchParams.set('encoding', 'json');
-            console.log('🧪 Discord diagnostic 2/2: testing one unauthenticated WebSocket handshake...');
-            socket = new globalThis.WebSocket(endpoint.toString());
-            socket.addEventListener('open', () => {
-                finish('✅ Gateway WebSocket handshake succeeded (no IDENTIFY sent; this is only a network test).');
-            }, { once: true });
-            socket.addEventListener('error', () => {
-                finish('⚠️ Gateway WebSocket handshake failed; inspect Render outbound networking and the Gateway diagnostics above.', true);
-            }, { once: true });
-            socket.addEventListener('close', event => {
-                if (!settled) finish('⚠️ Gateway WebSocket closed before opening (close code ' + event.code + ').', true);
-            }, { once: true });
-        } catch (err) {
-            finish('⚠️ Gateway WebSocket diagnostic could not start: ' + (err?.message || String(err)), true);
-        }
-    });
-}
-
 initializeTrackingPersistence()
     .catch(err => {
         console.error('❌ Tracking persistence initialization failed:', err?.message || err);
