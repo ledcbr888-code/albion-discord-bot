@@ -174,23 +174,31 @@ function getMetaWarnings(counts, total, maxPlayers) {
     const sup = Number(counts.Support) || 0;
     const heal = Number(counts.Heal) || 0;
 
-    if (tank === 0) warnings.push('⚠️ **ยังไม่มี Tank** — อาจโดนล้วง Caller ง่าย');
-    else if (tank === 1 && total > 7) warnings.push('ℹ️ Tank มีแค่ 1 คน — แนะนำ 2+ สำหรับ ZvZ');
+    // Small party (gank/small scale) - don't spam missing role warnings
+    const isSmall = maxPlayers <= 7 || total <= 3;
 
-    if (dps === 0) warnings.push('⚠️ **ยังไม่มี DPS** — ไม่มีดาเมจหลัก');
-    else if (dps < 3) warnings.push('⚠️ **DPS น้อยกว่า 3 คน** — ดาเมจอาจไม่พอปิดคิล');
-    else if (dps < 5 && total >= 10) warnings.push('ℹ️ DPS น้อยกว่า 5 คน — แนะนำ 5+ สำหรับไฟต์ใหญ่');
+    if (!isSmall) {
+        if (tank === 0) warnings.push('⚠️ **ยังไม่มี Tank** — อาจโดนล้วง Caller ง่าย');
+        else if (tank === 1 && total > 7) warnings.push('ℹ️ Tank มีแค่ 1 คน — แนะนำ 2+ สำหรับ ZvZ');
 
-    if (sup === 0) warnings.push('⚠️ **ไม่มี Support** — ขาด Curse / Locus / Occult');
+        if (dps === 0) warnings.push('⚠️ **ยังไม่มี DPS** — ไม่มีดาเมจหลัก');
+        else if (dps < 3) warnings.push('⚠️ **DPS น้อยกว่า 3 คน** — ดาเมจอาจไม่พอปิดคิล');
+        else if (dps < 5 && total >= 10) warnings.push('ℹ️ DPS น้อยกว่า 5 คน — แนะนำ 5+ สำหรับไฟต์ใหญ่');
+
+        if (sup === 0) warnings.push('⚠️ **ไม่มี Support** — ขาด Curse / Locus / Occult');
+    }
+    
     if (heal === 0) warnings.push('⚠️ **ไม่มี Heal** — ไม่มีฮีลเลย');
     else if (heal === 1 && total >= 12) warnings.push('ℹ️ Heal มีแค่ 1 คน — แนะนำ 2+');
 
     if (total <= 1) warnings.push('⚠️ มีแค่ Caller คนเดียว');
     if (total < maxPlayers * 0.5) warnings.push('ℹ️ ใช้ช่องแค่ ' + total + '/' + maxPlayers + ' คน — ยังว่างเยอะ');
 
-    // Balance check
-    if (tank > dps) warnings.push('ℹ️ Tank เยอะกว่า DPS — อาจดาเมจขาด');
-    if (heal > tank + 1) warnings.push('ℹ️ Heal เยอะกว่า Tank');
+    // Balance check only for larger comps
+    if (!isSmall) {
+        if (tank > dps) warnings.push('ℹ️ Tank เยอะกว่า DPS — อาจดาเมจขาด');
+        if (heal > tank + 1) warnings.push('ℹ️ Heal เยอะกว่า Tank');
+    }
 
     if (warnings.length === 0) warnings.push('✅ คอมพ์ดูสมดุลดี');
     return warnings;
@@ -204,9 +212,10 @@ function countPanel(session) {
         new ButtonBuilder().setCustomId('cta:preset:' + session.id + ':clear').setLabel('ล้างจำนวน').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('cta:cancel:' + session.id).setLabel('ยกเลิก').setStyle(ButtonStyle.Danger)
     );
-    const detail = ROLE_ORDER.map(role => {
-        const c = Number(session.counts[role]) || 0;
-        return (c > 0 ? '✅ ' : '▫️ ') + ROLE_LABELS[role] + ': ' + c + ' คน';
+    const detail = ['Caller', ...ROLE_ORDER].map(role => {
+        const c = role === 'Caller' ? 1 : (Number(session.counts[role]) || 0);
+        const label = ROLE_LABELS[role] || '📣 Caller';
+        return (c > 0 ? '✅ ' : '▫️ ') + label + ': ' + c + ' คน';
     }).join('\n');
 
     const warnings = getMetaWarnings(session.counts, total, session.maxPlayers);
@@ -218,16 +227,16 @@ function countPanel(session) {
     };
 }
 
-// Grid 5 per row - FIXED larger icons
+// Grid 5 per row - BIGGER separate image (2x size as requested)
 async function buildWeaponGridImage(weapons, usedMap, currentRole) {
     const canvasLib = tryLoadCanvas();
     if (!canvasLib) return null;
     const { createCanvas, loadImage } = canvasLib;
     const cols = 5;
-    const cellW = 260;
-    const cellH = 310;
-    const padding = 14;
-    const headerH = 70;
+    const cellW = 380; // was 260 - bigger
+    const cellH = 440; // was 310 - bigger
+    const padding = 18;
+    const headerH = 90;
     const rows = Math.ceil(weapons.length / cols);
     const width = cols * cellW + (cols + 1) * padding;
     const height = headerH + rows * cellH + (rows + 1) * padding;
@@ -235,8 +244,8 @@ async function buildWeaponGridImage(weapons, usedMap, currentRole) {
     const ctx = canvas.getContext('2d');
     ctx.fillStyle = '#232428'; ctx.fillRect(0, 0, width, height);
     ctx.fillStyle = '#1e1f22'; ctx.fillRect(0, 0, width, headerH);
-    ctx.fillStyle = '#ffffff'; ctx.font = 'bold 28px sans-serif';
-    ctx.fillText((ROLE_LABELS_SHORT[currentRole] || currentRole) + ' - ' + weapons.length + ' WEAPONS', padding + 10, 46);
+    ctx.fillStyle = '#ffffff'; ctx.font = 'bold 36px sans-serif';
+    ctx.fillText((ROLE_LABELS_SHORT[currentRole] || currentRole) + ' - ' + weapons.length + ' WEAPONS', padding + 12, 58);
     for (let i = 0; i < weapons.length; i++) {
         const col = i % cols; const row = Math.floor(i / cols);
         const x = padding + col * (cellW + padding); const y = headerH + padding + row * (cellH + padding);
@@ -245,10 +254,16 @@ async function buildWeaponGridImage(weapons, usedMap, currentRole) {
         ctx.strokeStyle = isUsed ? '#d9a94a' : '#3f4147'; ctx.lineWidth = isUsed ? 2.4 : 1; ctx.strokeRect(x, y, cellW, cellH);
         if (isUsed) { ctx.fillStyle = 'rgba(217,169,74,0.20)'; ctx.fillRect(x, y, cellW, 26); }
         const iconPath = weaponIconPath(wName);
-        const iconSize = 200;
+        const iconSize = 300; // was 200 - 1.5x bigger
         if (iconPath) {
-            try { const img = await loadImage(iconPath); const ix = x + (cellW - iconSize) / 2; const iy = y + 16; ctx.drawImage(img, ix, iy, iconSize, iconSize); } catch { ctx.fillStyle = '#3a3c41'; ctx.fillRect(x + (cellW-200)/2, y + 16, 200, 200); }
-        } else { ctx.fillStyle = '#3a3c41'; ctx.fillRect(x + (cellW-200)/2, y + 16, 200, 200); }
+            try { const img = await loadImage(iconPath); const ix = x + (cellW - iconSize) / 2; const iy = y + 16; ctx.drawImage(img, ix, iy, iconSize, iconSize); } catch { 
+                ctx.fillStyle = '#3a3c41'; ctx.fillRect(x + (cellW-200)/2, y + 16, 200, 200);
+                ctx.fillStyle = '#ffffff'; ctx.font = 'bold 48px sans-serif'; ctx.textAlign='center'; ctx.fillText('⚔️', x + cellW/2, y + 130); ctx.textAlign='left';
+            }
+        } else { 
+            ctx.fillStyle = '#2b2d31'; ctx.fillRect(x + (cellW-200)/2, y + 16, 200, 200);
+            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 48px sans-serif'; ctx.textAlign='center'; ctx.fillText(ROLE_EMOJIS[currentRole] || '⚔️', x + cellW/2, y + 130); ctx.textAlign='left';
+        }
         ctx.fillStyle = isUsed ? '#f0c35a' : '#ffffff'; ctx.font = 'bold 20px sans-serif'; ctx.textAlign = 'center';
         ctx.fillText(displayWeapon(wName).slice(0, 18), x + cellW / 2, y + 245, cellW - 12);
         ctx.font = '15px sans-serif'; ctx.fillStyle = isUsed ? '#f0c35a' : '#9ca0a6';
@@ -263,21 +278,30 @@ async function buildRosterSmallIconImage(event) {
     if (!canvasLib) return null;
     const { createCanvas, loadImage } = canvasLib;
     const slots = event.slots; 
-    const rowH = 92;
-    const width = 900;
-    const height = slots.length * rowH + 20;
+    const rowH = 150; // was 92 - 1.6x bigger as requested
+    const width = 1100; // wider for bigger icons
+    const height = slots.length * rowH + 24;
     const canvas = createCanvas(width, height); const ctx = canvas.getContext('2d');
     ctx.fillStyle = '#2b2d31'; ctx.fillRect(0, 0, width, height);
     for (let i = 0; i < slots.length; i++) {
         const s = slots[i]; const y = i * rowH;
         ctx.fillStyle = i % 2 === 0 ? '#313338' : '#2b2d31'; ctx.fillRect(0, y, width, rowH);
-        if (i === 0) { ctx.fillStyle = '#00b0f4'; ctx.fillRect(0, 0, 6, height); }
-        const iconX = 14, iconY = y + 10, iconS = 72;
+        if (i === 0) { ctx.fillStyle = '#00b0f4'; ctx.fillRect(0, 0, 8, height); }
+        const iconX = 18, iconY = y + 14, iconS = 122; // was 72 - 1.7x bigger
         ctx.fillStyle = '#1e1f22'; ctx.fillRect(iconX, iconY, iconS, iconS);
-        ctx.strokeStyle = '#3f4147'; ctx.lineWidth = 1.5; ctx.strokeRect(iconX, iconY, iconS, iconS);
+        ctx.strokeStyle = '#3f4147'; ctx.lineWidth = 2; ctx.strokeRect(iconX, iconY, iconS, iconS);
         const iconPath = weaponIconPath(s.weapon);
-        if (iconPath) { try { const img = await loadImage(iconPath); ctx.drawImage(img, iconX + 3, iconY + 3, iconS - 6, iconS - 6); } catch {} }
-        else { ctx.fillStyle = '#23a559'; ctx.fillRect(iconX + 12, iconY + 12, iconS-24, iconS-24); }
+        if (iconPath) { try { const img = await loadImage(iconPath); ctx.drawImage(img, iconX + 3, iconY + 3, iconS - 6, iconS - 6); } catch { 
+            // Fallback to emoji text if image fails
+            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 32px sans-serif'; ctx.textAlign='center'; 
+            ctx.fillText(ROLE_EMOJIS[s.role] || '⚔️', iconX + iconS/2, iconY + iconS/2 + 10); ctx.textAlign='left';
+        } }
+        else { 
+            // No icon file - use role emoji instead of green square
+            ctx.fillStyle = '#2b2d31'; ctx.fillRect(iconX, iconY, iconS, iconS);
+            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 36px sans-serif'; ctx.textAlign='center';
+            ctx.fillText(ROLE_EMOJIS[s.role] || '⚔️', iconX + iconS/2, iconY + iconS/2 + 12); ctx.textAlign='left';
+        }
         if (s.userId) {
             ctx.fillStyle = '#23a559'; ctx.beginPath(); ctx.arc(iconX + iconS + 14, iconY + iconS / 2, 10, 0, Math.PI * 2); ctx.fill();
             ctx.fillStyle = '#ffffff'; ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('✓', iconX + iconS + 14, iconY + iconS / 2 + 4); ctx.textAlign = 'left';

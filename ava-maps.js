@@ -1,5 +1,6 @@
-// AVA Maps - 400 Roads of Avalon + 100 Hideout
+// AVA Maps - 400 Roads of Avalon + 100 Hideout + OCR variants
 // แยกหมวดตามตัวอักษรนำหน้า - แก้ง่าย ไม่ทำให้ index.js ยาว
+// รวมชื่อจริงในเกม + ชื่อที่ OCR มักอ่านผิด เพื่อให้เจอ 100%
 
 const AVA_MAPS_BY_CATEGORY = {
   // C - 44 maps
@@ -49,7 +50,7 @@ const AVA_MAPS_BY_CATEGORY = {
     "Cynos-Avixnum",
     "Cynos-Oxaeaum",
   ],
-  // F - 48 maps
+  // F - 49 maps
   F: [
     "Fasites-Azazsum",
     "Fasitos-Atezsum",
@@ -76,6 +77,7 @@ const AVA_MAPS_BY_CATEGORY = {
     "Firos-Enomaum",
     "Firos-Ezatam",
     "Firos-Osinsum",
+    "Flees-Ohohtum",
     "Fones-Opavun",
     "Fonitos-Amaurom",
     "Fonos-Aiugsum",
@@ -100,7 +102,7 @@ const AVA_MAPS_BY_CATEGORY = {
     "Fynitos-Ezatam",
     "Fynos-Alodrom",
   ],
-  // H - 48 maps
+  // H - 49 maps
   H: [
     "Hasitos-Avaolum",
     "Hasitos-Umayaum",
@@ -135,6 +137,7 @@ const AVA_MAPS_BY_CATEGORY = {
     "Hurites-Ieatun",
     "Hurites-Ouaylos",
     "Huritos-Iuimaum",
+    "Huritos-Iulmaum",
     "Huritos-Oiaelos",
     "Huros-Atontum",
     "Huyes-Ogozlum",
@@ -431,21 +434,11 @@ const AVA_MAPS_BY_CATEGORY = {
   ],
 };
 
-// รวมทั้งหมด 400+100 สำหรับค้นหา
 const ALL_AVA_MAPS = Object.values(AVA_MAPS_BY_CATEGORY).flat();
-
-// สำหรับ require แบบ array เดิมยังใช้ได้
-// const maps = require('./ava-maps.js').all หรือ .ALL
 
 module.exports = AVA_MAPS_BY_CATEGORY;
 module.exports.all = ALL_AVA_MAPS;
 module.exports.ALL = ALL_AVA_MAPS;
-module.exports.C = AVA_MAPS_BY_CATEGORY.C;
-module.exports.F = AVA_MAPS_BY_CATEGORY.F;
-module.exports.H = AVA_MAPS_BY_CATEGORY.H;
-module.exports.O = AVA_MAPS_BY_CATEGORY.O;
-module.exports.P = AVA_MAPS_BY_CATEGORY.P;
-module.exports.S = AVA_MAPS_BY_CATEGORY.S;
-module.exports.T = AVA_MAPS_BY_CATEGORY.T;
-module.exports.X = AVA_MAPS_BY_CATEGORY.X;
-module.exports.Hideout = AVA_MAPS_BY_CATEGORY.Hideout;
+for (const k of Object.keys(AVA_MAPS_BY_CATEGORY)) {
+  module.exports[k] = AVA_MAPS_BY_CATEGORY[k];
+}
