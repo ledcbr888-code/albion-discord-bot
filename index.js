@@ -3012,7 +3012,6 @@ async function fetchBattleHubMapIndex() {
     return avaCanonicalMapCache.loading;
 }
 
-async 
 async function fetchAuthoritativeAvaMapIndex() {
     // Load from local ava-maps.js first - 400 maps organized by category
     try {

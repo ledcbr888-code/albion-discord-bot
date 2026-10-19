@@ -1,17 +1,27 @@
-// AVA Maps - 400 Roads of Avalon + 100 Hideout + OCR variants
-const AVA_MAPS_BY_CATEGORY = {
-  C: ["Cases-Ugumlos","Casitos-Alieam","Casitos-Atinaum","Casitos-Avaelum","Casos-Aiagsum","Casos-Aximam","Casos-Ayosrom","Casos-Uruxtum","Cebitos-Aeaylum","Cebos-Avemlum","Ceres-Iooinum","Ceritos-Avulsum","Ceros-Aeaylum","Cetitos-Aiayrom","Cetitos-Avixnum","Cetitos-Aximam","Cetos-Obaelos","Cieites-Ugumlos","Cieitos-Avioaum","Cieitos-Ayosrom","Cieitos-Obaelos","Cieitos-Otatrom","Cilitos-Opodam","Cilos-Avioaum","Cilos-Ofailos","Cilos-Otatrom","Conitos-Ofailos","Conitos-Oxaeaum","Conitos-Uruxtum","Conos-Avaelum","Coritos-Avemlum","Coros-Aiayrom","Coros-Alieam","Coros-Atinaum","Coues-Exakrom","Couos-Ayayaum","Couos-Opodam","Curites-Exakrom","Curitos-Ayayaum","Curos-Avulsum","Cuyites-Iooinum","Cynitos-Aiagsum","Cynos-Avixnum","Cynos-Oxaeaum",],
-  F: ["Fasites-Azazsum","Fasitos-Atezsum","Fasitos-Oleraum","Fasitos-Oyuctum","Fasos-Ayiotum","Febites-Opavun","Febos-Acalun","Ferites-Ohohtum","Feritos-Enomaum","Feritos-Osinsum","Feros-Oyuctum","Fetos-Aiaylos","Fiees-Ohohtum","Fieites-Unavtum","Fieos-Aiuttum","Fieos-Atezsum","Files-Azazsum","Filites-Izohun","Filitos-Uzazlum","Filos-Abalam","Firitos-Alodrom","Firos-Aiavam","Firos-Enomaum","Firos-Ezatam","Firos-Osinsum","Flees-Ohohtum","Fones-Opavun","Fonitos-Amaurom","Fonos-Aiugsum","Fonos-Oleraum","Foritos-Aiaylos","Foros-Egoisum","Foros-Uzazlum","Foues-Aeaosum","Fouitos-Aiuttum","Fouos-Agosaum","Fouos-Amaurom","Furitos-Aiavam","Fuyes-Izohun","Fuyitos-Acalun","Fuyitos-Ayiotum","Fynes-Unavtum","Fynites-Aeaosum","Fynitos-Abalam","Fynitos-Agosaum","Fynitos-Aiugsum","Fynitos-Egoisum","Fynitos-Ezatam","Fynos-Alodrom",],
-  H: ["Hasitos-Avaolum","Hasitos-Umayaum","Hasos-Agoitum","Hasos-Ayousum","Hasos-Inayaum","Hasos-Iuimaum","Hasos-Osuorom","Hebes-Ouaylos","Hebites-Exemrom","Hebitos-Atontum","Hebos-Ulamsum","Heritos-Exozlos","Heritos-Eyoztum","Heritos-Inayaum","Heros-Atoyam","Hetitos-Iuaerom","Hieos-Aiigaum","Hieos-Avaolum","Hiles-Izizaum","Hilites-Ugumtum","Hilitos-Aiigaum","Hilitos-Osuorom","Hiros-Exozlos","Hiros-Iuaerom","Honites-Izizaum","Honitos-Uxeulum","Honos-Oyezam","Honos-Umayaum","Horos-Ohenlum","Hures-Ugumtum","Hurites-Ieatun","Hurites-Ouaylos","Huritos-Iuimaum","Huritos-Iulmaum","Huritos-Oiaelos","Huros-Atontum","Huyes-Ogozlum","Huyitos-Agoitum","Huyitos-Ohenlum","Huyos-Eyoztum","Huyos-Uxeulum","Hynes-Exemrom","Hynes-Ieatun","Hynites-Ogozlum","Hynitos-Atoyam","Hynitos-Ayousum","Hynitos-Oyezam","Hynitos-Ulamsum","Hynos-Oiaelos",],
-  O: ["Cieos-Atatlum","Cynitos-Atatlum","Oasitos-Aoeuam","Oasos-Eraerom","Oasos-Uromlum","Oebitos-Eraerom","Oebitos-Oyozam","Oebos-Ixakaum","Oeritos-Ecunsum","Oeritos-Oyexlos","Oetos-Ofailos","Oetos-Oyexlos","Oieitos-Ixakaum","Oieos-Umiutum","Oires-Oloblum","Oiritos-Eramtum","Oiros-Alaiam","Oonitos-Umiutum","Ooros-Ataltum","Ooros-Ecunsum","Oouitos-Alaiam","Oures-Araosum","Ouritos-Ataltum","Ouritos-Ofailos","Ouyos-Aoeuam","Oynites-Araosum","Oynites-Oloblum","Oynitos-Uromlum","Oynos-Eramtum","Oynos-Oyozam",],
-  P: ["Pasos-Avosam","Pebos-Avosrom","Peritos-Avosam","Peritos-Oconun","Peros-Aiataum","Petitos-Amayam","Petitos-Avosrom","Petos-Aietam","Pieos-Eterrom","Pieos-Ofairom","Pilitos-Eterrom","Pirites-Unatam","Piritos-Ofavam","Piritos-Opabrom","Ponitos-Aiayrom","Poros-Aiayrom","Poros-Oconun","Poues-Unatam","Pouitos-Ofairom","Pures-Ouozlum","Puros-Amayam","Puros-Ofavam","Puyitos-Aiataum","Pynites-Ouozlum","Pynitos-Aietam","Pynos-Opabrom",],
-  S: ["Sases-Aoarsum","Sases-Avuotum","Sasitos-Oyarlum","Sasitos-Ugersum","Sasitos-Umogaum","Sasos-Abizaum","Sasos-Egeylos","Sasos-Oiozlum","Sebos-Avoirom","Sebos-Oyohun","Sebos-Ugersum","Seritos-Egeylos","Seritos-Onaytum","Setitos-Obobrom","Setos-Aiaitum","Setos-Avamsum","Sieos-Ofugtum","Silitos-Abizaum","Silos-Apenlum","Silos-Oyarlum","Siritos-Avoirom","Siritos-Oyohun","Siros-Obobrom","Siros-Ofurlos","Sonitos-Ayailos","Soritos-Aiaitum","Soritos-Apenlum","Soritos-Avamsum","Soros-Axaesum","Soues-Uzurtum","Souitos-Oiozlum","Souos-Availos","Souos-Ososlos","Souos-Umogaum","Suyites-Avuotum","Suyites-Uzurtum","Suyitos-Axaesum","Suyitos-Ofugtum","Suyitos-Oyarlos","Suyos-Onaytum","Synites-Aoarsum","Synitos-Availos","Synitos-Ofurlos","Synitos-Ososlos","Synos-Ayailos","Synos-Oyarlos",],
-  T: ["Tasitos-Obayam","Tasitos-Ulaurom","Tasos-Iriglos","Tebitos-Igaelum","Tebitos-Odoxlum","Teros-Auiusum","Tetitos-Ayoslum","Tetos-Igaelum","Tetos-Ulaurom","Tieitos-Eyexrom","Tieitos-Ouultum","Tieos-Ayoslum","Tilitos-Ataglos","Tiros-Odoxlum","Tiros-Ouultum","Tonitos-Igurlum","Tonitos-Uxavrom","Tonos-Aboysum","Tonos-Obayam","Toritos-Iriglos","Touos-Ataglos","Touos-Uoemtum","Turitos-Atatlos","Turitos-Uoemtum","Tuyitos-Aboysum","Tuyitos-Auiusum","Tynos-Atatlos","Tynos-Eyexrom","Tynos-Igurlum","Tynos-Uxavrom",],
-  X: ["Xases-Ataglos","Xases-Oxoulum","Xasos-Aeoilos","Xasos-Aoemaum","Xasos-Oneulum","Xebitos-Oyogam","Xebos-Emimsum","Xebos-Exostum","Xerites-Oxoulum","Xetitos-Emimsum","Xetitos-Oneulum","Xetos-Obursum","Xiles-Aiavlum","Xilitos-Aoemaum","Xilos-Osayam","Xiros-Aiairom","Xonites-Aiavlum","Xoritos-Aiairom","Xoritos-Exostum","Xoritos-Osayam","Xouitos-Aeoilos","Xouitos-Eyoztum","Xouos-Aioblos","Xurites-Ataglos","Xuros-Eyoztum","Xuyitos-Aioblos","Xynitos-Obursum","Xynos-Oyogam",],
-  Hideout: ["Qiient-Al-Nusom","Qiient-Al-Odesum","Qiient-Al-Qinsis","Qiient-Al-Tersas","Qiient-Al-Viesis","Qiient-Al-Vynsis","Qiient-Et-Nusas","Qiient-Et-Odetis","Qiient-Et-Qinsum","Qiient-Et-Tertum","Qiient-In-Nutis","Qiient-In-Odetum","Qiient-In-Qinsis","Qiient-In-Tersom","Qiient-In-Viesis","Qiient-In-Vyntum","Qiient-Nutis","Qiient-Oc-Odetum","Qiient-Odesas","Qiient-Qi-Nusom","Qiient-Qi-Odesas","Qiient-Qi-Tersas","Qiient-Qi-Vynsis","Qiient-Qinsum","Qiient-Sa-Odetis","Qiient-Si-Nusas","Qiient-Si-Odesum","Qiient-Si-Tertum","Qiient-Tersom","Qiient-Vyntum","Qiitun-Al-Duosum","Qiitun-Duosum","Qiitun-Et-Vietis","Qiitun-Et-Vynsom","Qiitun-Si-Vynsom","Qiitun-Vietis","Quaent-Al-Nusis","Quaent-Al-Odesum","Quaent-Al-Qintis","Quaent-Al-Tersis","Quaent-Al-Viesom","Quaent-Al-Vynsum","Quaent-In-Nusis","Quaent-In-Odesum","Quaent-Qintis","Quaent-Tersis","Quaent-Viesom","Quaent-Vynsum","Quatun-Et-Nusas","Quatun-Et-Odetum","Quatun-Nusas","Quatun-Odetum","Secent-Al-Duosom","Secent-Al-Nutum","Secent-Al-Odetis","Secent-Al-Qinsom","Secent-Al-Tersum","Secent-Al-Viesum","Secent-Duosom","Secent-Et-Odesis","Secent-Et-Qinsas","Secent-Et-Vyntum","Secent-In-Tersum","Secent-Nutum","Secent-Odesom","Secent-Qi-Odesom","Secent-Qi-Qinsom","Secent-Sa-Odesis","Secent-Si-Odetis","Secent-Si-Qinsas","Secent-Viesum","Secent-Vyntum","Sectun-Al-Vyntis","Sectun-Et-Tersas","Sectun-In-Odesis","Sectun-In-Qinsom","Sectun-In-Vyntis","Sectun-Oc-Odesis","Sectun-Qinsom","Sectun-Tersas","Setent-Al-Duosas","Setent-Al-Qinsum","Setent-Al-Vietis","Setent-Duosas","Setent-Et-Nusum","Setent-Et-Qintis","Setent-In-Qinsum","Setent-Nusum","Setent-Qintis","Setent-Vietis","Settun-Al-Nusis","Settun-Al-Odetum","Settun-Al-Tersom","Settun-Al-Vynsis","Settun-Et-Odetum","Settun-In-Nusis","Settun-In-Odetum","Settun-Odetum","Settun-Tersom","Settun-Vynsis",],
-};
-const ALL_AVA_MAPS = Object.values(AVA_MAPS_BY_CATEGORY).flat();
-module.exports = AVA_MAPS_BY_CATEGORY;
-module.exports.all = ALL_AVA_MAPS;
-module.exports.ALL = ALL_AVA_MAPS;
-for (const k of Object.keys(AVA_MAPS_BY_CATEGORY)) { module.exports[k] = AVA_MAPS_BY_CATEGORY[k]; }
+// AVA Maps - 400 Roads of Avalon - แยกไฟล์เพื่อไม่ให้ index.js ยาว
+// เอาไว้บันทึกชื่อแมพอย่างเดียว - แก้ง่าย อัปเดตง่าย
+// นำมาจาก https://atlaschill.com/albion/es/avalon-maps/ + https://avalonroads.noktech.com.br
+
+module.exports = [
+  "Flees-Ohohtum",
+  "Huritos-Iuimaum",
+  "Hasos-Iuimaum",
+  "Hures-Ugumtum",
+  "Hebos-Ulamsm",
+  "Fynes-Unavtum",
+  "Firos-Enomaum",
+  "Foros-Egoisum",
+  "Teros-Auiusum",
+  "Tynos-Atatlos",
+  "Ceros-Aeaylum",
+  "Xuros-Eyoztum",
+  "Qiient-Odesas",
+  "Fuyes-Izohun",
+  "Coues-Exakrom",
+  "Oasos-Uromlum",
+  "Siritos-Avoirom",
+  // TODO: ใส่ชื่อแมพทั้งหมด 400 ชื่อตรงนี้ ต่อจากตัวอย่าง
+  // ตัวอย่างเพิ่ม: "Aelus-Faemor", "Aeros-Typhon", ฯลฯ
+  // ก๊อปจาก atlaschill ได้เลย - แต่ละบรรทัด "ชื่อ-ชื่อ",
+];
+
