@@ -26,6 +26,7 @@ const fs = require('fs');
 const path = require('path');
 const express = require('express');
 const { AsyncLocalStorage } = require('node:async_hooks');
+const ctaModule = require('./cta');
 
 const BANDIT_SERIF_FONT = '/usr/share/fonts/truetype/noto/NotoSerifDisplay-Black.ttf';
 const BANDIT_DISPLAY_FONT = '/usr/share/fonts/truetype/noto/NotoSansDisplay-CondensedExtraBold.ttf';
@@ -92,7 +93,7 @@ const BATTLE_URL_COOLDOWN_MS = 12 * 1000;
 const AVA_USER_COOLDOWN_MS = 8 * 1000;
 
 function createDefaultGuildConfig() {
-    return { players: [], guilds: [], autoBattles: [], banditAuto: [], avaAuto: [], avaProcessedMessages: [], avaMessageStates: {}, processedBattles: [], lastBanditAlertKey: {}, battleLinkChannelId: null };
+    return { players: [], guilds: [], autoBattles: [], banditAuto: [], avaAuto: [], avaProcessedMessages: [], avaMessageStates: {}, lastBanditAlertKey: {}, battleLinkChannelId: null, ctaTemplates: [], ctaEvents: [] };
 }
 function normalizeGuildConfig(raw = {}) {
     const cfg = raw && typeof raw === 'object' ? raw : {};
@@ -107,7 +108,9 @@ function normalizeGuildConfig(raw = {}) {
         avaMessageStates: cfg.avaMessageStates && typeof cfg.avaMessageStates === 'object' ? cfg.avaMessageStates : {},
         processedBattles: cfg.processedBattles instanceof Set ? [...cfg.processedBattles].map(String).slice(-1000) : (Array.isArray(cfg.processedBattles) ? cfg.processedBattles.map(String).slice(-1000) : []),
         lastBanditAlertKey: cfg.lastBanditAlertKey && typeof cfg.lastBanditAlertKey === 'object' ? cfg.lastBanditAlertKey : {},
-        battleLinkChannelId: typeof cfg.battleLinkChannelId === 'string' ? cfg.battleLinkChannelId : null
+        battleLinkChannelId: typeof cfg.battleLinkChannelId === 'string' ? cfg.battleLinkChannelId : null,
+        ctaTemplates: Array.isArray(cfg.ctaTemplates) ? cfg.ctaTemplates : [],
+        ctaEvents: Array.isArray(cfg.ctaEvents) ? cfg.ctaEvents : []
     };
 }
 function getGuildConfig(guildId, create = true) {
@@ -2835,14 +2838,23 @@ function levenshteinDistance(a, b) {
 
 function avaNameSimilarity(a, b) {
     const aa = normalizeAvaLookupName(a), bb = normalizeAvaLookupName(b);
+    const aaT = normalizeAvaLookupTolerant(a), bbT = normalizeAvaLookupTolerant(b);
     if (!aa || !bb) return 0;
     if (aa === bb) return 1;
+    if (aaT === bbT) return 0.95;
     const maxLen = Math.max(aa.length, bb.length);
+    const maxLenT = Math.max(aaT.length, bbT.length);
     const distanceScore = 1 - (levenshteinDistance(aa, bb) / maxLen);
+    const distanceScoreT = 1 - (levenshteinDistance(aaT, bbT) / maxLenT);
     const [ap, as] = aa.split('-'), [bp, bs] = bb.split('-');
+    const [apT, asT] = aaT.split('-'), [bpT, bsT] = bbT.split('-');
     const prefixScore = ap && bp ? 1 - levenshteinDistance(ap, bp) / Math.max(ap.length, bp.length) : 0;
     const suffixScore = as && bs ? 1 - levenshteinDistance(as, bs) / Math.max(as.length, bs.length) : 0;
-    return (distanceScore * 0.35) + (prefixScore * 0.35) + (suffixScore * 0.30);
+    const prefixScoreT = apT && bpT ? 1 - levenshteinDistance(apT, bpT) / Math.max(apT.length, bpT.length) : 0;
+    const suffixScoreT = asT && bsT ? 1 - levenshteinDistance(asT, bsT) / Math.max(asT.length, bsT.length) : 0;
+    const strict = (distanceScore * 0.35) + (prefixScore * 0.35) + (suffixScore * 0.30);
+    const tolerant = (distanceScoreT * 0.35) + (prefixScoreT * 0.35) + (suffixScoreT * 0.30);
+    return Math.max(strict, tolerant * 0.98 + 0.02);
 }
 
 // OCR มักสับสน i/l/I/u และตัวอักษรที่หน้าตาคล้ายกันในชื่อแมพ AVA.
@@ -2850,8 +2862,6 @@ function avaNameSimilarity(a, b) {
 const AVA_OCR_NAME_ALIASES = new Map([
     ['teros-aulusum', 'Teros-Auiusum'],
     ['teros-auiusum', 'Teros-Auiusum'],
-
-    // Confirmed OCR confusions seen in real AVA screenshots.
     ['tynos-atatios', 'Tynos-Atatlos'],
     ['ceros-aedyium', 'Ceros-Aeaylum'],
     ['xoultos-eyoztum', 'Xuros-Eyoztum'],
@@ -2861,14 +2871,37 @@ const AVA_OCR_NAME_ALIASES = new Map([
     ['fuyes-lzohun', 'Fuyes-Izohun'],
     ['fuyes-izohun', 'Fuyes-Izohun'],
     ['coues-xakrom', 'Coues-Exakrom'],
-
-    // Confirmed OCR confusions from AVA screenshots.
     ['oasos-uromlium', 'Oasos-Uromlum'],
     ['oasos-uromliun', 'Oasos-Uromlum'],
     ['oasos-uroml1um', 'Oasos-Uromlum'],
     ['siritos-avolirom', 'Siritos-Avoirom'],
-    ['siritos-avo1rom', 'Siritos-Avoirom']
+    ['siritos-avo1rom', 'Siritos-Avoirom'],
+    ['flees-ohohtum', 'Flees-Ohohtum'],
+    ['huritos-iuimaum', 'Huritos-Iuimaum'],
+    ['huritos-iulmaum', 'Huritos-Iuimaum'],
+    ['hasos-iuimaum', 'Hasos-Iuimaum'],
 ]);
+
+const OCR_CONFUSION_MAP = {
+    '0': 'o', 'O': 'o', 'Q': 'o',
+    '1': 'i', '|': 'i', '!': 'i', 'l': 'i', 'I': 'i', 'j': 'i',
+    'rn': 'm', 'vv': 'w'
+};
+
+function ocrTolerantNormalize(value) {
+    let s = String(value || '').toLowerCase();
+    s = s.replace(/0/g, 'o').replace(/[|!1]/g, 'i').replace(/l/g, 'i');
+    s = s.replace(/rn/g, 'm').replace(/vv/g, 'w');
+    return s.replace(/[^a-z0-9-]/g, '');
+}
+
+function correctOcrCommonErrors(value) {
+    return String(value || '').replace(/[|!]/g, 'I').replace(/\b0/g, 'O').replace(/\b1/g, 'I').trim();
+}
+
+function normalizeAvaLookupTolerant(value) {
+    return ocrTolerantNormalize(normalizeMapNameText(value));
+}
 
 function normalizeAvaOcrMapName(value) {
     const normalized = normalizeAvaLookupName(value);
@@ -2978,80 +3011,86 @@ async function fetchBattleHubMapIndex() {
     return avaCanonicalMapCache.loading;
 }
 
+async 
 async function fetchAuthoritativeAvaMapIndex() {
-    // Primary canonical name source for OCR suggestions. This database currently
-    // lists exactly 400 Roads of Avalon zones. We only extract links from the
-    // "Roads of Avalon" section, so suggestions can never be invented names.
+    // Load from local ava-maps.js first - 400 maps organized by category
+    try {
+        const local = require('./ava-maps.js');
+        const all = local.all || local.ALL || (Array.isArray(local) ? local : Object.values(local).flat().filter(v => typeof v === 'string'));
+        if (all && all.length >= 300) {
+            console.log('🗺️ Using local ava-maps.js: ' + all.length + ' maps');
+            return all;
+        }
+    } catch(e) {
+        // ignore if file not found
+    }
+
     const urls = [
+        'https://atlaschill.com/albion/es/avalon-maps/',
         'https://albiononline.th.gl/db/locations',
         'https://guildmanifesto.github.io/albionmaps/',
         'https://lucioreyli.github.io/ava-maps/'
     ];
-
     for (const url of urls) {
         try {
-            const response = await axios.get(url, {
-                timeout: 10000,
-                headers: {
-                    'User-Agent': 'Mozilla/5.0',
-                    Accept: 'text/html,application/xhtml+xml'
-                },
-                validateStatus: status => status >= 200 && status < 400
-            });
-            const html = String(response.data || '');
+            let html = '';
+            try {
+                if (url.includes('atlaschill')) {
+                    const res = await cloudscraper.get({ uri: url, timeout: 12000 });
+                    html = typeof res === 'string' ? res : String(res);
+                } else {
+                    const response = await axios.get(url, {
+                        timeout: 10000,
+                        headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'text/html,application/xhtml+xml' },
+                        validateStatus: status => status >= 200 && status < 400
+                    });
+                    html = String(response.data || '');
+                }
+            } catch (inner) {
+                const response = await axios.get(url, {
+                    timeout: 10000,
+                    headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'text/html,application/xhtml+xml' },
+                    validateStatus: status => status >= 200 && status < 400
+                });
+                html = String(response.data || '');
+            }
             const $ = cheerio.load(html);
             const names = [];
-
-            if (/albiononline\.th\.gl\/db\/locations/i.test(url)) {
-                // The "Roads of Avalon 400" heading is not an <a>, so do not
-                // rely on walking anchors to detect the section. Slice the
-                // HTML between the Roads and Static Dungeon headings instead.
-                const bodyHtml = $('body').html() || '';
-                const roadsMatch = bodyHtml.match(/Roads of Avalon\s*400[\\s\\S]*?(?=Static Dungeon\s*156|$)/i);
-                const roadsHtml = roadsMatch ? roadsMatch[0] : bodyHtml;
+            const bodyHtml = $('body').html() || '';
+            let roadsHtml = bodyHtml;
+            if (/albiononline\.th\.gl/i.test(url)) {
+                const roadsMatch = bodyHtml.match(/Roads of Avalon\s*400[\s\S]*?(?=Static Dungeon\s*156|$)/i);
+                roadsHtml = roadsMatch ? roadsMatch[0] : bodyHtml;
+            }
+            const seen = new Set();
+            const section$ = cheerio.load(roadsHtml);
+            section$('a[href*="avalon-maps"]').each((_, el) => {
+                const href = section$(el).attr('href') || '';
+                const slug = parseAvaNameFromHref(href);
+                if (slug && /^[A-Za-z0-9]+-[A-Za-z0-9]+$/.test(slug)) {
+                    const proper = slug.split('-').map(s => s.charAt(0).toUpperCase() + s.slice(1).toLowerCase()).join('-');
+                    const key = normalizeAvaLookupName(proper);
+                    if (!seen.has(key)) { seen.add(key); names.push(proper); }
+                }
+            });
+            if (names.length < 20) {
                 const roadsText = cheerio.load(roadsHtml)('body').text().replace(/\s+/g, ' ');
-                const seen = new Set();
-
-                // Prefer actual link labels from this section.
-                const section$ = cheerio.load(roadsHtml);
-                section$('a[href]').each((_, el) => {
-                    const name = section$(el).text().replace(/\s+/g, ' ').trim();
-                    if (!/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/.test(name)) return;
-                    const key = normalizeAvaLookupName(name);
-                    if (!seen.has(key)) {
-                        seen.add(key);
-                        names.push(name);
-                    }
-                });
-
-                // Fallback for page markup changes where links are not present.
-                if (names.length < 20) {
-                    for (const match of roadsText.matchAll(/\\b([A-Za-z0-9]+(?:-[A-Za-z0-9]+)+)\\b/g)) {
-                        const name = normalizeMapNameText(match[1]).replace(/\\s+/g, '');
-                        if (!/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/.test(name)) continue;
-                        const key = normalizeAvaLookupName(name);
-                        if (!seen.has(key)) {
-                            seen.add(key);
-                            names.push(name);
-                        }
-                    }
-                }
-            } else {
-                const source = html + ' ' + $('body').text().replace(/\s+/g, ' ');
-                for (const match of source.matchAll(/\b([A-Za-z]{3,18}-[A-Za-z]{3,18})\s*(?:\(|<[^>]*>)?\s*T?([468]|IV|VI|VIII)\b/gi)) {
+                for (const match of roadsText.matchAll(/\b([A-Za-z0-9]+(?:-[A-Za-z0-9]+)+)\b/g)) {
                     const name = normalizeMapNameText(match[1]).replace(/\s+/g, '');
-                    if (!/^[A-Za-z]{3,18}-[A-Za-z]{3,18}$/.test(name)) continue;
-                    if (!names.some(x => normalizeAvaLookupName(x) === normalizeAvaLookupName(name))) names.push(name);
-                }
-                if (!names.length) {
-                    for (const match of source.matchAll(/\b([A-Za-z]{3,18}-[A-Za-z]{3,18})\b/g)) {
-                        const name = normalizeMapNameText(match[1]).replace(/\s+/g, '');
-                        if (!/^[A-Za-z]{3,18}-[A-Za-z]{3,18}$/.test(name)) continue;
-                        if (!names.some(x => normalizeAvaLookupName(x) === normalizeAvaLookupName(name))) names.push(name);
-                    }
+                    if (!/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)+$/.test(name)) continue;
+                    const key = normalizeAvaLookupName(name);
+                    if (!seen.has(key)) { seen.add(key); names.push(name); }
                 }
             }
-
+            if (names.length < 50) {
+                for (const m of html.matchAll(/\/avalon-maps\/([a-z0-9-]+)/gi)) {
+                    const slug = m[1];
+                    if (!/^[a-z0-9]+-[a-z0-9]+$/.test(slug)) continue;
+                    const proper = slug.split('-').map(s => s.charAt(0).toUpperCase() + s.slice(1).toLowerCase()).join('-');
+                    const key = normalizeAvaLookupName(proper);
+                    if (!seen.has(key)) { seen.add(key); names.push(proper); }
+                }
+            }
             if (names.length >= 20) {
                 console.log('🗺️ Authoritative Avalon name index loaded: ' + names.length + ' names from ' + url);
                 return names;
@@ -3062,6 +3101,7 @@ async function fetchAuthoritativeAvaMapIndex() {
     }
     return [];
 }
+
 
 async function fetchAlternativeAvaMapIndex() {
     const urls = [
@@ -3117,101 +3157,61 @@ async function fetchAlternativeAvaMapIndex() {
     return [];
 }
 
+
 async function getAvaMapSuggestions(ocrCandidates = [], limit = 3) {
     const rawInputs = [...new Set(ocrCandidates.filter(Boolean).map(String).filter(Boolean))];
-    const normalizedInputs = rawInputs
-        .map(value => normalizeAvaOcrMapName(value).replace(/\s+/g, ''))
-        .filter(Boolean);
+    const normalizedInputs = rawInputs.map(v => normalizeAvaOcrMapName(v).replace(/\s+/g, '')).filter(Boolean);
+    const tolerantInputs = rawInputs.map(v => normalizeAvaLookupTolerant(v)).filter(Boolean);
 
-    // IMPORTANT: this function is only for selecting a real map name.
-    // Never auto-accept OCR. Always return a selector with the best real
-    // Avalon names from the authoritative 400-zone index.
     let canonicalNames = await fetchAuthoritativeAvaMapIndex();
-
-    // If the authoritative index is temporarily unavailable, use the existing
-    // Battle Hub/static indexes before falling back to a confirmed OCR alias.
     if (!canonicalNames.length) canonicalNames = await fetchBattleHubMapIndex();
     if (!canonicalNames.length) canonicalNames = await fetchAlternativeAvaMapIndex();
 
-    // Confirmed aliases are allowed only when the canonical web indexes are
-    // unavailable. They are still real names, not raw OCR strings.
     if (!canonicalNames.length) {
         const aliasNames = [];
         for (const raw of rawInputs) {
             const corrected = normalizeAvaOcrMapName(raw).replace(/\s+/g, '');
             if (!corrected) continue;
             if (normalizeAvaLookupName(corrected) === normalizeAvaLookupName(raw)) continue;
-            if (!aliasNames.some(x => normalizeAvaLookupName(x) === normalizeAvaLookupName(corrected))) {
-                aliasNames.push(corrected);
-            }
+            if (!aliasNames.some(x => normalizeAvaLookupName(x) === normalizeAvaLookupName(corrected))) aliasNames.push(corrected);
         }
-        return aliasNames.slice(0, limit).map((name, index) => ({
-            name,
-            score: 1,
-            exact: true,
-            source: 'OCR alias fallback',
-            rank: index + 1
-        }));
+        return aliasNames.slice(0, limit).map((name, index) => ({ name, score: 1, exact: true, source: 'OCR alias fallback', rank: index + 1 }));
     }
-
-    const getAvaInitialKey = value => {
-        const parts = normalizeAvaLookupName(value).split('-').filter(Boolean);
-        return parts.length >= 2 ? parts[0][0] + parts[1][0] : '';
-    };
-    const ocrInitialKeys = new Set(normalizedInputs.map(getAvaInitialKey).filter(Boolean));
-    const ocrFirstInitials = new Set([...ocrInitialKeys].map(key => key[0]));
-    const ocrSecondInitials = new Set([...ocrInitialKeys].map(key => key[1]));
 
     const ranked = canonicalNames.map(name => {
         const normalizedName = normalizeAvaLookupName(name);
-        let score = 0;
-
-        for (const input of normalizedInputs) {
-            score = Math.max(score, avaNameSimilarity(input, name));
+        const tolerantName = normalizeAvaLookupTolerant(name);
+        let bestScore = 0;
+        for (const input of normalizedInputs) bestScore = Math.max(bestScore, avaNameSimilarity(input, name));
+        for (const input of tolerantInputs) {
+            const s = 1 - (levenshteinDistance(input, tolerantName) / Math.max(input.length, tolerantName.length));
+            bestScore = Math.max(bestScore, s);
         }
-
-        // Put a confirmed OCR correction at the top when it exists in the
-        // real web index. This is still a selectable option, never auto-run.
         for (const raw of rawInputs) {
             const corrected = normalizeAvaOcrMapName(raw).replace(/\s+/g, '');
-            if (corrected && normalizeAvaLookupName(corrected) === normalizedName) {
-                score = Math.max(score, 1);
-            }
+            if (corrected && normalizeAvaLookupName(corrected) === normalizedName) bestScore = Math.max(bestScore, 1);
+            if (corrected && normalizeAvaLookupTolerant(corrected) === tolerantName) bestScore = Math.max(bestScore, 0.96);
         }
+        return { name, score: bestScore, exact: normalizedInputs.some(input => input === normalizedName || normalizeAvaLookupTolerant(input) === tolerantName) };
+    }).sort((a, b) => b.score - a.score || a.name.localeCompare(b.name));
 
-        const initialKey = getAvaInitialKey(name);
-        const sameInitialKey = Boolean(initialKey && ocrInitialKeys.has(initialKey));
-        const sameFirstInitial = Boolean(initialKey && ocrFirstInitials.has(initialKey[0]));
-        const sameSecondInitial = Boolean(initialKey && ocrSecondInitials.has(initialKey[1]));
-        return {
-            name, score, initialKey, sameInitialKey, sameFirstInitial, sameSecondInitial,
-            exact: normalizedInputs.some(input => input === normalizedName)
-        };
-    }).sort((a, b) => {
-        // First prefer the same first letters on both sides of the hyphen,
-        // then normal similarity. This prevents unrelated names such as
-        // Fonitos/Ponitos from displacing Tonitos/Tynos/Tasitos.
-        if (a.sameInitialKey !== b.sameInitialKey) return Number(b.sameInitialKey) - Number(a.sameInitialKey);
-        if (a.sameFirstInitial !== b.sameFirstInitial) return Number(b.sameFirstInitial) - Number(a.sameFirstInitial);
-        if (a.sameSecondInitial !== b.sameSecondInitial) return Number(b.sameSecondInitial) - Number(a.sameSecondInitial);
-        return b.score - a.score || a.name.localeCompare(b.name);
-    });
-
-    // Keep three options, primarily from names matching both OCR initials.
-    // If the authoritative index has fewer than three exact-initial matches,
-    // fill the remainder with names matching either side, then similarity.
     const selected = [];
-    const preferred = ranked.filter(item => item.sameInitialKey);
-    const relaxed = ranked.filter(item => !item.sameInitialKey && (item.sameFirstInitial || item.sameSecondInitial));
-    const fallback = ranked.filter(item => !item.sameInitialKey && !item.sameFirstInitial && !item.sameSecondInitial);
-    for (const item of [...preferred, ...relaxed, ...fallback]) {
+    for (const item of ranked) {
+        if (item.score < 0.35 && selected.length >= 1) continue;
         if (selected.some(x => normalizeAvaLookupName(x.name) === normalizeAvaLookupName(item.name))) continue;
         selected.push(item);
         if (selected.length >= limit) break;
     }
-
-    return selected;
+    if (selected.length < limit) {
+        for (const item of ranked) {
+            if (selected.some(x => normalizeAvaLookupName(x.name) === normalizeAvaLookupName(item.name))) continue;
+            selected.push(item);
+            if (selected.length >= limit) break;
+        }
+    }
+    return selected.slice(0, limit).map((item, idx) => ({ ...item, rank: idx + 1, source: item.exact ? 'exact' : 'fuzzy' }));
 }
+
 function avaSelectionComponents(guildId, token, suggestions) {
     const select = new StringSelectMenuBuilder()
         .setCustomId('ava_select:' + guildId + ':' + token)
@@ -4512,6 +4512,7 @@ async function checkAndSendBanditAlertsForGuild() {
 }
 
 const commands = [
+    ...ctaModule.commandBuilders,
     new SlashCommandBuilder().setName('check').setDescription('ระบบตรวจสอบสถิติและรายชื่อ')
         .addSubcommand(s => s.setName('battles').setDescription('เช็กสถิติไฟต์จาก Match ID หรือ ลิงก์').addStringOption(o => o.setName('link_or_id').setDescription('ลิงก์ AlbionBB หรือ Match ID').setRequired(true)))
         .addSubcommand(s => s.setName('guilds').setDescription('แสดงรายชื่อกิลด์ที่ติดตาม'))
@@ -4647,6 +4648,7 @@ client.on('interactionCreate', async interaction => {
     const contextGuildId = interaction.guildId ||
         ((interaction.isButton() || interaction.isStringSelectMenu()) ? interaction.customId.split(':')[1] : null);
     return guildContext.run({ guildId: contextGuildId }, async () => {
+    if (await ctaModule.handleInteraction(interaction, { getGuildConfig, saveData, client })) return;
     if (interaction.isStringSelectMenu() || interaction.isButton()) {
         const parts = String(interaction.customId || '').split(':');
         const action = parts[0];
