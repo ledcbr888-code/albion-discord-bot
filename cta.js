@@ -252,20 +252,20 @@ async function buildWeaponGridImage(weapons, usedMap, currentRole) {
         const wName = weapons[i]; const isUsed = usedMap.has(wName);
         ctx.fillStyle = isUsed ? '#3b2f1a' : '#2b2d31'; ctx.fillRect(x, y, cellW, cellH);
         ctx.strokeStyle = isUsed ? '#d9a94a' : '#3f4147'; ctx.lineWidth = isUsed ? 2.4 : 1; ctx.strokeRect(x, y, cellW, cellH);
-        if (isUsed) { ctx.fillStyle = 'rgba(217,169,74,0.20)'; ctx.fillRect(x, y, cellW, 32); }
+        if (isUsed) { ctx.fillStyle = 'rgba(217,169,74,0.20)'; ctx.fillRect(x, y, cellW, 26); }
         const iconPath = weaponIconPath(wName);
         const iconSize = 380; // bigger as requested - was 300, now 380
         if (iconPath) {
-            try { const img = await loadImage(iconPath); const ix = x + (cellW - iconSize) / 2; const iy = y + 20; ctx.drawImage(img, ix, iy, iconSize, iconSize); } catch { 
-                ctx.fillStyle = '#3a3c41'; ctx.fillRect(x + (cellW-240)/2, y + 20, 240, 240);
-                ctx.fillStyle = '#ffffff'; ctx.font = 'bold 52px sans-serif'; ctx.textAlign='center'; ctx.fillText('⚔️', x + cellW/2, y + 150); ctx.textAlign='left';
+            try { const img = await loadImage(iconPath); const ix = x + (cellW - iconSize) / 2; const iy = y + 16; ctx.drawImage(img, ix, iy, iconSize, iconSize); } catch { 
+                ctx.fillStyle = '#3a3c41'; ctx.fillRect(x + (cellW-200)/2, y + 16, 200, 200);
+                ctx.fillStyle = '#ffffff'; ctx.font = 'bold 48px sans-serif'; ctx.textAlign='center'; ctx.fillText('⚔️', x + cellW/2, y + 130); ctx.textAlign='left';
             }
         } else { 
-            ctx.fillStyle = '#2b2d31'; ctx.fillRect(x + (cellW-240)/2, y + 20, 240, 240);
-            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 52px sans-serif'; ctx.textAlign='center'; ctx.fillText(ROLE_EMOJIS[currentRole] || '⚔️', x + cellW/2, y + 150); ctx.textAlign='left';
+            ctx.fillStyle = '#2b2d31'; ctx.fillRect(x + (cellW-200)/2, y + 16, 200, 200);
+            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 48px sans-serif'; ctx.textAlign='center'; ctx.fillText(ROLE_EMOJIS[currentRole] || '⚔️', x + cellW/2, y + 130); ctx.textAlign='left';
         }
-        // Draw weapon name UNDER image - bigger and visible
-        ctx.fillStyle = '#1a1b1e'; ctx.fillRect(x, y + 410, cellW, 70); // dark bg for text
+        // Draw weapon name UNDER image - bigger and visible with dark bg
+        ctx.fillStyle = '#1a1b1e'; ctx.fillRect(x, y + 410, cellW, 70);
         ctx.fillStyle = isUsed ? '#f0c35a' : '#ffffff'; ctx.font = 'bold 22px sans-serif'; ctx.textAlign = 'center';
         ctx.fillText(displayWeapon(wName).slice(0, 20), x + cellW / 2, y + 436, cellW - 14);
         ctx.font = '16px sans-serif'; ctx.fillStyle = isUsed ? '#f0c35a' : '#9ca0a6';
@@ -295,13 +295,13 @@ async function buildRosterSmallIconImage(event) {
         const iconPath = weaponIconPath(s.weapon);
         if (iconPath) { try { const img = await loadImage(iconPath); ctx.drawImage(img, iconX + 3, iconY + 3, iconS - 6, iconS - 6); } catch { 
             // Fallback to emoji text if image fails
-            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 34px sans-serif'; ctx.textAlign='center'; 
+            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 32px sans-serif'; ctx.textAlign='center'; 
             ctx.fillText(ROLE_EMOJIS[s.role] || '⚔️', iconX + iconS/2, iconY + iconS/2 + 10); ctx.textAlign='left';
         } }
         else { 
-            // No icon file - use role emoji instead of green square - FIXED: no green
+            // No icon file - use role emoji instead of green square
             ctx.fillStyle = '#2b2d31'; ctx.fillRect(iconX, iconY, iconS, iconS);
-            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 38px sans-serif'; ctx.textAlign='center';
+            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 36px sans-serif'; ctx.textAlign='center';
             ctx.fillText(ROLE_EMOJIS[s.role] || '⚔️', iconX + iconS/2, iconY + iconS/2 + 12); ctx.textAlign='left';
         }
         if (s.userId) {

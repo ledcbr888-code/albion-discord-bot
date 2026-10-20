@@ -4648,7 +4648,7 @@ client.on('interactionCreate', async interaction => {
     const contextGuildId = interaction.guildId ||
         ((interaction.isButton() || interaction.isStringSelectMenu()) ? interaction.customId.split(':')[1] : null);
     return guildContext.run({ guildId: contextGuildId }, async () => {
-    if (await ctaModule.handleInteraction(interaction, { getGuildConfig, saveData, client })) return;
+    try { if (await ctaModule.handleInteraction(interaction, { getGuildConfig, saveData, client })) return; } catch (ctaErr) { console.error('❌ CTA handler error:', ctaErr); try { if (!interaction.replied && !interaction.deferred) await interaction.reply({ content: '❌ เกิดข้อผิดพลาดใน CTA: ' + (ctaErr.message || ctaErr), flags: 64 }); else if (interaction.deferred) await interaction.editReply({ content: '❌ เกิดข้อผิดพลาดใน CTA: ' + (ctaErr.message || ctaErr) }); } catch {} return; }
     if (interaction.isStringSelectMenu() || interaction.isButton()) {
         const parts = String(interaction.customId || '').split(':');
         const action = parts[0];
