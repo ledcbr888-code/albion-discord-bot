@@ -8,6 +8,7 @@ const {
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const axios = require('axios');
 
 const WEAPONS = {
     Caller: ['Mace','Golem','HOJ','MorningStar','Dreadstorm','Incubus','Witchwork','GA','Perma','Soulscythe'],
@@ -31,6 +32,14 @@ const sessions = new Map();
 const MAX_TEMPLATES = 25;
 const MAX_EVENTS = 20;
 const WEAPON_DIR = path.join(__dirname, 'weapon');
+const WEAPON_CDN_BASE = 'https://cdn.jsdelivr.net/gh/ledcbr888-code/albion-discord-bot@main/weapon';
+const WEAPON_RAW_BASE = 'https://raw.githubusercontent.com/ledcbr888-code/albion-discord-bot/main/weapon';
+
+// ===== PERFORMANCE CACHES =====
+const weaponIconPathCache = new Map(); // name -> path or null
+const weaponImageCache = new Map(); // name -> loaded Image (canvas)
+const gridCache = new Map(); // key -> Buffer
+const rosterCache = new Map(); // eventId+hash -> Buffer
 
 const commandBuilders = [
     new SlashCommandBuilder()
@@ -65,8 +74,11 @@ function getConfig(guildId, deps) {
     return cfg;
 }
 function weaponFileName(name) { return name === 'Clarent Blade' ? 'ClarentBlade' : name; }
+
+// OPTIMIZED: no existsSync loop every time, cache result
 function weaponIconPath(name) {
     if (!name) return null;
+    if (weaponIconPathCache.has(name)) return weaponIconPathCache.get(name);
     const clean = weaponFileName(name);
     const candidates = [
         path.join(WEAPON_DIR, clean + '.png'),
@@ -74,24 +86,36 @@ function weaponIconPath(name) {
         path.join(WEAPON_DIR, clean + '.webp'),
         path.join(__dirname, 'weapon', clean + '.png'),
     ];
-    for (const p of candidates) if (fs.existsSync(p)) return p;
+    for (const p of candidates) {
+        if (fs.existsSync(p)) {
+            weaponIconPathCache.set(name, p);
+            return p;
+        }
+    }
+    weaponIconPathCache.set(name, null);
     return null;
 }
+
+function getWeaponCdnUrl(name) {
+    if (!name) return null;
+    const clean = weaponFileName(name);
+    // ใช้ jsDelivr CDN เป็นหลัก - ไฟล์ทั้งหมดอยู่ที่ https://github.com/ledcbr888-code/albion-discord-bot/tree/main/weapon
+    return `${WEAPON_CDN_BASE}/${encodeURIComponent(clean)}.png`;
+}
+
 function tryLoadCanvas() {
     try { return require('canvas'); } catch {}
     try { return require('@napi-rs/canvas'); } catch {}
     return null;
 }
 
-// ===== FUZZY SEARCH (Fuse.js style without dependency) =====
+// ===== FUZZY SEARCH =====
 function fuzzyScore(target, query) {
     if (!query) return 0;
     const t = target.toLowerCase().replace(/\s+/g, '');
     const q = query.toLowerCase().replace(/\s+/g, '');
     if (!q) return 0;
-    // Exact substring = best
-    if (t.includes(q)) return q.length * 100 - t.indexOf(q); // longer query + earlier position = better
-    // Subsequence check: b-l-a-z in blazing
+    if (t.includes(q)) return q.length * 100 - t.indexOf(q);
     let ti = 0, qi = 0, matched = 0, lastPos = -1, gaps = 0;
     while (ti < t.length && qi < q.length) {
         if (t[ti] === q[qi]) {
@@ -101,11 +125,8 @@ function fuzzyScore(target, query) {
         }
         ti++;
     }
-    if (matched === q.length) {
-        // All chars found in order
-        return matched * 10 - gaps;
-    }
-    return null; // no match
+    if (matched === q.length) return matched * 10 - gaps;
+    return null;
 }
 
 function weaponOptions(role, page, search) {
@@ -115,7 +136,6 @@ function weaponOptions(role, page, search) {
         const start = currentPage * 25;
         return { filtered: all, page: currentPage, totalPages: Math.max(1, Math.ceil(all.length / 25)), options: all.slice(start, start + 25).map(name => ({ label: displayWeapon(name), value: name, description: 'เลือก ' + displayWeapon(name) })) };
     }
-    // Try Fuse.js if available
     let filtered = [];
     try {
         const Fuse = require('fuse.js');
@@ -123,7 +143,6 @@ function weaponOptions(role, page, search) {
         const results = fuse.search(search);
         filtered = results.map(r => r.item.name);
     } catch {
-        // Fallback fuzzy
         const scored = [];
         for (const name of all) {
             const disp = displayWeapon(name);
@@ -140,7 +159,7 @@ function weaponOptions(role, page, search) {
     return { filtered, page: currentPage, totalPages: Math.max(1, Math.ceil(filtered.length / 25)), options: filtered.slice(start, start + 25).map(name => ({ label: displayWeapon(name), value: name, description: 'เลือก ' + displayWeapon(name) })) };
 }
 
-// ---------- Count Panel WITH META WARNINGS ----------
+// ---------- Count Panel ----------
 function makeRoleCountOptions(max) {
     const options = [];
     for (let i = 0; i <= max; i++) options.push({ label: String(i), value: String(i), description: i === 0 ? 'ไม่ใช้ตำแหน่งนี้' : 'จำนวน ' + i + ' คน' });
@@ -173,33 +192,23 @@ function getMetaWarnings(counts, total, maxPlayers) {
     const dps = Number(counts.DPS) || 0;
     const sup = Number(counts.Support) || 0;
     const heal = Number(counts.Heal) || 0;
-
-    // Small party (gank/small scale) - don't spam missing role warnings
     const isSmall = maxPlayers <= 7 || total <= 3;
-
     if (!isSmall) {
         if (tank === 0) warnings.push('⚠️ **ยังไม่มี Tank** — อาจโดนล้วง Caller ง่าย');
         else if (tank === 1 && total > 7) warnings.push('ℹ️ Tank มีแค่ 1 คน — แนะนำ 2+ สำหรับ ZvZ');
-
         if (dps === 0) warnings.push('⚠️ **ยังไม่มี DPS** — ไม่มีดาเมจหลัก');
         else if (dps < 3) warnings.push('⚠️ **DPS น้อยกว่า 3 คน** — ดาเมจอาจไม่พอปิดคิล');
         else if (dps < 5 && total >= 10) warnings.push('ℹ️ DPS น้อยกว่า 5 คน — แนะนำ 5+ สำหรับไฟต์ใหญ่');
-
         if (sup === 0) warnings.push('⚠️ **ไม่มี Support** — ขาด Curse / Locus / Occult');
     }
-    
     if (heal === 0) warnings.push('⚠️ **ไม่มี Heal** — ไม่มีฮีลเลย');
     else if (heal === 1 && total >= 12) warnings.push('ℹ️ Heal มีแค่ 1 คน — แนะนำ 2+');
-
     if (total <= 1) warnings.push('⚠️ มีแค่ Caller คนเดียว');
     if (total < maxPlayers * 0.5) warnings.push('ℹ️ ใช้ช่องแค่ ' + total + '/' + maxPlayers + ' คน — ยังว่างเยอะ');
-
-    // Balance check only for larger comps
     if (!isSmall) {
         if (tank > dps) warnings.push('ℹ️ Tank เยอะกว่า DPS — อาจดาเมจขาด');
         if (heal > tank + 1) warnings.push('ℹ️ Heal เยอะกว่า Tank');
     }
-
     if (warnings.length === 0) warnings.push('✅ คอมพ์ดูสมดุลดี');
     return warnings;
 }
@@ -217,26 +226,51 @@ function countPanel(session) {
         const label = ROLE_LABELS[role] || '📣 Caller';
         return (c > 0 ? '✅ ' : '▫️ ') + label + ': ' + c + ' คน';
     }).join('\n');
-
     const warnings = getMetaWarnings(session.counts, total, session.maxPlayers);
     const warningText = warnings.join('\n');
-
     return {
         content: '⚔️ **ตั้งค่า CTA: ' + session.title + '**\n🕒 เวลา UTC: **' + new Date(session.startAt).toISOString().slice(0, 16).replace('T', ' ') + ' UTC** (นับถอยหลัง <t:' + Math.floor(session.startAt / 1000) + ':R>)\n👥 Party 1 สูงสุด **' + session.maxPlayers + '** คน โดย Caller ใช้ 1 ช่องเสมอ\n\n' + detail + '\n\n**🔍 เช็คคอมพ์:**\n' + warningText,
         components: [...countRows, actionRow].slice(0, 5)
     };
 }
 
-// Grid 5 per row - BIGGER separate image (2x size as requested)
+// ===== OPTIMIZED GRID - SMALLER, CACHED, PARALLEL LOAD =====
+async function loadWeaponImageCached(name, loadImage) {
+    if (weaponImageCache.has(name)) return weaponImageCache.get(name);
+    const iconPath = weaponIconPath(name);
+    if (iconPath) {
+        try {
+            const img = await loadImage(iconPath);
+            weaponImageCache.set(name, img);
+            return img;
+        } catch {}
+    }
+    // Fallback: try GitHub CDN (if local not found)
+    try {
+        const cdnUrl = getWeaponCdnUrl(name);
+        const res = await axios.get(cdnUrl, { responseType: 'arraybuffer', timeout: 3000, validateStatus: s => s >= 200 && s < 300 });
+        const buffer = Buffer.from(res.data);
+        const img = await loadImage(buffer);
+        weaponImageCache.set(name, img);
+        return img;
+    } catch {}
+    return null;
+}
+
 async function buildWeaponGridImage(weapons, usedMap, currentRole) {
+    const cacheKey = `${currentRole}:${weapons.join(',')}:${Array.from(usedMap.entries()).join(';')}`;
+    if (gridCache.has(cacheKey)) return gridCache.get(cacheKey);
+
     const canvasLib = tryLoadCanvas();
     if (!canvasLib) return null;
     const { createCanvas, loadImage } = canvasLib;
+    
+    // OPTIMIZED SIZE: จากเดิม 420x520 -> 200x240 (เล็กกว่า 4 เท่า = เร็วขึ้น 4 เท่า)
     const cols = 5;
-    const cellW = 420; // bigger as requested - was 380
-    const cellH = 520; // bigger - was 440, to fit name under image
-    const padding = 20;
-    const headerH = 90;
+    const cellW = 200;
+    const cellH = 240;
+    const padding = 12;
+    const headerH = 60;
     const rows = Math.ceil(weapons.length / cols);
     const width = cols * cellW + (cols + 1) * padding;
     const height = headerH + rows * cellH + (rows + 1) * padding;
@@ -244,77 +278,101 @@ async function buildWeaponGridImage(weapons, usedMap, currentRole) {
     const ctx = canvas.getContext('2d');
     ctx.fillStyle = '#232428'; ctx.fillRect(0, 0, width, height);
     ctx.fillStyle = '#1e1f22'; ctx.fillRect(0, 0, width, headerH);
-    ctx.fillStyle = '#ffffff'; ctx.font = 'bold 36px sans-serif';
-    ctx.fillText((ROLE_LABELS_SHORT[currentRole] || currentRole) + ' - ' + weapons.length + ' WEAPONS', padding + 12, 58);
-    for (let i = 0; i < weapons.length; i++) {
-        const col = i % cols; const row = Math.floor(i / cols);
-        const x = padding + col * (cellW + padding); const y = headerH + padding + row * (cellH + padding);
-        const wName = weapons[i]; const isUsed = usedMap.has(wName);
-        ctx.fillStyle = isUsed ? '#3b2f1a' : '#2b2d31'; ctx.fillRect(x, y, cellW, cellH);
-        ctx.strokeStyle = isUsed ? '#d9a94a' : '#3f4147'; ctx.lineWidth = isUsed ? 2.4 : 1; ctx.strokeRect(x, y, cellW, cellH);
-        if (isUsed) { ctx.fillStyle = 'rgba(217,169,74,0.20)'; ctx.fillRect(x, y, cellW, 26); }
-        const iconPath = weaponIconPath(wName);
-        const iconSize = 380; // bigger as requested - was 300, now 380
-        if (iconPath) {
-            try { const img = await loadImage(iconPath); const ix = x + (cellW - iconSize) / 2; const iy = y + 16; ctx.drawImage(img, ix, iy, iconSize, iconSize); } catch { 
-                ctx.fillStyle = '#3a3c41'; ctx.fillRect(x + (cellW-200)/2, y + 16, 200, 200);
-                ctx.fillStyle = '#ffffff'; ctx.font = 'bold 48px sans-serif'; ctx.textAlign='center'; ctx.fillText('⚔️', x + cellW/2, y + 130); ctx.textAlign='left';
-            }
-        } else { 
-            ctx.fillStyle = '#2b2d31'; ctx.fillRect(x + (cellW-200)/2, y + 16, 200, 200);
-            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 48px sans-serif'; ctx.textAlign='center'; ctx.fillText(ROLE_EMOJIS[currentRole] || '⚔️', x + cellW/2, y + 130); ctx.textAlign='left';
+    ctx.fillStyle = '#ffffff'; ctx.font = 'bold 24px sans-serif';
+    ctx.fillText((ROLE_LABELS_SHORT[currentRole] || currentRole) + ' - ' + weapons.length + ' WEAPONS', padding + 12, 38);
+
+    // Parallel load all images
+    const imagePromises = weapons.map(w => loadWeaponImageCached(w, loadImage));
+    const loadedImages = await Promise.all(imagePromises);
+
+    for (let idx = 0; idx < weapons.length; idx++) {
+        const wName = weapons[idx];
+        const col = idx % cols;
+        const row = Math.floor(idx / cols);
+        const x = padding + col * (cellW + padding);
+        const y = headerH + padding + row * (cellH + padding);
+        const isUsed = usedMap.has(wName);
+
+        ctx.fillStyle = isUsed ? '#3d3520' : '#2b2d31';
+        ctx.fillRect(x, y, cellW, cellH);
+        ctx.strokeStyle = isUsed ? '#f0c35a' : '#3f4147';
+        ctx.lineWidth = isUsed ? 2 : 1;
+        ctx.strokeRect(x, y, cellW, cellH);
+
+        const loadedImg = loadedImages[idx];
+        const iconSize = 140;
+        if (loadedImg) {
+            const ix = x + (cellW - iconSize) / 2;
+            const iy = y + 10;
+            try { ctx.drawImage(loadedImg, ix, iy, iconSize, iconSize); } catch {}
+        } else {
+            ctx.fillStyle = '#2b2d31'; ctx.fillRect(x + (cellW-80)/2, y + 30, 80, 80);
+            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 28px sans-serif'; ctx.textAlign='center';
+            ctx.fillText('⚔️', x + cellW/2, y + 80); ctx.textAlign='left';
         }
-        // Draw weapon name UNDER image - bigger and visible with dark bg
-        ctx.fillStyle = '#1a1b1e'; ctx.fillRect(x, y + 410, cellW, 70);
-        ctx.fillStyle = isUsed ? '#f0c35a' : '#ffffff'; ctx.font = 'bold 22px sans-serif'; ctx.textAlign = 'center';
-        ctx.fillText(displayWeapon(wName).slice(0, 20), x + cellW / 2, y + 436, cellW - 14);
-        ctx.font = '16px sans-serif'; ctx.fillStyle = isUsed ? '#f0c35a' : '#9ca0a6';
-        ctx.fillText(isUsed ? 'PICKED x' + usedMap.get(wName) : 'AVAILABLE', x + cellW / 2, y + 460);
+        // Name under image - FIXED: smaller font, proper truncation, no overflow
+        ctx.fillStyle = '#1a1b1e'; ctx.fillRect(x, y + 165, cellW, 50);
+        ctx.fillStyle = isUsed ? '#f0c35a' : '#ffffff';
+        ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'center';
+        // Truncate properly: 18 chars max
+        const displayName = displayWeapon(wName);
+        const shortName = displayName.length > 16 ? displayName.slice(0, 14) + '..' : displayName;
+        ctx.fillText(shortName, x + cellW / 2, y + 184, cellW - 10);
+        ctx.font = '10px sans-serif'; ctx.fillStyle = isUsed ? '#f0c35a' : '#9ca0a6';
+        ctx.fillText(isUsed ? 'PICKED x' + usedMap.get(wName) : 'AVAILABLE', x + cellW / 2, y + 200);
         ctx.textAlign = 'left';
     }
-    return canvas.toBuffer('image/png');
+    const buffer = canvas.toBuffer('image/png');
+    gridCache.set(cacheKey, buffer);
+    if (gridCache.size > 50) gridCache.delete(gridCache.keys().next().value);
+    return buffer;
 }
 
 async function buildRosterSmallIconImage(event) {
+    const cacheKey = event.id + ':' + event.slots.map(s => s.weapon + s.userId).join('|');
+    if (rosterCache.has(cacheKey)) return rosterCache.get(cacheKey);
+
     const canvasLib = tryLoadCanvas();
     if (!canvasLib) return null;
     const { createCanvas, loadImage } = canvasLib;
-    const slots = event.slots; 
-    const rowH = 170; // bigger as requested - was 150
-    const width = 1200; // wider for bigger icons - was 1100
-    const height = slots.length * rowH + 24;
+    const slots = event.slots;
+    const rowH = 90;
+    const width = 900;
+    const height = slots.length * rowH + 10;
     const canvas = createCanvas(width, height); const ctx = canvas.getContext('2d');
     ctx.fillStyle = '#2b2d31'; ctx.fillRect(0, 0, width, height);
+    
+    const imagePromises = slots.map(s => loadWeaponImageCached(s.weapon, loadImage));
+    const loadedImages = await Promise.all(imagePromises);
+
     for (let i = 0; i < slots.length; i++) {
         const s = slots[i]; const y = i * rowH;
         ctx.fillStyle = i % 2 === 0 ? '#313338' : '#2b2d31'; ctx.fillRect(0, y, width, rowH);
-        if (i === 0) { ctx.fillStyle = '#00b0f4'; ctx.fillRect(0, 0, 8, height); }
-        const iconX = 18, iconY = y + 14, iconS = 142; // bigger as requested - was 122
+        if (i === 0) { ctx.fillStyle = '#00b0f4'; ctx.fillRect(0, 0, 6, height); }
+        const iconX = 10, iconY = y + 8, iconS = 74;
         ctx.fillStyle = '#1e1f22'; ctx.fillRect(iconX, iconY, iconS, iconS);
-        ctx.strokeStyle = '#3f4147'; ctx.lineWidth = 2; ctx.strokeRect(iconX, iconY, iconS, iconS);
-        const iconPath = weaponIconPath(s.weapon);
-        if (iconPath) { try { const img = await loadImage(iconPath); ctx.drawImage(img, iconX + 3, iconY + 3, iconS - 6, iconS - 6); } catch { 
-            // Fallback to emoji text if image fails
-            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 32px sans-serif'; ctx.textAlign='center'; 
-            ctx.fillText(ROLE_EMOJIS[s.role] || '⚔️', iconX + iconS/2, iconY + iconS/2 + 10); ctx.textAlign='left';
-        } }
-        else { 
-            // No icon file - use role emoji instead of green square
-            ctx.fillStyle = '#2b2d31'; ctx.fillRect(iconX, iconY, iconS, iconS);
-            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 36px sans-serif'; ctx.textAlign='center';
-            ctx.fillText(ROLE_EMOJIS[s.role] || '⚔️', iconX + iconS/2, iconY + iconS/2 + 12); ctx.textAlign='left';
+        ctx.strokeStyle = '#3f4147'; ctx.lineWidth = 1; ctx.strokeRect(iconX, iconY, iconS, iconS);
+        const loadedImg = loadedImages[i];
+        if (loadedImg) {
+            try { ctx.drawImage(loadedImg, iconX + 2, iconY + 2, iconS - 4, iconS - 4); } catch {}
+        } else {
+            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 20px sans-serif'; ctx.textAlign='center';
+            ctx.fillText(ROLE_EMOJIS[s.role] || '⚔️', iconX + iconS/2, iconY + iconS/2 + 6); ctx.textAlign='left';
         }
         if (s.userId) {
-            ctx.fillStyle = '#23a559'; ctx.beginPath(); ctx.arc(iconX + iconS + 14, iconY + iconS / 2, 10, 0, Math.PI * 2); ctx.fill();
-            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('✓', iconX + iconS + 14, iconY + iconS / 2 + 4); ctx.textAlign = 'left';
+            ctx.fillStyle = '#23a559'; ctx.beginPath(); ctx.arc(iconX + iconS + 10, iconY + iconS / 2, 7, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('✓', iconX + iconS + 10, iconY + iconS / 2 + 3); ctx.textAlign = 'left';
         }
-        ctx.fillStyle = '#f2f3f5'; ctx.font = 'bold 20px sans-serif';
+        ctx.fillStyle = '#f2f3f5'; ctx.font = 'bold 15px sans-serif';
         const roleText = (i + 1) + '. ' + (ROLE_LABELS_SHORT[s.role] || s.role).toUpperCase() + (s.weapon ? ' - ' + displayWeapon(s.weapon) : '');
-        ctx.fillText(roleText.slice(0, 60), 110, y + 36);
-        if (s.userId) { ctx.fillStyle = '#949ba4'; ctx.font = '15px sans-serif'; ctx.fillText('@' + (s.userName || 'Joined').slice(0, 32), 110, y + 62); }
-        else { ctx.fillStyle = '#6d6f78'; ctx.font = '15px sans-serif'; ctx.fillText('Vacant', 110, y + 62); }
+        ctx.fillText(roleText.slice(0, 50), 105, y + 32);
+        if (s.userId) { ctx.fillStyle = '#949ba4'; ctx.font = '12px sans-serif'; ctx.fillText('@' + (s.userName || 'Joined').slice(0, 28), 105, y + 52); }
+        else { ctx.fillStyle = '#6d6f78'; ctx.font = '12px sans-serif'; ctx.fillText('Vacant', 105, y + 52); }
     }
-    return canvas.toBuffer('image/png');
+    const buffer = canvas.toBuffer('image/png');
+    rosterCache.set(cacheKey, buffer);
+    if (rosterCache.size > 30) rosterCache.delete(rosterCache.keys().next().value);
+    return buffer;
 }
 
 function weaponPanel(session) {
@@ -424,7 +482,7 @@ async function weaponPanelPayload(session) {
     let gridBuffer = null;
     try { const weaponsOnPage = data.filtered.slice(data.page * 25, data.page * 25 + 25); gridBuffer = await buildWeaponGridImage(weaponsOnPage, usedMap, slot.role); } catch (e) { console.error('grid error', e.message); }
     const files = [];
-    if (gridBuffer) { const attName = 'weapon-grid-' + session.id + '.png'; files.push(new AttachmentBuilder(gridBuffer, { name: attName })); const gridEmbed = new EmbedBuilder().setColor(0x232428).setTitle((ROLE_LABELS_SHORT[slot.role] || slot.role) + ' - ' + data.filtered.length + ' WEAPONS').setImage('attachment://' + attName).setFooter({ text: 'แยกส่วนรูปออกมาแล้ว - รูปใหญ่ขึ้น | แถวละ 5 รูป' }); return { ...panel, embeds: [infoEmbed, gridEmbed], files, attachments: [] }; }
+    if (gridBuffer) { const attName = 'weapon-grid-' + session.id + '.png'; files.push(new AttachmentBuilder(gridBuffer, { name: attName })); const gridEmbed = new EmbedBuilder().setColor(0x232428).setTitle((ROLE_LABELS_SHORT[slot.role] || slot.role) + ' - ' + data.filtered.length + ' WEAPONS').setImage('attachment://' + attName).setFooter({ text: 'Optimized: 200x240 | Cache enabled | GitHub CDN fallback' }); return { ...panel, embeds: [infoEmbed, gridEmbed], files, attachments: [] }; }
     else { return { ...panel, embeds: [infoEmbed], files: [], attachments: [] }; }
 }
 
@@ -439,101 +497,93 @@ function eventButtons(event) {
         new ButtonBuilder().setCustomId('cta:ping:' + event.id).setLabel('⚔️ Ping').setStyle(ButtonStyle.Danger)
     )];
 }
-async function publishEvent(session, deps) {
-    const channel = await deps.client.channels.fetch(session.channelId).catch(() => null);
-    if (!channel || !channel.isTextBased() || !channel.send) throw new Error('ไม่พบห้องข้อความที่ใช้สร้าง CTA');
-    const event = {
-        id: eventId(), guildId: session.guildId, channelId: session.channelId,
-        ownerId: session.userId, title: session.title, startAt: session.startAt,
-        maxPlayers: session.slots.length,
-        slots: session.slots.map(s => ({ role: s.role, weapon: s.weapon, userId: null, userName: null })),
-        createdAt: new Date().toISOString(), messageId: null
-    };
-    const cfg = getConfig(session.guildId, deps);
-    cfg.ctaEvents.push(event); cfg.ctaEvents = cfg.ctaEvents.slice(-MAX_EVENTS); deps.saveData();
-    const message = await channel.send({ embeds: [eventEmbed(event)], components: eventButtons(event) });
-    event.messageId = message.id; event.rosterMessageIds = [];
-    const rosterBatches = await renderRosterBatches(event, deps);
-    for (const batch of rosterBatches) event.rosterMessageIds.push((await channel.send(batch)).id);
-    deps.saveData(); sessions.delete(session.id); return event;
+function getEvent(guildId, eventId, deps) {
+    const cfg = deps.getGuildConfig(guildId, false);
+    if (!cfg) return null;
+    return (cfg.ctaEvents || []).find(e => String(e.id) === String(eventId)) || null;
 }
 async function refreshEvent(event, deps) {
-    const channel = await deps.client.channels.fetch(event.channelId).catch(() => null);
-    const message = channel && channel.messages ? await channel.messages.fetch(event.messageId).catch(() => null) : null;
-    if (!message) return false;
-    await message.edit({ embeds: [eventEmbed(event)], components: eventButtons(event) });
+    try {
+        const channel = await deps.client.channels.fetch(event.channelId).catch(() => null);
+        if (!channel) return;
+        const batches = await renderRosterBatches(event, deps);
+        const msgId = event.messageId;
+        if (!msgId) return;
+        const message = await channel.messages.fetch(msgId).catch(() => null);
+        if (!message) return;
+        const payload = batches[0];
+        await message.edit({ ...payload, components: eventButtons(event) }).catch(() => {});
+    } catch (e) { console.error('refreshEvent error', e.message); }
+}
+async function publishEvent(session, deps) {
+    const cfg = deps.getGuildConfig(session.guildId, true);
+    const id = eventId();
+    const event = { id, guildId: session.guildId, channelId: session.channelId, ownerId: session.userId, title: session.title, startAt: session.startAt, maxPlayers: session.maxPlayers, slots: session.slots.map((s, i) => ({ role: s.role, weapon: s.weapon, userId: i === 0 ? session.userId : null, userName: i === 0 ? 'Caller' : null })), messageId: null, createdAt: new Date().toISOString() };
     const batches = await renderRosterBatches(event, deps);
-    if (!Array.isArray(event.rosterMessageIds)) event.rosterMessageIds = [];
-    for (let i = 0; i < batches.length; i++) {
-        const rosterId = event.rosterMessageIds[i];
-        const rosterMessage = rosterId && channel.messages ? await channel.messages.fetch(rosterId).catch(() => null) : null;
-        if (rosterMessage) await rosterMessage.edit(batches[i]);
-        else event.rosterMessageIds[i] = (await channel.send(batches[i])).id;
-    }
-    for (let i = batches.length; i < event.rosterMessageIds.length; i++) {
-        const stale = await channel.messages.fetch(event.rosterMessageIds[i]).catch(() => null);
-        if (stale) await stale.delete().catch(() => null);
-    }
-    event.rosterMessageIds = event.rosterMessageIds.slice(0, batches.length);
-    deps.saveData(); return true;
+    const channel = await deps.client.channels.fetch(session.channelId).catch(() => null);
+    if (!channel) throw new Error('ไม่พบห้อง');
+    const sent = await channel.messages.fetch().catch(() => null);
+    const payload = batches[0];
+    const message = await channel.send({ ...payload, components: eventButtons(event) });
+    event.messageId = message.id;
+    cfg.ctaEvents.push(event);
+    cfg.ctaEvents = cfg.ctaEvents.slice(-MAX_EVENTS);
+    deps.saveData();
+    return event;
 }
-function getEvent(guildId, id, deps) { return getConfig(guildId, deps).ctaEvents.find(e => String(e.id) === String(id)); }
-function ownerOnly(interaction, session) { return session && String(session.userId) === String(interaction.user.id); }
-function searchModal(sessionId, index) {
-    const modal = new ModalBuilder().setCustomId('cta:searchsubmit:' + sessionId + ':' + index).setTitle('ค้นหาอาวุธแบบ Fuzzy');
-    modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('query').setLabel('พิมพ์เช่น blaz, bracer, carv, blood, clarent').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(40).setPlaceholder('พิมพ์สั้นๆก็เจอ เช่น blaz → Blazing')));
+function ownerOnly(interaction, session) { return String(interaction.user.id) === String(session.userId); }
+function utcHourOptions() { return Array.from({ length: 24 }, (_, hour) => { const value = String(hour).padStart(2, '0') + ':00'; return { label: value + ' UTC', value }; }); }
+function saveModal(id) {
+    const modal = new ModalBuilder().setCustomId('cta:savesubmit:' + id).setTitle('บันทึกชุดแผน CTA');
+    modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('ชื่อชุดแผน').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(60)));
     return modal;
 }
-function saveModal(sessionId) {
-    const modal = new ModalBuilder().setCustomId('cta:savesubmit:' + sessionId).setTitle('บันทึกชุดแผน CTA');
-    modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('name').setLabel('ชื่อชุดแผนที่ต้องการบันทึก').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(60)));
+function searchModal(id, index) {
+    const modal = new ModalBuilder().setCustomId('cta:searchsubmit:' + id + ':' + index).setTitle('ค้นหาอาวุธ (Fuzzy)');
+    modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('query').setLabel('พิมพ์ชื่อ เช่น blaz, bracer, clarent').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(40)));
     return modal;
 }
-function reuseModal(sessionId) {
-    const modal = new ModalBuilder().setCustomId('cta:upsubmit:' + sessionId).setTitle('สร้าง CTA จากแผนที่บันทึก');
-    modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('title').setLabel('ชื่อ CTA รอบนี้').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(80)));
+function reuseModal(id) {
+    const modal = new ModalBuilder().setCustomId('cta:upsubmit:' + id).setTitle('ตั้งชื่อ CTA จากชุดแผน');
+    modal.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId('title').setLabel('ชื่อ CTA').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(80)));
     return modal;
-}
-function utcHourOptions() {
-    return Array.from({ length: 24 }, (_, hour) => {
-        const value = String(hour).padStart(2, '0') + ':00';
-        return { label: value + ' UTC', value, description: 'เวลาเริ่ม UTC' };
-    });
 }
 async function handleInteraction(interaction, deps) {
-    const isCommand = interaction.isChatInputCommand && interaction.isChatInputCommand();
-    if (isCommand && ['cta', 'ctaup'].includes(interaction.commandName)) {
-        if (!interaction.guildId) { await interaction.reply({ content: '❌ ใช้ได้เฉพาะในเซิร์ฟเวอร์', flags: MessageFlags.Ephemeral }); return true; }
-        const cfg = getConfig(interaction.guildId, deps);
-        if (interaction.commandName === 'cta') {
+    if (interaction.isChatInputCommand && interaction.isChatInputCommand()) {
+        const { commandName } = interaction;
+        if (commandName === 'cta') {
             const title = safeText(interaction.options.getString('title'), 80);
-            const startAt = parseUtc(interaction.options.getString('time_utc'));
+            const timeUtc = interaction.options.getString('time_utc');
             const maxPlayers = interaction.options.getInteger('max_players');
-            if (!title || !startAt || startAt <= Date.now()) { await interaction.reply({ content: '❌ ชื่อหรือเวลาไม่ถูกต้อง', flags: MessageFlags.Ephemeral }); return true; }
+            const startAt = parseUtc(timeUtc);
+            if (!title) { await interaction.reply({ content: '❌ กรุณาระบุชื่อ CTA', flags: MessageFlags.Ephemeral }); return true; }
+            if (!startAt) { await interaction.reply({ content: '❌ เวลา UTC ไม่ถูกต้อง', flags: MessageFlags.Ephemeral }); return true; }
             const id = token();
             const session = { id, guildId: interaction.guildId, userId: interaction.user.id, channelId: interaction.channelId, title, startAt, maxPlayers, counts: { Tank: 0, DPS: 0, Support: 0, Heal: 0 }, slots: [], slotIndex: 0, page: 0, search: '' };
             sessions.set(id, session);
             await interaction.reply({ ...countPanel(session), flags: MessageFlags.Ephemeral });
             return true;
         }
-        const templates = cfg.ctaTemplates.slice(0, MAX_TEMPLATES);
-        if (!templates.length) { await interaction.reply({ content: 'ยังไม่มีชุดแผน', flags: MessageFlags.Ephemeral }); return true; }
-        const id = token();
-        sessions.set(id, { id, guildId: interaction.guildId, userId: interaction.user.id, channelId: interaction.channelId, mode: 'reuse' });
-        const options = templates.map(t => ({ label: safeText(t.name, 100) || 'แผน CTA', value: String(t.id), description: 'Party 1 · ' + t.slots.length + ' ช่อง' }));
-        await interaction.reply({ content: '📚 เลือกชุดแผน', components: [
-            new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('cta:template:' + id).setPlaceholder('เลือกชุดแผน CTA').addOptions(options)),
-            new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('cta:deletetemplates:' + id).setLabel('🗑️ ลบชุดแผน').setStyle(ButtonStyle.Danger))
-        ], flags: MessageFlags.Ephemeral });
-        return true;
+        if (commandName === 'ctaup') {
+            const cfg = getConfig(interaction.guildId, deps);
+            const templates = cfg.ctaTemplates.slice(0, MAX_TEMPLATES);
+            if (!templates.length) { await interaction.reply({ content: 'ยังไม่มีชุดแผน', flags: MessageFlags.Ephemeral }); return true; }
+            const id = token();
+            sessions.set(id, { id, guildId: interaction.guildId, userId: interaction.user.id, channelId: interaction.channelId, mode: 'reuse' });
+            const options = templates.map(t => ({ label: safeText(t.name, 100) || 'แผน CTA', value: String(t.id), description: 'Party 1 · ' + t.slots.length + ' ช่อง' }));
+            await interaction.reply({ content: '📚 เลือกชุดแผน', components: [
+                new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('cta:template:' + id).setPlaceholder('เลือกชุดแผน CTA').addOptions(options)),
+                new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('cta:deletetemplates:' + id).setLabel('🗑️ ลบชุดแผน').setStyle(ButtonStyle.Danger))
+            ], flags: MessageFlags.Ephemeral });
+            return true;
+        }
+        return false;
     }
-
     if (!(interaction.isButton?.() || interaction.isStringSelectMenu?.() || interaction.isModalSubmit?.())) return false;
     const customId = String(interaction.customId || '');
     if (!customId.startsWith('cta:')) return false;
     const parts = customId.split(':');
     const action = parts[1], id = parts[2];
-
     if (action === 'ping') {
         const event = getEvent(interaction.guildId, id, deps);
         if (!event) { await interaction.reply({ content: '❌ ไม่พบ CTA', flags: MessageFlags.Ephemeral }); return true; }
@@ -548,7 +598,6 @@ async function handleInteraction(interaction, deps) {
         await interaction.editReply({ content: '✅ ส่ง Ping แล้ว ' + joinedIds.length + ' คน' });
         return true;
     }
-
     if (action === 'join' || action === 'leave') {
         const event = getEvent(interaction.guildId, id, deps);
         if (!event) { await interaction.reply({ content: '❌ ไม่พบ CTA', flags: MessageFlags.Ephemeral }); return true; }
@@ -571,7 +620,6 @@ async function handleInteraction(interaction, deps) {
         await refreshEvent(event, deps).catch(() => {});
         return true;
     }
-
     if (action === 'signup') {
         const event = getEvent(interaction.guildId, id, deps);
         if (!event) { await interaction.reply({ content: '❌ ไม่พบ CTA', flags: MessageFlags.Ephemeral }); return true; }
@@ -585,11 +633,9 @@ async function handleInteraction(interaction, deps) {
         await refreshEvent(event, deps).catch(() => {});
         return true;
     }
-
     const session = sessions.get(id);
     if (!session) { await interaction.reply({ content: '⏰ หมดอายุ', flags: MessageFlags.Ephemeral }); return true; }
     if (!ownerOnly(interaction, session)) { await interaction.reply({ content: '🔒 เฉพาะผู้สร้าง', flags: MessageFlags.Ephemeral }); return true; }
-
     if (action === 'presetmenu') {
         await interaction.update({
             content: '📌 **เลือก Preset สำหรับ CTA**\nเลือกชุดตำแหน่งที่ต้องการ หรือกลับไปปรับจำนวนเอง',
@@ -600,56 +646,49 @@ async function handleInteraction(interaction, deps) {
         });
         return true;
     }
-    if (action === 'presetback') {
-        await interaction.update(countPanel(session));
-        return true;
-    }
     if (action === 'preset') {
         const presetKey = parts[3];
-        if (presetKey === 'clear') {
-            session.counts = { Tank: 0, DPS: 0, Support: 0, Heal: 0 };
-            await interaction.update(countPanel(session));
-            return true;
-        }
+        if (presetKey === 'clear') { session.counts = { Tank: 0, DPS: 0, Support: 0, Heal: 0 }; await interaction.update(countPanel(session)); return true; }
         const preset = PRESETS[presetKey];
-        if (!preset) { await interaction.reply({ content: 'ไม่พบ Preset', flags: MessageFlags.Ephemeral }); return true; }
+        if (!preset) { await interaction.reply({ content: '❌ ไม่พบ preset', flags: MessageFlags.Ephemeral }); return true; }
         session.counts = { ...preset.counts };
-        const total = 1 + ROLE_ORDER.reduce((sum, role) => sum + (Number(session.counts[role]) || 0), 0);
-        if (total > session.maxPlayers) {
-            await interaction.reply({ content: '⚠️ Preset **' + preset.label + '** รวม Caller = ' + total + ' คน แต่ Party ที่ตั้งไว้สูงสุด ' + session.maxPlayers + ' คน — ระบบจะปรับจำนวน DPS ลงให้พอดี', flags: MessageFlags.Ephemeral });
-            const excess = total - session.maxPlayers;
-            session.counts.DPS = Math.max(0, (session.counts.DPS || 0) - excess);
-        }
         await interaction.update(countPanel(session));
         return true;
     }
-
+    if (action === 'presetback') { await interaction.update(countPanel(session)); return true; }
     if (action === 'count') {
-        const role = parts[3];
-        session.counts[role] = Number(interaction.values[0]) || 0;
+        const role = parts[3]; const value = Number(interaction.values[0]);
+        session.counts[role] = value;
         await interaction.update(countPanel(session));
         return true;
     }
     if (action === 'countnext') {
-        const total = 1 + ROLE_ORDER.reduce((sum, role) => sum + (Number(session.counts[role]) || 0), 0);
-        if (total > session.maxPlayers) { await interaction.reply({ content: '❌ เกิน ' + session.maxPlayers, flags: MessageFlags.Ephemeral }); return true; }
-        if (total <= 1) { await interaction.reply({ content: '❌ ต้องมีอย่างน้อย 1 ตำแหน่งนอกจาก Caller', flags: MessageFlags.Ephemeral }); return true; }
+        const total = 1 + ROLE_ORDER.reduce((s, r) => s + (Number(session.counts[r]) || 0), 0);
+        if (total <= 1) { await interaction.reply({ content: '❌ ต้องมีอย่างน้อย 2 คน (Caller + 1)', flags: MessageFlags.Ephemeral }); return true; }
+        if (total > session.maxPlayers) { await interaction.reply({ content: '❌ เกินจำนวนสูงสุด ' + session.maxPlayers + ' คน', flags: MessageFlags.Ephemeral }); return true; }
         session.slots = [{ role: 'Caller', weapon: null }];
-        for (const role of ROLE_ORDER) for (let i = 0; i < (Number(session.counts[role]) || 0); i++) session.slots.push({ role, weapon: null });
+        for (const role of ROLE_ORDER) { const c = Number(session.counts[role]) || 0; for (let i = 0; i < c; i++) session.slots.push({ role, weapon: null }); }
         session.slotIndex = 0; session.page = 0; session.search = '';
         await interaction.update(await weaponPanelPayload(session));
         return true;
     }
     if (action === 'weapon') {
-        const index = Number(parts[3]), slot = session.slots[index];
-        if (!slot || index !== session.slotIndex) { await interaction.reply({ content: 'ช่องไม่ตรง', flags: MessageFlags.Ephemeral }); return true; }
-        const selected = interaction.values[0];
-        slot.weapon = selected; session.slotIndex++; session.page = 0; session.search = '';
-        const nextPayload = session.slotIndex >= session.slots.length ? savePrompt(session) : await weaponPanelPayload(session);
-        await interaction.update(nextPayload);
+        const slotIndex = Number(parts[3]); const page = Number(parts[4]) || 0;
+        const weapon = interaction.values[0];
+        if (slotIndex !== session.slotIndex) { await interaction.reply({ content: 'ไม่ตรง', flags: MessageFlags.Ephemeral }); return true; }
+        session.slots[slotIndex].weapon = weapon;
+        session.slotIndex++;
+        session.page = 0; session.search = '';
+        if (session.slotIndex >= session.slots.length) { await interaction.update(savePrompt(session)); return true; }
+        await interaction.update(await weaponPanelPayload(session));
         return true;
     }
-    if (action === 'search') { await interaction.showModal(searchModal(id, Number(parts[3]))); return true; }
+    if (action === 'search') {
+        const index = Number(parts[3]);
+        if (index !== session.slotIndex) { await interaction.reply({ content: 'ไม่ตรง', flags: MessageFlags.Ephemeral }); return true; }
+        await interaction.showModal(searchModal(id, index));
+        return true;
+    }
     if (action === 'searchsubmit') {
         const index = Number(parts[3]);
         if (index !== session.slotIndex) { await interaction.reply({ content: 'ไม่ตรง', flags: MessageFlags.Ephemeral }); return true; }

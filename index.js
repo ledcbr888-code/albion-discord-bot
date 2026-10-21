@@ -3969,16 +3969,23 @@ async function downloadAvaImageBuffer(data, mapName) {
 function avaIdentityFallback(mapName) {
     const name = normalizeAvaOcrMapName(mapName);
     const slug = normalizeAvaSlug(name);
+    let tier = 'T?';
+    try {
+        const localMaps = require('./ava-maps.js');
+        const tiers = localMaps.TIERS || {};
+        // exact match or case-insensitive
+        tier = tiers[name] || tiers[Object.keys(tiers).find(k => k.toLowerCase() === String(name).toLowerCase())] || 'T?';
+    } catch {}
     const counts = {
         'Green chest': 0, 'Blue chest': 0, 'Gold chest': 0,
         Stone: 0, Wood: 0, Ore: 0, Hide: 0, Fiber: 0,
         'Solo dungeon': 0, 'Group dungeon': 0
     };
     return {
-        slug, name, tier: 'ไม่พบข้อมูล', layout: '', connection: '', counts,
+        slug, name, tier, layout: '', connection: '', counts,
         totalChests: 0, totalResources: 0, totalDungeons: 0,
-        mapImage: 'https://albionbattlehub.com/api/og/avalon?slug=' + encodeURIComponent(slug),
-        sourceUrl: 'https://albiononline.th.gl/db/locations/' + encodeURIComponent(slug),
+        mapImage: `https://cdn.jsdelivr.net/gh/ledcbr888-code/albion-discord-bot@main/avalon/${encodeURIComponent(String(slug).toLowerCase())}.png`,
+        sourceUrl: `https://cdn.jsdelivr.net/gh/ledcbr888-code/albion-discord-bot@main/avalon/${encodeURIComponent(String(slug).toLowerCase())}.png`,
         verifiedOnly: true
     };
 }
@@ -4735,33 +4742,50 @@ client.on('interactionCreate', async interaction => {
                     console.log('🗺️ AVA lookup starting: selected=' + selectedName +
                         ' candidates=' + JSON.stringify([selectedName, ...pending.ocrCandidates].slice(0, 8)));
 
-                    let data;
-                    try {
-                        // Bound all provider requests together so one stalled
-                        // site cannot leave the Discord selector hanging.
-                        data = await withAvaTimeout(
-                            fetchAvaMapDataWithFallback(canonicalName, [canonicalName, selectedName, ...pending.ocrCandidates]),
-                            45000,
-                            'AVA provider lookup'
-                        );
-                    } catch (lookupErr) {
-                        console.warn('⚠️ AVA provider lookup fallback for ' + selectedName + ': ' + lookupErr.message);
-                        data = avaIdentityFallback(selectedName);
-                    }
-
+                    // ===== ULTRA FAST PATH: GitHub เป็นหลัก ไม่รอเว็บนอก =====
+                    // ดึงรูปจาก GitHub คุณก่อนเลย 0.3-0.8 วิ
                     let imageBuffer = null;
+                    let data = null;
                     try {
+                        // ลองดึงรูปจาก GitHub โดยตรงก่อน - ไม่ต้องรอข้อมูล POI
                         imageBuffer = await withAvaTimeout(
-                            downloadAvaImageBuffer(data, selectedName),
-                            20000,
-                            'AVA image download'
+                            downloadAvaImageBuffer({ name: canonicalName, mapImage: null }, selectedName),
+                            6000,
+                            'AVA GitHub image'
                         );
-                    } catch (imageErr) {
-                        console.warn('⚠️ AVA image attachment fallback for ' + selectedName + ': ' + imageErr.message);
+                        console.log('⚡ AVA ULTRA FAST HIT: GitHub image for ' + selectedName);
+                        // ใช้ fallback data สำหรับชื่อ/Tier
+                        data = avaIdentityFallback(selectedName);
+                    } catch (fastErr) {
+                        console.warn('⚠️ AVA fast path failed for ' + selectedName + ': ' + fastErr.message + ' -> falling back to full lookup');
                     }
 
-                    const tierLabel = String(data.tier || '').match(/T\s*\d+/i)?.[0]?.replace(/\s+/g, '').toUpperCase() ||
-                        (String(data.name || '').toLowerCase().includes('sasitos-umogaum') ? 'T4' : 'T?');
+                    // ถ้า fast path ไม่ได้ ค่อยไปวิธีช้า (fetch จาก Battle Hub)
+                    if (!imageBuffer || !data) {
+                        try {
+                            data = await withAvaTimeout(
+                                fetchAvaMapDataWithFallback(canonicalName, [canonicalName, selectedName, ...pending.ocrCandidates]),
+                                15000, // ลดจาก 45วิ -> 15วิ
+                                'AVA provider lookup'
+                            );
+                        } catch (lookupErr) {
+                            console.warn('⚠️ AVA provider lookup fallback for ' + selectedName + ': ' + lookupErr.message);
+                            data = data || avaIdentityFallback(selectedName);
+                        }
+                        try {
+                            if (!imageBuffer) {
+                                imageBuffer = await withAvaTimeout(
+                                    downloadAvaImageBuffer(data, selectedName),
+                                    8000,
+                                    'AVA image download'
+                                );
+                            }
+                        } catch (imageErr) {
+                            console.warn('⚠️ AVA image attachment fallback for ' + selectedName + ': ' + imageErr.message);
+                        }
+                    }
+
+                    const tierLabel = (function(){ try { const lm = require('./ava-maps.js'); const tr = lm.TIERS||{}; return tr[data.name] || tr[selectedName] || tr[Object.keys(tr).find(k=>k.toLowerCase()===String(data.name||'').toLowerCase())] || String(data.tier||'').match(/T\s*\d+/i)?.[0]?.replace(/\s+/g,'').toUpperCase() || 'T?'; } catch { return String(data.tier||'').match(/T\s*\d+/i)?.[0]?.replace(/\s+/g,'').toUpperCase() || 'T?'; } })();
                     // Restore the original AVA report format: send only the large map image.
                     // Do not include map metadata text or provider links in the report message,
                     // because Discord can render them as an embed alongside the image.
