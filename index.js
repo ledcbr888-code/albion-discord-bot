@@ -2089,76 +2089,75 @@ async function fetchGuildRecentBattles(guildOrConfig) {
     const targetGuild = String(config.targetGuild || parsed.name || '').trim();
     if (!targetGuildId && !targetGuild) return null;
     let lastError = null;
-    const officialCache = fetchGuildRecentBattles._officialCache || (fetchGuildRecentBattles._officialCache = new Map());
-    const verify = async (ids) => {
-        const matched=[];
-        for (const id of [...new Set(ids)]) {
-            if (officialApiRateLimitedUntil > Date.now()) break;
-            let cached=officialCache.get(String(id));
-            if (!cached || cached.expiresAt <= Date.now()) {
-                cached={data:await fetchOfficialBattle(id).catch(()=>null), expiresAt:Date.now()+180000};
-                officialCache.set(String(id),cached);
-                if (officialCache.size>250) officialCache.delete(officialCache.keys().next().value);
-            }
-            const names=cached.data?.guilds ? Object.values(cached.data.guilds).map(g=>g?.name).filter(Boolean) : [];
-            if (!targetGuild || isExactGuildMatch(targetGuild,names)) matched.push(String(id));
-        }
-        return matched;
+
+    // ANTI-BLOCK + FAST: ใช้ api.albionbb.com แทน east.albionbb.com (ไม่โดน Cloudflare)
+    const browserHeaders = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9,th;q=0.8',
+        'Referer': 'https://east.albionbb.com/',
+        'Origin': 'https://east.albionbb.com'
     };
+
+    // 1. FASTEST: AlbionBB API - เร็ว 2-3 นาที ไม่ค่อยโดนบล็อค
+    try {
+        const bbApiUrl = 'https://api.albionbb.com/asia/battles';
+        const params = { limit: 20, sort: 'recent', minPlayers: 1 };
+        if (targetGuild) params.search = targetGuild;
+        const response = await axios.get(bbApiUrl, {
+            timeout: 10000,
+            headers: browserHeaders,
+            params
+        });
+        const rows = Array.isArray(response.data) ? response.data : (Array.isArray(response.data?.battles) ? response.data.battles : []);
+        const unique = [...new Set(rows.map(row => String(row?.albionId ?? row?.id ?? row?.battleId ?? '')).filter(id => /^\d+$/.test(id)))];
+        if (unique.length) {
+            console.log(`⚡ FAST AlbionBB API (no block) returned ${unique.length} battles for ${targetGuild || targetGuildId}`);
+            return unique;
+        }
+    } catch (e) {
+        lastError = e;
+        console.warn(`⚠️ AlbionBB API blocked ${e.response?.status || e.message} -> fallback to Official`);
+    }
+
+    // 2. RELIABLE: Official API - ไม่เคยโดนบล็อค
     if (targetGuildId) {
-        // Primary source: Albion's Gameinfo API for the Asia/East server.
-        // This endpoint supports guildId directly and avoids AlbionBB's
-        // Cloudflare/API restrictions on Render.
-        const apiUrl = 'https://gameinfo-sgp.albiononline.com/api/gameinfo/battles';
         try {
+            const apiUrl = 'https://gameinfo-sgp.albiononline.com/api/gameinfo/battles';
             const response = await axios.get(apiUrl, {
-                timeout: 20000,
+                timeout: 12000,
                 headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
-                params: {
-                    range: 'week', offset: 0, limit: 50,
-                    sort: 'recent', guildId: targetGuildId
-                }
+                params: { range: 'week', offset: 0, limit: 25, sort: 'recent', guildId: targetGuildId }
             });
             const rows = Array.isArray(response.data) ? response.data : [];
-            const unique = [...new Set(rows
-                .map(row => row?.id ?? row?.albionId ?? row?.battleId)
-                .filter(id => /^\d+$/.test(String(id)))
-                .map(String))];
+            const unique = [...new Set(rows.map(row => row?.id ?? row?.albionId ?? row?.battleId).filter(id => /^\d+$/.test(String(id))).map(String))];
             if (unique.length) {
-                console.log(`✅ Official Gameinfo Asia Guild ID ${targetGuildId} (${targetGuild || 'unknown'}) returned ${unique.length} Battle ID(s).`);
+                console.log(`✅ Official API (reliable) ${targetGuildId} returned ${unique.length} battles`);
                 return unique;
             }
-            console.warn(`⚠️ Official Gameinfo API returned no Battle IDs for Guild ID ${targetGuildId}.`);
         } catch (e) {
             lastError = e;
-            console.warn(`⚠️ Official Gameinfo Asia Guild ID lookup failed for ${targetGuildId}: ${e.response?.status || e.message}`);
+            console.warn(`⚠️ Official API failed: ${e.response?.status || e.message}`);
         }
-
-        // Secondary source: AlbionBB, retained only as a fallback.
-        const url=`https://east.albionbb.com/guilds/${encodeURIComponent(targetGuildId)}/battles`;
-        try {
-            const html = String(await cloudscraper.get(url,{timeout:20000}) || '');
-            const unique = extractBattleIdsFromHtml(html);
-            const good=await verify(unique);
-            if (!unique.length) console.warn(`⚠️ AlbionBB Guild ID page returned no Battle links: ${url} (HTML ${html.length} chars).`);
-            console.log(`✅ AlbionBB Guild ID ${targetGuildId} (${targetGuild||'unknown'}) verified ${good.length}/${unique.length} battle(s).`);
-            if (good.length) return good;
-        } catch(e) { lastError=e; console.warn(`⚠️ AlbionBB Guild ID fallback failed for ${targetGuildId}: ${e.message}`); }
     }
-    if (!targetGuild) return null;
-    const urls=[
-        'https://albionbattles.com/east?search='+encodeURIComponent(targetGuild)+'&minPlayers=1',
-        'https://albionbattles.com/east?q='+encodeURIComponent(targetGuild)+'&minPlayers=1',
-        'https://albionbattles.com/east'
-    ];
-    for (const url of urls) try {
-        const html = String(await cloudscraper.get(url,{timeout:20000}) || '');
-        const unique = extractBattleIdsFromHtml(html), good=await verify(unique);
-        if(good.length){ console.log(`✅ AlbionBattles Official-verified ${good.length}/${unique.length} battle(s) for ${targetGuild}.`); return good; }
-    } catch(e) { lastError=e; console.warn(`⚠️ AlbionBattles discovery failed for ${targetGuild}: ${e.message}`); }
-    console.warn(`❌ No Official-verified battles found for ${targetGuild}; leaving battles unprocessed: ${lastError?.message||'none'}`);
+
+    // 3. FALLBACK: cloudscraper bypass Cloudflare
+    if (targetGuildId) {
+        try {
+            const url=`https://east.albionbb.com/guilds/${encodeURIComponent(targetGuildId)}/battles`;
+            const html = String(await cloudscraper.get({ uri: url, timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0 Chrome/120 Safari/537.36', 'Accept': 'text/html', 'Referer': 'https://east.albionbb.com/' } }) || '');
+            const unique = extractBattleIdsFromHtml(html);
+            if (unique.length) {
+                console.log(`✅ AlbionBB HTML via cloudscraper ${unique.length} battles`);
+                return unique.slice(0,15);
+            }
+        } catch(e) { lastError=e; }
+    }
+
+    console.warn(`❌ No battles found for ${targetGuild}; ${lastError?.message||'none'}`);
     return [];
 }
+
 
 async function primeAutoBattleHistory() {
     // Only seed the recent-history baseline on a truly fresh install.
@@ -3952,16 +3951,14 @@ async function downloadAvaImageBuffer(data, mapName) {
     const GITHUB_BASE_RAW = 'https://raw.githubusercontent.com/ledcbr888-code/albion-discord-bot/main/avalon';
     const GITHUB_BASE_CDN = 'https://cdn.jsdelivr.net/gh/ledcbr888-code/albion-discord-bot@main/avalon';
 
-    // GitHub ONLY - WebP optimized 84MB - https://github.com/ledcbr888-code/albion-discord-bot/tree/main/avalon
+    // GitHub ONLY - ตามที่คุณต้องการ: https://github.com/ledcbr888-code/albion-discord-bot/tree/main/avalon อย่างเดียว
     const githubCandidates = [
-        `${GITHUB_BASE_RAW}/${encodeURIComponent(slugLower)}.webp`,
-        `${GITHUB_BASE_CDN}/${encodeURIComponent(slugLower)}.webp`,
-        `${GITHUB_BASE_RAW}/${encodeURIComponent(slugOriginal)}.webp`,
-        `${GITHUB_BASE_CDN}/${encodeURIComponent(slugOriginal)}.webp`,
         `${GITHUB_BASE_RAW}/${encodeURIComponent(slugLower)}.png`,
         `${GITHUB_BASE_RAW}/${encodeURIComponent(slugOriginal)}.png`,
         `${GITHUB_BASE_CDN}/${encodeURIComponent(slugLower)}.png`,
         `${GITHUB_BASE_CDN}/${encodeURIComponent(slugOriginal)}.png`,
+        `${GITHUB_BASE_RAW}/${encodeURIComponent(slugLower)}.webp`,
+        `${GITHUB_BASE_CDN}/${encodeURIComponent(slugLower)}.webp`,
     ];
 
     for (const url of githubCandidates) {
@@ -3991,10 +3988,8 @@ async function downloadAvaImageBuffer(data, mapName) {
         }
     }
 
-    // Local fallback - WebP first (84MB only)
+    // Local fallback (same machine, not external web)
     const localCandidates = [
-        path.join(__dirname, 'avalon', `${slugLower}.webp`),
-        path.join(__dirname, 'avalon', `${slugOriginal}.webp`),
         path.join(__dirname, 'avalon', `${slugLower}.png`),
         path.join(__dirname, 'avalon', `${slugOriginal}.png`),
     ];
@@ -4011,38 +4006,12 @@ async function downloadAvaImageBuffer(data, mapName) {
         } catch {}
     }
 
-    console.error('❌ [GitHub ONLY] Map image not found for ' + slugLower + ' - please upload to https://github.com/ledcbr888-code/albion-discord-bot/tree/main/avalon/' + slugLower + '.webp');
+    console.error('❌ [GitHub ONLY] Map image not found for ' + slugLower + ' - please upload to https://github.com/ledcbr888-code/albion-discord-bot/tree/main/avalon/' + slugLower + '.png');
     return null;
 }
 
-function avaIdentityFallback(mapName) {
-    const name = (typeof normalizeAvaOcrMapName === 'function' ? normalizeAvaOcrMapName(mapName) : String(mapName||'').trim());
-    const slug = (typeof normalizeAvaSlug === 'function' ? normalizeAvaSlug(name) : String(name||'').toLowerCase());
-    let tier = 'T?';
-    try {
-        const localMaps = require('./ava-maps.js');
-        const tiers = localMaps.TIERS || localMaps.AVA_MAP_TIERS || {};
-        const keys = Object.keys(tiers);
-        const exact = tiers[name] || tiers[Object.keys(tiers).find(k => k.toLowerCase() === String(name).toLowerCase())] || tiers[Object.keys(tiers).find(k => k.toLowerCase() === String(slug).toLowerCase())];
-        if (exact) tier = exact;
-    } catch {}
-    const counts = {
-        'Green chest': 0, 'Blue chest': 0, 'Gold chest': 0,
-        Stone: 0, Wood: 0, Ore: 0, Hide: 0, Fiber: 0,
-        'Solo dungeon': 0, 'Group dungeon': 0
-    };
-    return {
-        slug, name, tier, layout: '', connection: '', counts,
-        totalChests: 0, totalResources: 0, totalDungeons: 0,
-        mapImage: `https://cdn.jsdelivr.net/gh/ledcbr888-code/albion-discord-bot@main/avalon/${encodeURIComponent(String(slug).toLowerCase())}.webp`,
-        sourceUrl: `https://cdn.jsdelivr.net/gh/ledcbr888-code/albion-discord-bot@main/avalon/${encodeURIComponent(String(slug).toLowerCase())}.webp`,
-        verifiedOnly: true
-    };
-}
-// alias for typo that existed in some deploys
-function avalIdentityFallback(mapName) { return avaIdentityFallback(mapName); }
 
-async function withAvaTimeout(promise, timeoutMs, label) {
+function avaIdentityFallback(mapName){const n=String(mapName||'').trim();const s=n.toLowerCase();return {slug:s,name:n,tier:'T?',counts:{},totalChests:0,totalResources:0,totalDungeons:0,mapImage:`https://cdn.jsdelivr.net/gh/ledcbr888-code/albion-discord-bot@main/avalon/${encodeURIComponent(s)}.webp`,sourceUrl:`https://cdn.jsdelivr.net/gh/ledcbr888-code/albion-discord-bot@main/avalon/${encodeURIComponent(s)}.webp`,verifiedOnly:true};} function avalIdentityFallback(m){return avaIdentityFallback(m);} async function withAvaTimeout(promise, timeoutMs, label) {
     let timer;
     try {
         return await Promise.race([
@@ -4577,9 +4546,8 @@ const commands = [
         .addSubcommand(s => s.setName('guilds').setDescription('แสดงรายชื่อกิลด์ที่ติดตาม'))
         .addSubcommand(s => s.setName('members').setDescription('แสดงรายชื่อผู้เล่นที่ติดตาม')),
     new SlashCommandBuilder().setName('add').setDescription('เพิ่มรายการติดตาม')
-        .addSubcommand(s => s.setName('guild').setDescription('เพิ่มกิลด์และกำหนดห้องสำหรับดึงข้อมูลเมื่อวางลิงก์')
-            .addStringOption(o => o.setName('name').setDescription('ชื่อกิลด์').setRequired(true))
-            .addChannelOption(o => o.setName('channel').setDescription('ห้องที่อนุญาตให้วางลิงก์เพื่อดึงข้อมูลอัตโนมัติ').addChannelTypes(ChannelType.GuildText).setRequired(true)))
+        .addSubcommand(s => s.setName('guild').setDescription('เพิ่มกิลด์ที่ต้องการติดตาม')
+            .addStringOption(o => o.setName('name').setDescription('ชื่อกิลด์').setRequired(true)))
         .addSubcommand(s => s.setName('player').setDescription('เพิ่มผู้เล่น').addStringOption(o => o.setName('name').setDescription('ชื่อผู้เล่น').setRequired(true))),
     new SlashCommandBuilder().setName('remove').setDescription('ลบรายการติดตาม')
         .addSubcommand(s => s.setName('guild').setDescription('ลบกิลด์').addStringOption(o => o.setName('name').setDescription('ชื่อกิลด์').setRequired(true)))
@@ -4693,7 +4661,24 @@ client.once('ready', async () => {
         console.log(`🛡️ Auto-Battle initialized: marked ${seeded} existing battle(s) as already seen. No historical backlog will be reported.`);
     }, 5000);
 
-    setInterval(() => checkAutoBattles().catch(err => console.error('❌ Auto-Battle scheduler error:', err)), 5 * 60 * 1000);
+        // PEAK HOURS OPTIMIZATION: สู้บ่อยแค่ 5-8 UTC และ 10-17 UTC - Peak 1min, Off-peak 5min
+    let autoBattleLastOffPeakRun = 0;
+    function isAutoBattlePeakHour() {
+        const h = new Date().getUTCHours();
+        return (h >= 5 && h < 8) || (h >= 10 && h < 17);
+    }
+    setInterval(() => {
+        const isPeak = isAutoBattlePeakHour();
+        const now = Date.now();
+        if (!isPeak) {
+            if (now - autoBattleLastOffPeakRun < 5 * 60 * 1000) return;
+            autoBattleLastOffPeakRun = now;
+            console.log('💤 Off-peak hour ' + new Date().getUTCHours() + ' UTC - slow check (5min interval)');
+        } else {
+            console.log('⚡ Peak hour ' + new Date().getUTCHours() + ' UTC - fast check (1min)');
+        }
+        checkAutoBattles().catch(err => console.error('❌ Auto-Battle scheduler error:', err));
+    }, 60 * 1000); // Peak 1min, Off-peak 5min
     setTimeout(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA initial poll error:', err)), 3000);
     setInterval(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA poll error:', err)), 5000);
     fetchBattleHubMapIndex()
@@ -5010,18 +4995,16 @@ client.on('interactionCreate', async interaction => {
         const sub = interaction.options.getSubcommand();
         if (sub === 'guild') {
             const name = interaction.options.getString('name').trim();
-            const channel = interaction.options.getChannel('channel');
 
             const existingIndex = targetGuilds.findIndex(x => x.name.toLowerCase() === name.toLowerCase());
             if (existingIndex >= 0) {
-                targetGuilds[existingIndex].channelId = channel.id;
                 saveData();
-                return interaction.reply({ content: `🛡️ อัปเดตห้องสำหรับกิลด์ **${name}** เป็น <#${channel.id}> เรียบร้อยแล้ว`, flags: 64 });
+                return interaction.reply({ content: `⚠️ กิลด์ **${name}** มีอยู่แล้ว`, flags: 64 });
             }
 
-            targetGuilds.push({ name, channelId: channel.id });
+            targetGuilds.push({ name, channelId: null });
             saveData();
-            return interaction.reply({ content: `🛡️ เพิ่มกิลด์ **${name}** และกำหนดให้ดึงข้อมูลอัตโนมัติเฉพาะในห้อง <#${channel.id}> เรียบร้อยแล้วครับ`, flags: 64 });
+            return interaction.reply({ content: `✅ เพิ่มกิลด์ **${name}** แล้ว`, flags: 64 });
         }
         if (sub === 'player') {
             const name = interaction.options.getString('name').trim();
@@ -5190,7 +5173,25 @@ client.on('interactionCreate', async interaction => {
             else setupGuildConfig.avaAuto.push(config);
             avaPollState.delete(String(interaction.guildId) + ':' + String(channel.id));
             saveData();
-            setTimeout(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA setup poll error:', err)), 500);
+            // PEAK HOURS OPTIMIZATION: สู้บ่อยแค่ 5-8 UTC และ 10-17 UTC - Peak 1min, Off-peak 5min
+    let autoBattleLastOffPeakRun = 0;
+    function isAutoBattlePeakHour() {
+        const h = new Date().getUTCHours();
+        return (h >= 5 && h < 8) || (h >= 10 && h < 17);
+    }
+    setInterval(() => {
+        const isPeak = isAutoBattlePeakHour();
+        const now = Date.now();
+        if (!isPeak) {
+            if (now - autoBattleLastOffPeakRun < 5 * 60 * 1000) return;
+            autoBattleLastOffPeakRun = now;
+            console.log('💤 Off-peak hour ' + new Date().getUTCHours() + ' UTC - slow check (5min interval)');
+        } else {
+            console.log('⚡ Peak hour ' + new Date().getUTCHours() + ' UTC - fast check (1min)');
+        }
+        checkAutoBattles().catch(err => console.error('❌ Auto-Battle scheduler error:', err));
+    }, 60 * 1000); // Peak 1min, Off-peak 5min
+    setTimeout(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA setup poll error:', err)), 500);
             return interaction.reply(
                 '✅ ตั้งค่าตรวจรูป AVA อัตโนมัติแล้ว\n' +
                 '📢 ห้อง: <#' + channel.id + '>\n' +
