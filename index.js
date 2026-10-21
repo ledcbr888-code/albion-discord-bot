@@ -4813,20 +4813,18 @@ client.on('interactionCreate', async interaction => {
                         console.log('ℹ️ [GitHub ONLY] Using local tier data for ' + selectedName + ': ' + (data.tier || 'T?'));
                     }
                     if (!imageBuffer) {
-                        console.warn('⚠️ [GitHub ONLY] No image from GitHub for ' + selectedName + ' - will send text only');
-                    }
-                    try {
-
-                            if (!imageBuffer) {
-                                imageBuffer = await withAvaTimeout(
-                                    downloadAvaImageBuffer(data, selectedName),
-                                    8000,
-                                    'AVA image download'
-                                );
-                            }
+                        try {
+                            imageBuffer = await withAvaTimeout(
+                                downloadAvaImageBuffer(data, selectedName),
+                                8000,
+                                'AVA image download'
+                            );
                         } catch (imageErr) {
                             console.warn('⚠️ AVA image attachment fallback for ' + selectedName + ': ' + imageErr.message);
                         }
+                    }
+                    if (!imageBuffer) {
+                        console.warn('⚠️ [GitHub ONLY] No image from GitHub for ' + selectedName + ' - will send text only');
                     }
 
                     // Fix Tier lookup - case insensitive + proper name normalization
