@@ -39,8 +39,15 @@ const PORT = Number(process.env.PORT) || 3000;
 
 app.get('/', (_, res) => res.status(200).send('Albion Discord Bot is running.'));
 
-app.listen(PORT, '0.0.0.0', () => {
+const webServer = app.listen(PORT, '0.0.0.0', () => {
     console.log(`🌐 Web server listening on port ${PORT}`);
+});
+webServer.on('error', (err) => {
+    if (err && err.code === 'EADDRINUSE') {
+        console.warn(`⚠️ Port ${PORT} already in use - web server disabled, bot continues running`);
+    } else {
+        console.error('❌ Web server error:', err.message);
+    }
 });
 
 const BOT_TOKEN = String(process.env.BOT_TOKEN || '').trim();
@@ -3939,56 +3946,71 @@ async function downloadImageForCanvas(url) {
 
 async function downloadAvaImageBuffer(data, mapName) {
     const slug = normalizeAvaSlug(data?.name || mapName);
-    const candidates = [...new Set([
-        data?.mapImage,
-        'https://albionbattlehub.com/api/og/avalon?slug=' + encodeURIComponent(slug),
-        'https://albionbattlehub.com/images/avalon/' + encodeURIComponent(slug) + '.webp'
-    ].filter(Boolean))];
-    let lastError = null;
-    for (const url of candidates) {
+    const slugLower = String(slug || '').toLowerCase();
+    const slugOriginal = String(slug || '');
+
+    const GITHUB_BASE_RAW = 'https://raw.githubusercontent.com/ledcbr888-code/albion-discord-bot/main/avalon';
+    const GITHUB_BASE_CDN = 'https://cdn.jsdelivr.net/gh/ledcbr888-code/albion-discord-bot@main/avalon';
+
+    // GitHub ONLY - ตามที่คุณต้องการ: https://github.com/ledcbr888-code/albion-discord-bot/tree/main/avalon อย่างเดียว
+    const githubCandidates = [
+        `${GITHUB_BASE_RAW}/${encodeURIComponent(slugLower)}.png`,
+        `${GITHUB_BASE_RAW}/${encodeURIComponent(slugOriginal)}.png`,
+        `${GITHUB_BASE_CDN}/${encodeURIComponent(slugLower)}.png`,
+        `${GITHUB_BASE_CDN}/${encodeURIComponent(slugOriginal)}.png`,
+        `${GITHUB_BASE_RAW}/${encodeURIComponent(slugLower)}.webp`,
+        `${GITHUB_BASE_CDN}/${encodeURIComponent(slugLower)}.webp`,
+    ];
+
+    for (const url of githubCandidates) {
         try {
+            console.log('🔍 [GitHub ONLY] Trying: ' + url);
             const response = await axios.get(url, {
-                responseType: 'arraybuffer', timeout: 8000,
-                headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'image/png,image/webp,image/*,*/*;q=0.8' },
-                validateStatus: status => status >= 200 && status < 300
+                responseType: 'arraybuffer', timeout: 10000,
+                headers: { 'User-Agent': 'Mozilla/5.0 (compatible; AlbionBot/1.0)', Accept: 'image/png,image/webp,image/*,*/*;q=0.8' },
+                validateStatus: s => s >= 200 && s < 300
             });
             const buffer = Buffer.from(response.data);
-            // Reject HTML/error pages returned with a 200 status.
+            if (buffer.length < 1000) {
+                console.warn('⚠️ GitHub too small ' + buffer.length + ' bytes for ' + url + ' - skip');
+                continue;
+            }
+            const head = buffer.slice(0, 30).toString('utf8');
+            if (head.includes('<!DOCTYPE') || head.includes('<html')) {
+                console.warn('⚠️ GitHub returned HTML for ' + url + ' - skip');
+                continue;
+            }
             const image = await loadImage(buffer);
-            if (!image.width || !image.height) throw new Error('invalid image dimensions');
-            console.log('🗺️ AVA attachment image selected: ' + url);
+            if (!image.width || !image.height) throw new Error('invalid dimensions');
+            console.log('✅ [GitHub ONLY] HIT with BOSS BOT watermark: ' + url + ` (${(buffer.length/1024).toFixed(1)} KB) ${image.width}x${image.height}`);
             return buffer;
         } catch (err) {
-            lastError = err;
-            console.warn('⚠️ AVA image candidate failed: ' + url + ' (' + err.message + ')');
+            console.warn('⚠️ [GitHub ONLY] failed ' + url + ': ' + (err.response?.status || err.message));
         }
     }
-    throw lastError || new Error('ไม่พบไฟล์รูปแมฟที่ใช้งานได้');
+
+    // Local fallback (same machine, not external web)
+    const localCandidates = [
+        path.join(__dirname, 'avalon', `${slugLower}.png`),
+        path.join(__dirname, 'avalon', `${slugOriginal}.png`),
+    ];
+    for (const p of localCandidates) {
+        try {
+            if (fs.existsSync(p)) {
+                const b = await fs.promises.readFile(p);
+                const img = await loadImage(b);
+                if (img.width && img.height) {
+                    console.log('✅ [LOCAL] HIT: ' + p);
+                    return b;
+                }
+            }
+        } catch {}
+    }
+
+    console.error('❌ [GitHub ONLY] Map image not found for ' + slugLower + ' - please upload to https://github.com/ledcbr888-code/albion-discord-bot/tree/main/avalon/' + slugLower + '.png');
+    return null;
 }
 
-function avaIdentityFallback(mapName) {
-    const name = normalizeAvaOcrMapName(mapName);
-    const slug = normalizeAvaSlug(name);
-    let tier = 'T?';
-    try {
-        const localMaps = require('./ava-maps.js');
-        const tiers = localMaps.TIERS || {};
-        // exact match or case-insensitive
-        tier = tiers[name] || tiers[Object.keys(tiers).find(k => k.toLowerCase() === String(name).toLowerCase())] || 'T?';
-    } catch {}
-    const counts = {
-        'Green chest': 0, 'Blue chest': 0, 'Gold chest': 0,
-        Stone: 0, Wood: 0, Ore: 0, Hide: 0, Fiber: 0,
-        'Solo dungeon': 0, 'Group dungeon': 0
-    };
-    return {
-        slug, name, tier, layout: '', connection: '', counts,
-        totalChests: 0, totalResources: 0, totalDungeons: 0,
-        mapImage: `https://cdn.jsdelivr.net/gh/ledcbr888-code/albion-discord-bot@main/avalon/${encodeURIComponent(String(slug).toLowerCase())}.png`,
-        sourceUrl: `https://cdn.jsdelivr.net/gh/ledcbr888-code/albion-discord-bot@main/avalon/${encodeURIComponent(String(slug).toLowerCase())}.png`,
-        verifiedOnly: true
-    };
-}
 
 async function withAvaTimeout(promise, timeoutMs, label) {
     let timer;
@@ -4719,21 +4741,45 @@ client.on('interactionCreate', async interaction => {
                 const selectedName = String(interaction.values?.[0] || '').trim();
                 const allowed = pending.suggestions.some(x => String(x.name) === selectedName);
                 if (!selectedName || !allowed) {
-                    return interaction.reply({ content: '❌ ตัวเลือกแมพไม่ถูกต้องหรือหมดอายุแล้ว', ephemeral: true });
+                    return interaction.reply({ content: '❌ ตัวเลือกแมพไม่ถูกต้องหรือหมดอายุแล้ว', ephemeral: true }).catch(()=>{});
                 }
 
-                avaPendingSelections.delete(token);
+                // Don't delete pending yet - keep it until we succeed, so retry works
                 console.log('🗺️ AVA map selected: guild=' + guildId + ' channel=' + interaction.channelId + ' map=' + selectedName + ' OCR=' + String(pending.ocrName || ''));
 
                 try {
-                    // A select-menu interaction must be acknowledged and the
-                    // original message updated in one request. The previous
-                    // deferUpdate() + editReply() sequence could stall before
-                    // reaching the provider lookup, leaving only the old menu.
-                    await interaction.update({
-                        content: '🔎 เลือก **' + selectedName + '** แล้ว กำลังค้นหาข้อมูลแมพ...',
-                        components: []
-                    });
+                    // Safe acknowledge - handle already acknowledged case (duplicate bot instance or double click)
+                    try {
+                        if (interaction.replied || interaction.deferred) {
+                            await interaction.editReply({
+                                content: '🔎 เลือก **' + selectedName + '** แล้ว กำลังค้นหาข้อมูลแมพ...',
+                                components: []
+                            });
+                        } else {
+                            await interaction.update({
+                                content: '🔎 เลือก **' + selectedName + '** แล้ว กำลังค้นหาข้อมูลแมพ...',
+                                components: []
+                            });
+                        }
+                    } catch (ackErr) {
+                        if (String(ackErr.message).includes('already been acknowledged') || ackErr.code === 40060) {
+                            console.warn('⚠️ Interaction already acknowledged for ' + selectedName + ', trying editReply fallback');
+                            try {
+                                await interaction.editReply({
+                                    content: '🔎 เลือก **' + selectedName + '** แล้ว กำลังค้นหาข้อมูลแมพ...',
+                                    components: []
+                                });
+                            } catch (e) {
+                                console.warn('⚠️ editReply fallback also failed:', e.message);
+                                // If we can't even edit, try followUp and continue
+                                try {
+                                    await interaction.followUp({ content: '🔎 กำลังค้นหา **' + selectedName + '** ...', ephemeral: true });
+                                } catch {}
+                            }
+                        } else {
+                            throw ackErr;
+                        }
+                    }
 
                     // Keep the original AVA selection flow: the fallback resolver already
                     // handles OCR aliases. Do not refetch the authoritative index here,
@@ -4760,19 +4806,17 @@ client.on('interactionCreate', async interaction => {
                         console.warn('⚠️ AVA fast path failed for ' + selectedName + ': ' + fastErr.message + ' -> falling back to full lookup');
                     }
 
-                    // ถ้า fast path ไม่ได้ ค่อยไปวิธีช้า (fetch จาก Battle Hub)
-                    if (!imageBuffer || !data) {
-                        try {
-                            data = await withAvaTimeout(
-                                fetchAvaMapDataWithFallback(canonicalName, [canonicalName, selectedName, ...pending.ocrCandidates]),
-                                15000, // ลดจาก 45วิ -> 15วิ
-                                'AVA provider lookup'
-                            );
-                        } catch (lookupErr) {
-                            console.warn('⚠️ AVA provider lookup fallback for ' + selectedName + ': ' + lookupErr.message);
-                            data = data || avaIdentityFallback(selectedName);
-                        }
-                        try {
+                    // GitHub ONLY mode: ถ้าไม่ได้รูปจาก GitHub จะไม่มี fallback ไปเว็บนอก
+                    // ใช้แค่ข้อมูลจาก ava-maps.js (Tier) ที่มีในเครื่อง
+                    if (!data) {
+                        data = avaIdentityFallback(selectedName);
+                        console.log('ℹ️ [GitHub ONLY] Using local tier data for ' + selectedName + ': ' + (data.tier || 'T?'));
+                    }
+                    if (!imageBuffer) {
+                        console.warn('⚠️ [GitHub ONLY] No image from GitHub for ' + selectedName + ' - will send text only');
+                    }
+                    try {
+
                             if (!imageBuffer) {
                                 imageBuffer = await withAvaTimeout(
                                     downloadAvaImageBuffer(data, selectedName),
@@ -4785,8 +4829,10 @@ client.on('interactionCreate', async interaction => {
                         }
                     }
 
-                    const tierLabel = (function(){ try { const lm = require('./ava-maps.js'); const tr = lm.TIERS||{}; return tr[data.name] || tr[selectedName] || tr[Object.keys(tr).find(k=>k.toLowerCase()===String(data.name||'').toLowerCase())] || String(data.tier||'').match(/T\s*\d+/i)?.[0]?.replace(/\s+/g,'').toUpperCase() || 'T?'; } catch { return String(data.tier||'').match(/T\s*\d+/i)?.[0]?.replace(/\s+/g,'').toUpperCase() || 'T?'; } })();
-                    // Restore the original AVA report format: send only the large map image.
+                    // Fix Tier lookup - case insensitive + proper name normalization
+                    const normalizedSelectedName = (function(){ try { const lm = require('./ava-maps.js'); const tiers = lm.TIERS||{}; const keys = Object.keys(tiers); const found = keys.find(k => k.toLowerCase() === String(selectedName||'').toLowerCase()) || keys.find(k => k.toLowerCase() === String(data?.name||'').toLowerCase()); return found || selectedName; } catch { return selectedName; } })();
+                    const tierLabel = (function(){ try { const lm = require('./ava-maps.js'); const tr = lm.TIERS||{}; const exact = tr[normalizedSelectedName] || tr[selectedName] || tr[data?.name] || tr[Object.keys(tr).find(k=>k.toLowerCase()===String(normalizedSelectedName||'').toLowerCase())] || tr[Object.keys(tr).find(k=>k.toLowerCase()===String(selectedName||'').toLowerCase())]; if (exact) return exact; const m = String(data?.tier||'').match(/T\s*\d+/i); return m ? m[0].replace(/\s+/g,'').toUpperCase() : 'T?'; } catch { const m = String(data?.tier||'').match(/T\s*\d+/i); return m ? m[0].replace(/\s+/g,'').toUpperCase() : 'T?'; } })();
+                    if (data && normalizedSelectedName) data.name = normalizedSelectedName; // Fix name to proper case like Hilitos-Aiigaum not hilitos-aiigaum
                     // Do not include map metadata text or provider links in the report message,
                     // because Discord can render them as an embed alongside the image.
                     const reportPayload = {
@@ -4809,12 +4855,31 @@ client.on('interactionCreate', async interaction => {
                         });
                     }
                     console.log('✅ AVA map report sent: map=' + data.name + ' image=' + (imageBuffer ? 'yes' : 'no') + ' points=' + avaDataPointCount(data));
+                    avaPendingSelections.delete(token);
                 } catch (err) {
                     console.error('❌ AVA selected map lookup error for ' + selectedName + ':', err);
-                    await interaction.editReply({
-                        content: '❌ ค้นหาแมพ **' + selectedName + '** ไม่สำเร็จ: ' + err.message,
-                        components: []
-                    });
+                    avaPendingSelections.delete(token);
+                    try {
+                        if (interaction.replied || interaction.deferred) {
+                            await interaction.editReply({
+                                content: '❌ ค้นหาแมพ **' + selectedName + '** ไม่สำเร็จ: ' + err.message,
+                                components: []
+                            });
+                        } else {
+                            await interaction.reply({ content: '❌ ค้นหาแมพ **' + selectedName + '** ไม่สำเร็จ: ' + err.message, ephemeral: true });
+                        }
+                    } catch (replyErr) {
+                        console.warn('⚠️ Failed to reply error message:', replyErr.message);
+                        try {
+                            await interaction.followUp({ content: '❌ ค้นหาแมพ **' + selectedName + '** ไม่สำเร็จ: ' + err.message, ephemeral: true });
+                        } catch {}
+                        // Also send to channel as fallback
+                        try {
+                            if (interaction.channel?.send) {
+                                await interaction.channel.send('❌ ค้นหาแมพ **' + selectedName + '** ไม่สำเร็จ: ' + err.message);
+                            }
+                        } catch {}
+                    }
                 }
                 return;
             }

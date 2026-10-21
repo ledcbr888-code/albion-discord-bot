@@ -310,16 +310,13 @@ async function buildWeaponGridImage(weapons, usedMap, currentRole) {
             ctx.fillStyle = '#ffffff'; ctx.font = 'bold 28px sans-serif'; ctx.textAlign='center';
             ctx.fillText('⚔️', x + cellW/2, y + 80); ctx.textAlign='left';
         }
-        // Name under image - FIXED: smaller font, proper truncation, no overflow
-        ctx.fillStyle = '#1a1b1e'; ctx.fillRect(x, y + 165, cellW, 50);
+        // ชื่ออาวุธใหญ่กว่าเดิม 3 เท่า และเอาคำใต้ชื่ออาวุธออกทั้งหมด
+        ctx.fillStyle = '#1a1b1e'; ctx.fillRect(x, y + 165, cellW, 70);
         ctx.fillStyle = isUsed ? '#f0c35a' : '#ffffff';
-        ctx.font = 'bold 13px sans-serif'; ctx.textAlign = 'center';
-        // Truncate properly: 18 chars max
+        ctx.font = 'bold 39px sans-serif'; ctx.textAlign = 'center';
         const displayName = displayWeapon(wName);
-        const shortName = displayName.length > 16 ? displayName.slice(0, 14) + '..' : displayName;
-        ctx.fillText(shortName, x + cellW / 2, y + 184, cellW - 10);
-        ctx.font = '10px sans-serif'; ctx.fillStyle = isUsed ? '#f0c35a' : '#9ca0a6';
-        ctx.fillText(isUsed ? 'PICKED x' + usedMap.get(wName) : 'AVAILABLE', x + cellW / 2, y + 200);
+        const shortName = displayName.length > 12 ? displayName.slice(0, 10) + '..' : displayName;
+        ctx.fillText(shortName, x + cellW / 2, y + 210, cellW - 10);
         ctx.textAlign = 'left';
     }
     const buffer = canvas.toBuffer('image/png');
@@ -329,15 +326,16 @@ async function buildWeaponGridImage(weapons, usedMap, currentRole) {
 }
 
 async function buildRosterSmallIconImage(event) {
-    const cacheKey = event.id + ':' + event.slots.map(s => s.weapon + s.userId).join('|');
+    const cacheKey = event.id + ':' + event.slots.map(s => s.weapon + s.userId).join('|') + ':BIG';
     if (rosterCache.has(cacheKey)) return rosterCache.get(cacheKey);
 
     const canvasLib = tryLoadCanvas();
     if (!canvasLib) return null;
     const { createCanvas, loadImage } = canvasLib;
     const slots = event.slots;
-    const rowH = 90;
-    const width = 900;
+    // ขยายแถวให้สูงขึ้นเพื่อรองรับตัวหนังสือใหญ่
+    const rowH = 130;
+    const width = 1100;
     const height = slots.length * rowH + 10;
     const canvas = createCanvas(width, height); const ctx = canvas.getContext('2d');
     ctx.fillStyle = '#2b2d31'; ctx.fillRect(0, 0, width, height);
@@ -349,25 +347,32 @@ async function buildRosterSmallIconImage(event) {
         const s = slots[i]; const y = i * rowH;
         ctx.fillStyle = i % 2 === 0 ? '#313338' : '#2b2d31'; ctx.fillRect(0, y, width, rowH);
         if (i === 0) { ctx.fillStyle = '#00b0f4'; ctx.fillRect(0, 0, 6, height); }
-        const iconX = 10, iconY = y + 8, iconS = 74;
+        const iconX = 12, iconY = y + 10, iconS = 100;
         ctx.fillStyle = '#1e1f22'; ctx.fillRect(iconX, iconY, iconS, iconS);
         ctx.strokeStyle = '#3f4147'; ctx.lineWidth = 1; ctx.strokeRect(iconX, iconY, iconS, iconS);
         const loadedImg = loadedImages[i];
         if (loadedImg) {
             try { ctx.drawImage(loadedImg, iconX + 2, iconY + 2, iconS - 4, iconS - 4); } catch {}
         } else {
-            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 20px sans-serif'; ctx.textAlign='center';
-            ctx.fillText(ROLE_EMOJIS[s.role] || '⚔️', iconX + iconS/2, iconY + iconS/2 + 6); ctx.textAlign='left';
+            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 28px sans-serif'; ctx.textAlign='center';
+            ctx.fillText(ROLE_EMOJIS[s.role] || '⚔️', iconX + iconS/2, iconY + iconS/2 + 8); ctx.textAlign='left';
         }
         if (s.userId) {
-            ctx.fillStyle = '#23a559'; ctx.beginPath(); ctx.arc(iconX + iconS + 10, iconY + iconS / 2, 7, 0, Math.PI * 2); ctx.fill();
-            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 10px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('✓', iconX + iconS + 10, iconY + iconS / 2 + 3); ctx.textAlign = 'left';
+            ctx.fillStyle = '#23a559'; ctx.beginPath(); ctx.arc(iconX + iconS + 16, iconY + iconS / 2, 10, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('✓', iconX + iconS + 16, iconY + iconS / 2 + 5); ctx.textAlign = 'left';
         }
-        ctx.fillStyle = '#f2f3f5'; ctx.font = 'bold 15px sans-serif';
+        // ชื่ออาวุธกับชื่อคนลงชื่อ - ใหญ่เท่ากันและใหญ่กว่าเดิมเยอะๆ
+        ctx.fillStyle = '#f2f3f5'; ctx.font = 'bold 28px sans-serif';
         const roleText = (i + 1) + '. ' + (ROLE_LABELS_SHORT[s.role] || s.role).toUpperCase() + (s.weapon ? ' - ' + displayWeapon(s.weapon) : '');
-        ctx.fillText(roleText.slice(0, 50), 105, y + 32);
-        if (s.userId) { ctx.fillStyle = '#949ba4'; ctx.font = '12px sans-serif'; ctx.fillText('@' + (s.userName || 'Joined').slice(0, 28), 105, y + 52); }
-        else { ctx.fillStyle = '#6d6f78'; ctx.font = '12px sans-serif'; ctx.fillText('Vacant', 105, y + 52); }
+        ctx.fillText(roleText.slice(0, 45), 145, y + 55);
+        if (s.userId) { 
+            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 26px sans-serif'; 
+            ctx.fillText('@' + (s.userName || 'Joined').slice(0, 24), 145, y + 95); 
+        }
+        else { 
+            ctx.fillStyle = '#6d6f78'; ctx.font = 'bold 22px sans-serif'; 
+            ctx.fillText('Vacant', 145, y + 95); 
+        }
     }
     const buffer = canvas.toBuffer('image/png');
     rosterCache.set(cacheKey, buffer);
@@ -440,7 +445,8 @@ async function renderRosterBatches(event, deps) {
         const statusIcon = s.userId ? '✅' : (customEmoji || ROLE_EMOJIS[s.role] || '⚔️');
         const roleText = (ROLE_LABELS_SHORT[s.role] || s.role || '').toUpperCase();
         const weaponText = s.weapon ? displayWeapon(s.weapon) : '';
-        const userPart = s.userId ? ' - <@' + s.userId + '> (' + (s.userName || '') + ')' : '';
+        // เอาชื่อหลังแท็กออก - เหลือแค่ mention อย่างเดียวตามที่ขอ
+        const userPart = s.userId ? ' - <@' + s.userId + '>' : '';
         return statusIcon + ' ' + (i + 1) + '. ' + roleText + (weaponText ? ' - ' + weaponText : '') + userPart;
     });
     let rosterImg = null;
