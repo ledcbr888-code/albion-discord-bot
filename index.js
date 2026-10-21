@@ -2443,6 +2443,40 @@ function avaDataPointCount(data) {
     return d.totalChests + d.totalResources + d.totalDungeons;
 }
 
+function avaIdentityFallback(mapName) {
+    const name = String(mapName || '').trim() || 'Unknown';
+    try {
+        const lm = require('./ava-maps.js');
+        const tiers = lm.TIERS || lm.AVA_MAP_TIERS || {};
+        const keys = Object.keys(tiers);
+        const foundKey = keys.find(k => k.toLowerCase() === name.toLowerCase()) || name;
+        const tier = tiers[foundKey] || tiers[name] || 'T?';
+        return {
+            name: foundKey,
+            tier: tier,
+            mapImage: null,
+            totalChests: 0,
+            totalResources: 0,
+            totalDungeons: 0,
+            chests: [],
+            resources: [],
+            dungeons: []
+        };
+    } catch (e) {
+        return {
+            name: name,
+            tier: 'T?',
+            mapImage: null,
+            totalChests: 0,
+            totalResources: 0,
+            totalDungeons: 0,
+            chests: [],
+            resources: [],
+            dungeons: []
+        };
+    }
+}
+
 async function fetchAvaMapData(input) {
     const slug = normalizeAvaSlug(input);
     const urls = [
