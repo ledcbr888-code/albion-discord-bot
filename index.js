@@ -3952,16 +3952,16 @@ async function downloadAvaImageBuffer(data, mapName) {
     const GITHUB_BASE_RAW = 'https://raw.githubusercontent.com/ledcbr888-code/albion-discord-bot/main/avalon';
     const GITHUB_BASE_CDN = 'https://cdn.jsdelivr.net/gh/ledcbr888-code/albion-discord-bot@main/avalon';
 
-    // GitHub ONLY - รองรับ WebP ก่อน (เร็ว) fallback PNG
+    // GitHub ONLY - WebP optimized (84MB) - https://github.com/ledcbr888-code/albion-discord-bot/tree/main/avalon
     const githubCandidates = [
         `${GITHUB_BASE_RAW}/${encodeURIComponent(slugLower)}.webp`,
-        `${GITHUB_BASE_RAW}/${encodeURIComponent(slugLower)}.png`,
-        `${GITHUB_BASE_RAW}/${encodeURIComponent(slugOriginal)}.webp`,
-        `${GITHUB_BASE_RAW}/${encodeURIComponent(slugOriginal)}.png`,
         `${GITHUB_BASE_CDN}/${encodeURIComponent(slugLower)}.webp`,
-        `${GITHUB_BASE_CDN}/${encodeURIComponent(slugLower)}.png`,
+        `${GITHUB_BASE_RAW}/${encodeURIComponent(slugOriginal)}.webp`,
         `${GITHUB_BASE_CDN}/${encodeURIComponent(slugOriginal)}.webp`,
-        `${GITHUB_BASE_CDN}/${encodeURIComponent(slugOriginal)}.png`
+        `${GITHUB_BASE_RAW}/${encodeURIComponent(slugLower)}.png`,
+        `${GITHUB_BASE_RAW}/${encodeURIComponent(slugOriginal)}.png`,
+        `${GITHUB_BASE_CDN}/${encodeURIComponent(slugLower)}.png`,
+        `${GITHUB_BASE_CDN}/${encodeURIComponent(slugOriginal)}.png`,
     ];
 
     for (const url of githubCandidates) {
@@ -3991,8 +3991,10 @@ async function downloadAvaImageBuffer(data, mapName) {
         }
     }
 
-    // Local fallback (same machine, not external web)
+    // Local fallback - WebP first (now 84MB only)
     const localCandidates = [
+        path.join(__dirname, 'avalon', `${slugLower}.webp`),
+        path.join(__dirname, 'avalon', `${slugOriginal}.webp`),
         path.join(__dirname, 'avalon', `${slugLower}.png`),
         path.join(__dirname, 'avalon', `${slugOriginal}.png`),
     ];
@@ -4009,7 +4011,7 @@ async function downloadAvaImageBuffer(data, mapName) {
         } catch {}
     }
 
-    console.error('❌ [GitHub ONLY] Map image not found for ' + slugLower + ' - please upload to https://github.com/ledcbr888-code/albion-discord-bot/tree/main/avalon/' + slugLower + '.png');
+    console.error('❌ [GitHub ONLY] Map image not found for ' + slugLower + ' - please upload to https://github.com/ledcbr888-code/albion-discord-bot/tree/main/avalon/' + slugLower + '.webp');
     return null;
 }
 
