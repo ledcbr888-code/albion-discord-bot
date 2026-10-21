@@ -2443,40 +2443,6 @@ function avaDataPointCount(data) {
     return d.totalChests + d.totalResources + d.totalDungeons;
 }
 
-function avaIdentityFallback(mapName) {
-    const name = String(mapName || '').trim() || 'Unknown';
-    try {
-        const lm = require('./ava-maps.js');
-        const tiers = lm.TIERS || lm.AVA_MAP_TIERS || {};
-        const keys = Object.keys(tiers);
-        const foundKey = keys.find(k => k.toLowerCase() === name.toLowerCase()) || name;
-        const tier = tiers[foundKey] || tiers[name] || 'T?';
-        return {
-            name: foundKey,
-            tier: tier,
-            mapImage: null,
-            totalChests: 0,
-            totalResources: 0,
-            totalDungeons: 0,
-            chests: [],
-            resources: [],
-            dungeons: []
-        };
-    } catch (e) {
-        return {
-            name: name,
-            tier: 'T?',
-            mapImage: null,
-            totalChests: 0,
-            totalResources: 0,
-            totalDungeons: 0,
-            chests: [],
-            resources: [],
-            dungeons: []
-        };
-    }
-}
-
 async function fetchAvaMapData(input) {
     const slug = normalizeAvaSlug(input);
     const urls = [
@@ -3986,14 +3952,16 @@ async function downloadAvaImageBuffer(data, mapName) {
     const GITHUB_BASE_RAW = 'https://raw.githubusercontent.com/ledcbr888-code/albion-discord-bot/main/avalon';
     const GITHUB_BASE_CDN = 'https://cdn.jsdelivr.net/gh/ledcbr888-code/albion-discord-bot@main/avalon';
 
-    // GitHub ONLY - ตามที่คุณต้องการ: https://github.com/ledcbr888-code/albion-discord-bot/tree/main/avalon อย่างเดียว
+    // GitHub ONLY - รองรับ WebP ก่อน (เร็ว) fallback PNG
     const githubCandidates = [
-        `${GITHUB_BASE_RAW}/${encodeURIComponent(slugLower)}.png`,
-        `${GITHUB_BASE_RAW}/${encodeURIComponent(slugOriginal)}.png`,
-        `${GITHUB_BASE_CDN}/${encodeURIComponent(slugLower)}.png`,
-        `${GITHUB_BASE_CDN}/${encodeURIComponent(slugOriginal)}.png`,
         `${GITHUB_BASE_RAW}/${encodeURIComponent(slugLower)}.webp`,
+        `${GITHUB_BASE_RAW}/${encodeURIComponent(slugLower)}.png`,
+        `${GITHUB_BASE_RAW}/${encodeURIComponent(slugOriginal)}.webp`,
+        `${GITHUB_BASE_RAW}/${encodeURIComponent(slugOriginal)}.png`,
         `${GITHUB_BASE_CDN}/${encodeURIComponent(slugLower)}.webp`,
+        `${GITHUB_BASE_CDN}/${encodeURIComponent(slugLower)}.png`,
+        `${GITHUB_BASE_CDN}/${encodeURIComponent(slugOriginal)}.webp`,
+        `${GITHUB_BASE_CDN}/${encodeURIComponent(slugOriginal)}.png`
     ];
 
     for (const url of githubCandidates) {
