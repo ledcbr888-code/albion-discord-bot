@@ -3952,7 +3952,7 @@ async function downloadAvaImageBuffer(data, mapName) {
     const GITHUB_BASE_RAW = 'https://raw.githubusercontent.com/ledcbr888-code/albion-discord-bot/main/avalon';
     const GITHUB_BASE_CDN = 'https://cdn.jsdelivr.net/gh/ledcbr888-code/albion-discord-bot@main/avalon';
 
-    // GitHub ONLY - WebP optimized (84MB) - https://github.com/ledcbr888-code/albion-discord-bot/tree/main/avalon
+    // GitHub ONLY - WebP optimized 84MB - https://github.com/ledcbr888-code/albion-discord-bot/tree/main/avalon
     const githubCandidates = [
         `${GITHUB_BASE_RAW}/${encodeURIComponent(slugLower)}.webp`,
         `${GITHUB_BASE_CDN}/${encodeURIComponent(slugLower)}.webp`,
@@ -3991,7 +3991,7 @@ async function downloadAvaImageBuffer(data, mapName) {
         }
     }
 
-    // Local fallback - WebP first (now 84MB only)
+    // Local fallback - WebP first (84MB only)
     const localCandidates = [
         path.join(__dirname, 'avalon', `${slugLower}.webp`),
         path.join(__dirname, 'avalon', `${slugOriginal}.webp`),
@@ -4015,6 +4015,32 @@ async function downloadAvaImageBuffer(data, mapName) {
     return null;
 }
 
+function avaIdentityFallback(mapName) {
+    const name = (typeof normalizeAvaOcrMapName === 'function' ? normalizeAvaOcrMapName(mapName) : String(mapName||'').trim());
+    const slug = (typeof normalizeAvaSlug === 'function' ? normalizeAvaSlug(name) : String(name||'').toLowerCase());
+    let tier = 'T?';
+    try {
+        const localMaps = require('./ava-maps.js');
+        const tiers = localMaps.TIERS || localMaps.AVA_MAP_TIERS || {};
+        const keys = Object.keys(tiers);
+        const exact = tiers[name] || tiers[Object.keys(tiers).find(k => k.toLowerCase() === String(name).toLowerCase())] || tiers[Object.keys(tiers).find(k => k.toLowerCase() === String(slug).toLowerCase())];
+        if (exact) tier = exact;
+    } catch {}
+    const counts = {
+        'Green chest': 0, 'Blue chest': 0, 'Gold chest': 0,
+        Stone: 0, Wood: 0, Ore: 0, Hide: 0, Fiber: 0,
+        'Solo dungeon': 0, 'Group dungeon': 0
+    };
+    return {
+        slug, name, tier, layout: '', connection: '', counts,
+        totalChests: 0, totalResources: 0, totalDungeons: 0,
+        mapImage: `https://cdn.jsdelivr.net/gh/ledcbr888-code/albion-discord-bot@main/avalon/${encodeURIComponent(String(slug).toLowerCase())}.webp`,
+        sourceUrl: `https://cdn.jsdelivr.net/gh/ledcbr888-code/albion-discord-bot@main/avalon/${encodeURIComponent(String(slug).toLowerCase())}.webp`,
+        verifiedOnly: true
+    };
+}
+// alias for typo that existed in some deploys
+function avalIdentityFallback(mapName) { return avaIdentityFallback(mapName); }
 
 async function withAvaTimeout(promise, timeoutMs, label) {
     let timer;
