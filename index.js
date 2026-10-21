@@ -689,6 +689,25 @@ async function fetchAlbionBBPageFallback(matchId) {
     }
 }
 
+// Share battle lookups between tracked guilds so the same Match ID does not
+// trigger duplicate API bursts during a single polling cycle.
+const battleFetchInFlight = new Map();
+const battleFetchFailureUntil = new Map();
+let officialApiRateLimitedUntil = 0;
+
+function sleep(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function retryAfterMs(err) {
+    const raw = err?.response?.headers?.['retry-after'] ?? err?.response?.headers?.['Retry-After'];
+    if (raw == null) return 0;
+    const seconds = Number(raw);
+    if (Number.isFinite(seconds)) return Math.max(0, Math.min(15000, seconds * 1000));
+    const dateMs = Date.parse(String(raw));
+    return Number.isFinite(dateMs) ? Math.max(0, Math.min(15000, dateMs - Date.now())) : 0;
+}
+
 async function fetchOfficialBattleUncached(matchId) {
     // A 429 is generally shared across regional endpoints. Pause official requests
     // globally rather than retrying every region for every candidate battle.
