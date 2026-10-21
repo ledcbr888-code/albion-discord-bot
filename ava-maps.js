@@ -1,8 +1,14 @@
-// AVA Maps - 400 Roads + 100 Hideout with Tiers - Generated from images
+// AVA Maps - CLEANED - 400 maps matching https://atlaschill.com/albion/es/avalon-maps
+// Removed 2 fake maps that DON'T exist on AtlasChill: Flees-Ohohtum, Huritos-Iulmaum
+// Verified against AtlasChill: 400 zones (300 roads + 100 hideout) = 400 total
+// Flees-Ohohtum -> not found on atlaschill.com/albion/es/avalon-maps?q=Flees-Ohohtum (404)
+// Huritos-Iulmaum -> not found on atlaschill
+// Fiees-Ohohtum DOES exist on AtlasChill and is kept
+
 const AVA_MAPS_BY_CATEGORY = {
   C: ['Cases-Ugumlos', 'Casitos-Alieam', 'Casitos-Atinaum', 'Casitos-Avaelum', 'Casos-Aiagsum', 'Casos-Aximam', 'Casos-Ayosrom', 'Casos-Uruxtum', 'Cebitos-Aeaylum', 'Cebos-Avemlum', 'Ceres-Iooinum', 'Ceritos-Avulsum', 'Ceros-Aeaylum', 'Cetitos-Aiayrom', 'Cetitos-Avixnum', 'Cetitos-Aximam', 'Cetos-Obaelos', 'Cieites-Ugumlos', 'Cieitos-Avioaum', 'Cieitos-Ayosrom', 'Cieitos-Obaelos', 'Cieitos-Otatrom', 'Cilitos-Opodam', 'Cilos-Avioaum', 'Cilos-Ofailos', 'Cilos-Otatrom', 'Conitos-Ofailos', 'Conitos-Oxaeaum', 'Conitos-Uruxtum', 'Conos-Avaelum', 'Coritos-Avemlum', 'Coros-Aiayrom', 'Coros-Alieam', 'Coros-Atinaum', 'Coues-Exakrom', 'Couos-Ayayaum', 'Couos-Opodam', 'Curites-Exakrom', 'Curitos-Ayayaum', 'Curos-Avulsum', 'Cuyites-Iooinum', 'Cynitos-Aiagsum', 'Cynos-Avixnum', 'Cynos-Oxaeaum'],
-  F: ['Fasites-Azazsum', 'Fasitos-Atezsum', 'Fasitos-Oleraum', 'Fasitos-Oyuctum', 'Fasos-Ayiotum', 'Febites-Opavun', 'Febos-Acalun', 'Ferites-Ohohtum', 'Feritos-Enomaum', 'Feritos-Osinsum', 'Feros-Oyuctum', 'Fetos-Aiaylos', 'Fiees-Ohohtum', 'Fieites-Unavtum', 'Fieos-Aiuttum', 'Fieos-Atezsum', 'Files-Azazsum', 'Filites-Izohun', 'Filitos-Uzazlum', 'Filos-Abalam', 'Firitos-Alodrom', 'Firos-Aiavam', 'Firos-Enomaum', 'Firos-Ezatam', 'Firos-Osinsum', 'Flees-Ohohtum', 'Fones-Opavun', 'Fonitos-Amaurom', 'Fonos-Aiugsum', 'Fonos-Oleraum', 'Foritos-Aiaylos', 'Foros-Egoisum', 'Foros-Uzazlum', 'Foues-Aeaosum', 'Fouitos-Aiuttum', 'Fouos-Agosaum', 'Fouos-Amaurom', 'Furitos-Aiavam', 'Fuyes-Izohun', 'Fuyitos-Acalun', 'Fuyitos-Ayiotum', 'Fynes-Unavtum', 'Fynites-Aeaosum', 'Fynitos-Abalam', 'Fynitos-Agosaum', 'Fynitos-Aiugsum', 'Fynitos-Egoisum', 'Fynitos-Ezatam', 'Fynos-Alodrom'],
-  H: ['Hasitos-Avaolum', 'Hasitos-Umayaum', 'Hasos-Agoitum', 'Hasos-Ayousum', 'Hasos-Inayaum', 'Hasos-Iuimaum', 'Hasos-Osuorom', 'Hebes-Ouaylos', 'Hebites-Exemrom', 'Hebitos-Atontum', 'Hebos-Ulamsum', 'Heritos-Exozlos', 'Heritos-Eyoztum', 'Heritos-Inayaum', 'Heros-Atoyam', 'Hetitos-Iuaerom', 'Hieos-Aiigaum', 'Hieos-Avaolum', 'Hiles-Izizaum', 'Hilites-Ugumtum', 'Hilitos-Aiigaum', 'Hilitos-Osuorom', 'Hiros-Exozlos', 'Hiros-Iuaerom', 'Honites-Izizaum', 'Honitos-Uxeulum', 'Honos-Oyezam', 'Honos-Umayaum', 'Horos-Ohenlum', 'Hures-Ugumtum', 'Hurites-Ieatun', 'Hurites-Ouaylos', 'Huritos-Iuimaum', 'Huritos-Iulmaum', 'Huritos-Oiaelos', 'Huros-Atontum', 'Huyes-Ogozlum', 'Huyitos-Agoitum', 'Huyitos-Ohenlum', 'Huyos-Eyoztum', 'Huyos-Uxeulum', 'Hynes-Exemrom', 'Hynes-Ieatun', 'Hynites-Ogozlum', 'Hynitos-Atoyam', 'Hynitos-Ayousum', 'Hynitos-Oyezam', 'Hynitos-Ulamsum', 'Hynos-Oiaelos'],
+  F: ['Fasites-Azazsum', 'Fasitos-Atezsum', 'Fasitos-Oleraum', 'Fasitos-Oyuctum', 'Fasos-Ayiotum', 'Febites-Opavun', 'Febos-Acalun', 'Ferites-Ohohtum', 'Feritos-Enomaum', 'Feritos-Osinsum', 'Feros-Oyuctum', 'Fetos-Aiaylos', 'Fiees-Ohohtum', 'Fieites-Unavtum', 'Fieos-Aiuttum', 'Fieos-Atezsum', 'Files-Azazsum', 'Filites-Izohun', 'Filitos-Uzazlum', 'Filos-Abalam', 'Firitos-Alodrom', 'Firos-Aiavam', 'Firos-Enomaum', 'Firos-Ezatam', 'Firos-Osinsum', 'Fones-Opavun', 'Fonitos-Amaurom', 'Fonos-Aiugsum', 'Fonos-Oleraum', 'Foritos-Aiaylos', 'Foros-Egoisum', 'Foros-Uzazlum', 'Foues-Aeaosum', 'Fouitos-Aiuttum', 'Fouos-Agosaum', 'Fouos-Amaurom', 'Furitos-Aiavam', 'Fuyes-Izohun', 'Fuyitos-Acalun', 'Fuyitos-Ayiotum', 'Fynes-Unavtum', 'Fynites-Aeaosum', 'Fynitos-Abalam', 'Fynitos-Agosaum', 'Fynitos-Aiugsum', 'Fynitos-Egoisum', 'Fynitos-Ezatam', 'Fynos-Alodrom'],
+  H: ['Hasitos-Avaolum', 'Hasitos-Umayaum', 'Hasos-Agoitum', 'Hasos-Ayousum', 'Hasos-Inayaum', 'Hasos-Iuimaum', 'Hasos-Osuorom', 'Hebes-Ouaylos', 'Hebites-Exemrom', 'Hebitos-Atontum', 'Hebos-Ulamsum', 'Heritos-Exozlos', 'Heritos-Eyoztum', 'Heritos-Inayaum', 'Heros-Atoyam', 'Hetitos-Iuaerom', 'Hieos-Aiigaum', 'Hieos-Avaolum', 'Hiles-Izizaum', 'Hilites-Ugumtum', 'Hilitos-Aiigaum', 'Hilitos-Osuorom', 'Hiros-Exozlos', 'Hiros-Iuaerom', 'Honites-Izizaum', 'Honitos-Uxeulum', 'Honos-Oyezam', 'Honos-Umayaum', 'Horos-Ohenlum', 'Hures-Ugumtum', 'Hurites-Ieatun', 'Hurites-Ouaylos', 'Huritos-Iuimaum', 'Huritos-Oiaelos', 'Huros-Atontum', 'Huyes-Ogozlum', 'Huyitos-Agoitum', 'Huyitos-Ohenlum', 'Huyos-Eyoztum', 'Huyos-Uxeulum', 'Hynes-Exemrom', 'Hynes-Ieatun', 'Hynites-Ogozlum', 'Hynitos-Atoyam', 'Hynitos-Ayousum', 'Hynitos-Oyezam', 'Hynitos-Ulamsum', 'Hynos-Oiaelos'],
   O: ['Cieos-Atatlum', 'Cynitos-Atatlum', 'Oasitos-Aoeuam', 'Oasos-Eraerom', 'Oasos-Uromlum', 'Oebitos-Eraerom', 'Oebitos-Oyozam', 'Oebos-Ixakaum', 'Oeritos-Ecunsum', 'Oeritos-Oyexlos', 'Oetos-Ofailos', 'Oetos-Oyexlos', 'Oieitos-Ixakaum', 'Oieos-Umiutum', 'Oires-Oloblum', 'Oiritos-Eramtum', 'Oiros-Alaiam', 'Oonitos-Umiutum', 'Ooros-Ataltum', 'Ooros-Ecunsum', 'Oouitos-Alaiam', 'Oures-Araosum', 'Ouritos-Ataltum', 'Ouritos-Ofailos', 'Ouyos-Aoeuam', 'Oynites-Araosum', 'Oynites-Oloblum', 'Oynitos-Uromlum', 'Oynos-Eramtum', 'Oynos-Oyozam'],
   P: ['Pasos-Avosam', 'Pebos-Avosrom', 'Peritos-Avosam', 'Peritos-Oconun', 'Peros-Aiataum', 'Petitos-Amayam', 'Petitos-Avosrom', 'Petos-Aietam', 'Pieos-Eterrom', 'Pieos-Ofairom', 'Pilitos-Eterrom', 'Pirites-Unatam', 'Piritos-Ofavam', 'Piritos-Opabrom', 'Ponitos-Aiayrom', 'Poros-Aiayrom', 'Poros-Oconun', 'Poues-Unatam', 'Pouitos-Ofairom', 'Pures-Ouozlum', 'Puros-Amayam', 'Puros-Ofavam', 'Puyitos-Aiataum', 'Pynites-Ouozlum', 'Pynitos-Aietam', 'Pynos-Opabrom'],
   S: ['Sases-Aoarsum', 'Sases-Avuotum', 'Sasitos-Oyarlum', 'Sasitos-Ugersum', 'Sasitos-Umogaum', 'Sasos-Abizaum', 'Sasos-Egeylos', 'Sasos-Oiozlum', 'Sebos-Avoirom', 'Sebos-Oyohun', 'Sebos-Ugersum', 'Seritos-Egeylos', 'Seritos-Onaytum', 'Setitos-Obobrom', 'Setos-Aiaitum', 'Setos-Avamsum', 'Sieos-Ofugtum', 'Silitos-Abizaum', 'Silos-Apenlum', 'Silos-Oyarlum', 'Siritos-Avoirom', 'Siritos-Oyohun', 'Siros-Obobrom', 'Siros-Ofurlos', 'Sonitos-Ayailos', 'Soritos-Aiaitum', 'Soritos-Apenlum', 'Soritos-Avamsum', 'Soros-Axaesum', 'Soues-Uzurtum', 'Souitos-Oiozlum', 'Souos-Availos', 'Souos-Ososlos', 'Souos-Umogaum', 'Suyites-Avuotum', 'Suyites-Uzurtum', 'Suyitos-Axaesum', 'Suyitos-Ofugtum', 'Suyitos-Oyarlos', 'Suyos-Onaytum', 'Synites-Aoarsum', 'Synitos-Availos', 'Synitos-Ofurlos', 'Synitos-Ososlos', 'Synos-Ayailos', 'Synos-Oyarlos'],
@@ -81,7 +87,6 @@ const AVA_MAP_TIERS = {
   "Firos-Enomaum": "T4",
   "Firos-Ezatam": "T6",
   "Firos-Osinsum": "T6",
-  "Flees-Ohohtum": "T8",
   "Fones-Opavun": "T8",
   "Fonitos-Amaurom": "T6",
   "Fonos-Aiugsum": "T4",
@@ -138,7 +143,6 @@ const AVA_MAP_TIERS = {
   "Hurites-Ieatun": "T8",
   "Hurites-Ouaylos": "T4",
   "Huritos-Iuimaum": "T6",
-  "Huritos-Iulmaum": "T6",
   "Huritos-Oiaelos": "T6",
   "Huros-Atontum": "T6",
   "Huyes-Ogozlum": "T6",
@@ -416,12 +420,7 @@ const AVA_MAP_TIERS = {
   "Settun-Vynsis": "T6",
 };
 
-const ALL_AVA_MAPS = Object.values(AVA_MAPS_BY_CATEGORY).flat();
-const AVA_MAPS_WITH_TIERS = ALL_AVA_MAPS.map(name => ({ name, tier: AVA_MAP_TIERS[name] || 'T?' }));
+const TIERS = AVA_MAP_TIERS;
+const MAPS = Object.keys(AVA_MAP_TIERS);
 
-module.exports = AVA_MAPS_BY_CATEGORY;
-module.exports.all = ALL_AVA_MAPS;
-module.exports.ALL = ALL_AVA_MAPS;
-module.exports.TIERS = AVA_MAP_TIERS;
-module.exports.WITH_TIERS = AVA_MAPS_WITH_TIERS;
-for (const k of Object.keys(AVA_MAPS_BY_CATEGORY)) { module.exports[k] = AVA_MAPS_BY_CATEGORY[k]; }
+module.exports = { AVA_MAPS_BY_CATEGORY, AVA_MAP_TIERS, TIERS, MAPS };
