@@ -529,6 +529,10 @@ function extractMainHandInfo(obj) {
 }
 
 async function fetchAlbionBBWeaponMap(matchId) {
+    const cacheKey = `bb:${matchId}`;
+    const cached = weaponMapCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < 5*60*1000) { console.log(`♻️ Using cached BB weapon map for ${matchId}`); return cached.map; }
+
     const browserHeaders = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'application/json, text/plain, */*',
@@ -567,6 +571,7 @@ async function fetchAlbionBBWeaponMap(matchId) {
             }
             if (map.size) {
                 console.log(`⚡ AlbionBB weapon map via cloudscraper: ${map.size} weapons for ${matchId}`);
+                weaponMapCache.set(cacheKey, { map, ts: Date.now() });
                 return map;
             }
         } catch (err) {
@@ -582,6 +587,10 @@ async function fetchAlbionBBWeaponMap(matchId) {
 }
 
 async function fetchOfficialBattleWeaponMap(matchId) {
+    const cacheKey = `official:${matchId}`;
+    const cached = weaponMapCache.get(cacheKey);
+    if (cached && Date.now() - cached.ts < 5*60*1000) return cached.map;
+
     const baseUrls = getApiUrls(matchId).map(url => url.replace(/\/battles\//i, '/events/battle/'));
     const map = new Map();
     const maxPages = 12;
@@ -635,6 +644,7 @@ async function fetchOfficialBattleWeaponMap(matchId) {
         }
     }
 
+        weaponMapCache.set(cacheKey, { map, ts: Date.now() });
     return map;
 }
 
@@ -817,6 +827,8 @@ function drawRoundRect(ctx, x, y, w, h, r) {
 }
 
 const weaponIconCache = new Map();
+const weaponMapCache = new Map(); // cache 5 min for weapon maps
+
 
 async function loadAlbionWeaponIcon(weapon, quality = 1) {
     const id = normalizeAlbionItemId(weapon);
@@ -2195,7 +2207,22 @@ async function checkAutoBattlesForGuild() {
                     } else {
                         await channel.send({ content: alertText + '\n' + (result.payload.content || '') });
                     }
-                    console.log(`✅ Auto-Battle report send succeeded for Match ID ${latestMatchId} in channel ${config.channelId}.`);
+                    // Calculate report delay
+                    let delayText = '';
+                    try {
+                        const bt = officialBattle?.startTime || officialBattle?.timestamp || officialBattle?.start || null;
+                        if (bt) {
+                            const battleMs = new Date(bt).getTime();
+                            if (!isNaN(battleMs)) {
+                                const diffSec = Math.max(0, Math.floor((Date.now() - battleMs)/1000));
+                                const mins = Math.floor(diffSec/60);
+                                const secs = diffSec%60;
+                                delayText = ` | ⏱️ ดีเลย์ ${mins}นาที ${secs}วิ (ไฟต์เกิด ${new Date(battleMs).toISOString()})`;
+                                if (mins >= 10) delayText += ' ⚠️ ช้า';
+                            }
+                        }
+                    } catch {}
+                    console.log(`✅ Auto-Battle report send succeeded for Match ID ${latestMatchId} in channel ${config.channelId}.${delayText}`);
                 } else {
                     console.log(`ℹ️ Match ID ${latestMatchId} checked below threshold; marking handled.`);
                 }
