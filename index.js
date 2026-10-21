@@ -529,28 +529,23 @@ function extractMainHandInfo(obj) {
 }
 
 async function fetchAlbionBBWeaponMap(matchId) {
-    const browserHeaders = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9',
-        'Referer': 'https://east.albionbb.com/',
-        'Origin': 'https://east.albionbb.com'
-    };
     const urls = [
         `https://api.albionbb.com/asia/battles/kills?ids=${encodeURIComponent(matchId)}`,
         `https://api.albionbb.com/asia/battles/kills?ids%5B%5D=${encodeURIComponent(matchId)}`
     ];
+
     for (const url of urls) {
         try {
-            let data;
-            try {
-                data = await cloudscraper.get({ uri: url, timeout: 15000, headers: browserHeaders, json: true });
-            } catch (csErr) {
-                const response = await axios.get(url, { timeout: 15000, headers: browserHeaders });
-                data = response.data;
-            }
-            const events = Array.isArray(data) ? data : Array.isArray(data?.events) ? data.events : Array.isArray(data?.kills) ? data.kills : [];
+            const response = await axios.get(url, {
+                timeout: 15000,
+                headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' }
+            });
+            const data = response.data;
+            const events = Array.isArray(data) ? data :
+                Array.isArray(data?.events) ? data.events :
+                Array.isArray(data?.kills) ? data.kills : [];
             if (!events.length) continue;
+
             const map = new Map();
             const addEntity = (entity) => {
                 if (!entity || typeof entity !== 'object') return;
@@ -559,20 +554,21 @@ async function fetchAlbionBBWeaponMap(matchId) {
                 const info = extractMainHandInfo(entity);
                 if (info) map.set(name.toLowerCase(), info);
             };
+
             for (const event of events) {
                 addEntity(event.Killer || event.killer);
                 addEntity(event.Victim || event.victim);
-                const groups = [...(Array.isArray(event.Participants) ? event.Participants : []), ...(Array.isArray(event.GroupMembers) ? event.GroupMembers : [])];
+                const groups = [
+                    ...(Array.isArray(event.Participants) ? event.Participants : []),
+                    ...(Array.isArray(event.GroupMembers) ? event.GroupMembers : [])
+                ];
                 groups.forEach(addEntity);
             }
-            if (map.size) {
-                console.log(`⚡ AlbionBB weapon map via cloudscraper: ${map.size} weapons for ${matchId}`);
-                return map;
-            }
+            if (map.size) return map;
         } catch (err) {
-            const status = err?.response?.status || err?.statusCode;
+            const status = err?.response?.status;
             if (status === 403 || status === 401) {
-                console.warn(`⚠️ AlbionBB weapon fallback blocked (HTTP ${status}); will use Official weapon map`);
+                console.warn(`⚠️ AlbionBB weapon fallback blocked (HTTP ${status}); skipping remaining AlbionBB URL variants.`);
                 break;
             }
             console.warn('⚠️ AlbionBB weapon fallback failed:', err.message);
@@ -639,52 +635,73 @@ async function fetchOfficialBattleWeaponMap(matchId) {
 }
 
 async function fetchAlbionBBBattleFallback(matchId) {
-    const browserHeaders = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Referer': 'https://east.albionbb.com/',
-        'Origin': 'https://east.albionbb.com'
-    };
+    // AlbionBB can publish a battle before the official GameInfo API indexes it.
+    // Try its public battle-summary + kill-event endpoints; never treat a 403/empty
+    // response as a valid report and never mark the battle processed on fallback failure.
+    const base = 'https://api.albionbb.com/asia/battles';
+    let summary = null;
     try {
-        const base = 'https://api.albionbb.com/asia/battles';
-        let data;
-        try {
-            data = await cloudscraper.get({ uri: `${base}/${encodeURIComponent(matchId)}`, timeout: 15000, headers: browserHeaders, json: true });
-        } catch (csErr) {
-            const response = await axios.get(`${base}/${encodeURIComponent(matchId)}`, { timeout: 12000, headers: browserHeaders });
-            data = response.data;
-        }
-        if (!data) return null;
-        return data;
+        const response = await axios.get(base, {
+            params: { search: String(matchId), minPlayers: 1, page: 1 },
+            timeout: 20000,
+            headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' }
+        });
+        const rows = Array.isArray(response.data) ? response.data :
+            (Array.isArray(response.data?.battles) ? response.data.battles : []);
+        summary = rows.find(row => String(row.albionId ?? row.id ?? row.battleId ?? '') === String(matchId)) || null;
     } catch (err) {
         console.warn(`⚠️ AlbionBB battle-summary fallback failed for ${matchId}: ${err.response?.status || err.message}`);
-        return null;
     }
-}
-
-async function fetchAlbionBBPageFallback(matchId) {
-    const url = `https://east.albionbb.com/battles/${encodeURIComponent(matchId)}`;
     try {
-        let html;
-        try {
-            html = String(await cloudscraper.get({ uri: url, timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/120 Safari/537.36', Accept: 'text/html', Referer: 'https://east.albionbb.com/' } }) || '');
-        } catch (csErr) {
-            const response = await axios.get(url, { timeout: 15000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'text/html', Referer: 'https://east.albionbb.com/' } });
-            html = String(response.data || '');
+        const response = await axios.get(`https://api.albionbb.com/asia/battles/kills?ids=${encodeURIComponent(matchId)}`, {
+            timeout: 20000,
+            headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' }
+        });
+        const events = Array.isArray(response.data) ? response.data :
+            (Array.isArray(response.data?.events) ? response.data.events : []);
+        if (!events.length) {
+            console.warn(`⚠️ AlbionBB returned no kill events for ${matchId}; cannot build a safe fallback report.`);
+            return null;
         }
-        if (!html) return null;
-        const match = html.match(/<script[^>]*id=["']__NEXT_DATA__["'][^>]*>(.*?)<\/script>/s);
-        if (match) {
-            try {
-                const json = JSON.parse(match[1]);
-                const props = json?.props?.pageProps?.battle;
-                if (props) return props;
-            } catch {}
+        const players = new Map();
+        const guilds = new Map();
+        const touch = (entity) => {
+            if (!entity || typeof entity !== 'object') return null;
+            const name = String(entity.Name ?? entity.name ?? '').trim();
+            if (!name) return null;
+            const guildName = String(entity.GuildName ?? entity.guildName ?? entity.Guild?.Name ?? entity.guild?.name ?? '').trim();
+            const key = name.toLowerCase();
+            if (!players.has(key)) players.set(key, {
+                name, guildName, kills: 0, deaths: 0, killFame: 0,
+                MainHand: entity.MainHand ?? entity.mainHand ?? entity.Equipment?.MainHand ?? entity.equipment?.MainHand ?? null
+            });
+            const p = players.get(key);
+            if (!p.guildName && guildName) p.guildName = guildName;
+            if (guildName && !guilds.has(guildName.toLowerCase())) guilds.set(guildName.toLowerCase(), { name: guildName, kills: 0, deaths: 0, killFame: 0 });
+            return { p, g: guildName ? guilds.get(guildName.toLowerCase()) : null };
+        };
+        for (const event of events) {
+            const killer = event.Killer ?? event.killer;
+            const victim = event.Victim ?? event.victim;
+            const k = touch(killer), v = touch(victim);
+            const fame = Number(event.TotalVictimKillFame ?? event.totalVictimKillFame ?? event.KillFame ?? event.killFame ?? victim?.KillFame ?? victim?.killFame ?? 0) || 0;
+            if (k) { k.p.kills++; if (k.g) k.g.kills++; }
+            if (v) { v.p.deaths++; if (v.g) v.g.deaths++; }
+            if (k) { k.p.killFame += fame; if (k.g) k.g.killFame += fame; }
         }
-        console.log(`✅ Using structured data from AlbionBB battle page for Match ID ${matchId}.`);
-        return { html };
+        const guildObj = Object.fromEntries([...guilds.values()].map((g, i) => [String(i), g]));
+        const playerObj = Object.fromEntries([...players.values()].map((p, i) => [String(i), p]));
+        return {
+            id: String(matchId),
+            startTime: summary?.startedAt ?? summary?.startTime ?? events[0]?.TimeStamp ?? events[0]?.timestamp ?? null,
+            players: playerObj,
+            guilds: guildObj,
+            alliances: {},
+            totalKills: summary?.totalKills ?? events.length,
+            totalFame: summary?.totalFame ?? [...players.values()].reduce((sum, p) => sum + p.killFame, 0)
+        };
     } catch (err) {
-        console.warn(`⚠️ AlbionBB battle page fallback failed for ${matchId}: ${err.response?.status || err.message}`);
+        console.warn(`⚠️ AlbionBB kill-event fallback failed for ${matchId}: ${err.response?.status || err.message}`);
         return null;
     }
 }
@@ -693,6 +710,7 @@ async function fetchAlbionBBPageFallback(matchId) {
 // trigger duplicate API bursts during a single polling cycle.
 const battleFetchInFlight = new Map();
 const battleFetchFailureUntil = new Map();
+// GameInfo rate limits are shared across battle IDs, so back off globally.
 let officialApiRateLimitedUntil = 0;
 
 function sleep(ms) {
@@ -706,6 +724,79 @@ function retryAfterMs(err) {
     if (Number.isFinite(seconds)) return Math.max(0, Math.min(15000, seconds * 1000));
     const dateMs = Date.parse(String(raw));
     return Number.isFinite(dateMs) ? Math.max(0, Math.min(15000, dateMs - Date.now())) : 0;
+}
+
+function findBattleObjectInJson(value, matchId, depth = 0, visited = { count: 0 }) {
+    if (!value || typeof value !== 'object' || depth > 9 || visited.count++ > 12000) return null;
+    if (Array.isArray(value)) {
+        for (const item of value) {
+            const found = findBattleObjectInJson(item, matchId, depth + 1, visited);
+            if (found) return found;
+        }
+        return null;
+    }
+    const id = String(value.id ?? value.Id ?? value.albionId ?? value.battleId ?? value.BattleId ?? '');
+    const players = value.players ?? value.Players ?? value.participants ?? value.Participants;
+    const guilds = value.guilds ?? value.Guilds;
+    const isCollection = x => Array.isArray(x) || (x && typeof x === 'object');
+    if (isCollection(players) && isCollection(guilds) && (!id || id === String(matchId))) {
+        const playerValues = Array.isArray(players) ? players : Object.values(players);
+        const guildValues = Array.isArray(guilds) ? guilds : Object.values(guilds);
+        if (playerValues.length && guildValues.length) {
+            return {
+                ...value,
+                id: String(matchId),
+                players: Array.isArray(players) ? Object.fromEntries(players.map((p, i) => [String(i), p])) : players,
+                guilds: Array.isArray(guilds) ? Object.fromEntries(guilds.map((g, i) => [String(i), g])) : guilds
+            };
+        }
+    }
+    for (const child of Object.values(value)) {
+        const found = findBattleObjectInJson(child, matchId, depth + 1, visited);
+        if (found) return found;
+    }
+    return null;
+}
+
+async function fetchAlbionBBPageFallback(matchId) {
+    const url = `https://east.albionbb.com/battles/${encodeURIComponent(matchId)}`;
+    const headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36',
+        Accept: 'text/html,application/xhtml+xml,application/json;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.9',
+        Referer: 'https://east.albionbb.com/'
+    };
+    let html = '';
+    try {
+        html = String(await cloudscraper.get({ uri: url, timeout: 18000, headers }));
+    } catch (err) {
+        try {
+            const response = await axios.get(url, { timeout: 18000, headers, validateStatus: status => status >= 200 && status < 400 });
+            html = String(response.data || '');
+        } catch (fallbackErr) {
+            console.warn(`⚠️ AlbionBB battle page fallback failed for ${matchId}: ${fallbackErr.response?.status || fallbackErr.message || err.message}`);
+            return null;
+        }
+    }
+    if (!html || html.length < 100) return null;
+    const $ = cheerio.load(html);
+    const candidates = [];
+    $('script[type="application/json"], script[type="application/ld+json"], script#__NEXT_DATA__, script').each((_, node) => {
+        const raw = $(node).html();
+        if (!raw || raw.length < 2 || raw.length > 5000000) return;
+        const trimmed = raw.trim();
+        if (!(trimmed.startsWith('{') || trimmed.startsWith('['))) return;
+        try { candidates.push(JSON.parse(trimmed)); } catch (_) {}
+    });
+    for (const candidate of candidates) {
+        const battle = findBattleObjectInJson(candidate, matchId);
+        if (battle) {
+            console.log(`✅ Using structured data from AlbionBB battle page for Match ID ${matchId}.`);
+            return battle;
+        }
+    }
+    console.warn(`⚠️ AlbionBB battle page loaded for ${matchId}, but no structured participant/guild data was exposed.`);
+    return null;
 }
 
 async function fetchOfficialBattleUncached(matchId) {
@@ -1904,23 +1995,6 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
         ? `🔗 **Battle Link:** <${battleUrl}>\n🖼️ **Battle Report:** รายงานแบบรูปภาพด้านล่าง`
         : report;
 
-    // Calculate delay for logging (battle start vs now)
-    let delayMinutes = null;
-    try {
-        if (battleTime) {
-            const startMs = new Date(battleTime).getTime();
-            if (!isNaN(startMs)) {
-                delayMinutes = (Date.now() - startMs) / 60000;
-                const delayStr = delayMinutes < 60 ? `${delayMinutes.toFixed(1)} min` : `${(delayMinutes/60).toFixed(1)} hr`;
-                console.log(`⏱️ Battle ${matchId} delay check: started ${battleTime}, now reporting after ${delayStr} (${delayMinutes.toFixed(1)} min)`);
-                // Special log for the requested battle ID 522119203
-                if (String(matchId) === '522119203') {
-                    console.log(`🎯 TARGET BATTLE 522119203 - Delay: ${delayMinutes.toFixed(1)} minutes | Started: ${battleTime} | Reported: ${new Date().toISOString()}`);
-                }
-            }
-        }
-    } catch {}
-
     return {
         matchId,
         totalKills,
@@ -1928,8 +2002,6 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
         totalFame,
         guildTotalFrames,
         battleUrl,
-        battleTime,
-        delayMinutes,
         payload: { content: responseContent, files: attachments }
     };
 }
@@ -2018,61 +2090,68 @@ async function fetchGuildRecentBattles(guildOrConfig) {
     if (!targetGuildId && !targetGuild) return null;
     let lastError = null;
 
-    const browserHeaders = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'application/json, text/plain, */*',
-        'Accept-Language': 'en-US,en;q=0.9,th;q=0.8',
-        'Referer': 'https://east.albionbb.com/',
-        'Origin': 'https://east.albionbb.com'
-    };
-
-    // 1. FASTEST: AlbionBB API via cloudscraper (bypass 403) - 2-3 min real-time
+    // FAST PATH: AlbionBB API First - real-time like AlbionBB bot (2-3 min after battle)
+    // This is how AlbionBB bot does it - live kill feed, not waiting for Official aggregation
     try {
-        const params = new URLSearchParams({ limit: '20', sort: 'recent', minPlayers: '1' });
-        if (targetGuild) params.set('search', targetGuild);
-        const bbApiUrl = `https://api.albionbb.com/asia/battles?${params.toString()}`;
-        let data;
-        try {
-            data = await cloudscraper.get({ uri: bbApiUrl, timeout: 15000, headers: browserHeaders, json: true });
-        } catch (csErr) {
-            const response = await axios.get(bbApiUrl, { timeout: 10000, headers: browserHeaders, params: { limit: 20, sort: 'recent', minPlayers: 1, search: targetGuild || undefined } });
-            data = response.data;
-        }
-        const rows = Array.isArray(data) ? data : (Array.isArray(data?.battles) ? data.battles : []);
-        const unique = [...new Set(rows.map(row => String(row?.albionId ?? row?.id ?? row?.battleId ?? '')).filter(id => /^\d+$/.test(id)))];
+        const bbApiUrl = 'https://api.albionbb.com/asia/battles';
+        const params = { limit: 20, sort: 'recent', minPlayers: 1 };
+        if (targetGuild) params.search = targetGuild;
+        const response = await axios.get(bbApiUrl, {
+            timeout: 10000,
+            headers: { 'User-Agent': 'Mozilla/5.0 (AlbionBot Fast)', Accept: 'application/json' },
+            params
+        });
+        const rows = Array.isArray(response.data) ? response.data : (Array.isArray(response.data?.battles) ? response.data.battles : []);
+        const unique = [...new Set(rows
+            .map(row => String(row?.albionId ?? row?.id ?? row?.battleId ?? ''))
+            .filter(id => /^\d+$/.test(id)))];
         if (unique.length) {
-            console.log(`⚡ FAST AlbionBB API via cloudscraper returned ${unique.length} battles for ${targetGuild || targetGuildId}`);
+            console.log(`⚡ FAST AlbionBB API returned ${unique.length} battle(s) for ${targetGuild || targetGuildId} - ${unique[0]}`);
             return unique;
         }
     } catch (e) {
         lastError = e;
-        console.warn(`⚠️ AlbionBB API blocked ${e.response?.status || e.message} -> fallback to Official`);
+        console.warn(`⚠️ FAST AlbionBB API failed for ${targetGuild}: ${e.response?.status || e.message} -> falling back to Official`);
     }
 
-    // 2. RELIABLE: Official API - 100% no block
+    // SECOND: Official Gameinfo Asia - source of truth but slower (5-15 min delay)
     if (targetGuildId) {
+        const apiUrl = 'https://gameinfo-sgp.albiononline.com/api/gameinfo/battles';
         try {
-            const apiUrl = 'https://gameinfo-sgp.albiononline.com/api/gameinfo/battles';
             const response = await axios.get(apiUrl, {
-                timeout: 12000,
+                timeout: 15000,
                 headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
-                params: { range: 'week', offset: 0, limit: 25, sort: 'recent', guildId: targetGuildId }
+                params: { range: 'week', offset: 0, limit: 30, sort: 'recent', guildId: targetGuildId }
             });
             const rows = Array.isArray(response.data) ? response.data : [];
             const unique = [...new Set(rows.map(row => row?.id ?? row?.albionId ?? row?.battleId).filter(id => /^\d+$/.test(String(id))).map(String))];
             if (unique.length) {
-                console.log(`✅ Official API (reliable) ${targetGuildId} returned ${unique.length} battles`);
+                console.log(`✅ Official Gameinfo Asia Guild ID ${targetGuildId} (${targetGuild || 'unknown'}) returned ${unique.length} Battle ID(s).`);
                 return unique;
             }
         } catch (e) {
             lastError = e;
+            console.warn(`⚠️ Official Gameinfo Asia Guild ID lookup failed for ${targetGuildId}: ${e.response?.status || e.message}`);
         }
     }
 
+    // THIRD: AlbionBB HTML page as last resort
+    if (targetGuildId) {
+        const url=`https://east.albionbb.com/guilds/${encodeURIComponent(targetGuildId)}/battles`;
+        try {
+            const html = String(await cloudscraper.get(url,{timeout:15000}) || '');
+            const unique = extractBattleIdsFromHtml(html);
+            if (unique.length) {
+                console.log(`✅ AlbionBB Guild page fallback ${unique.length} battles for ${targetGuildId}`);
+                return unique.slice(0,20);
+            }
+        } catch(e) { lastError=e; }
+    }
+
+    if (!targetGuild) return null;
     console.warn(`❌ No battles found for ${targetGuild}; ${lastError?.message||'none'}`);
     return [];
 }
-
 
 async function primeAutoBattleHistory() {
     // Only seed the recent-history baseline on a truly fresh install.
@@ -2214,11 +2293,7 @@ async function checkAutoBattlesForGuild() {
                     } else {
                         await channel.send({ content: alertText + '\n' + (result.payload.content || '') });
                     }
-                    const delayInfo = result.delayMinutes ? ` (delay: ${result.delayMinutes.toFixed(1)} min)` : '';
-                    console.log(`✅ Auto-Battle report send succeeded for Match ID ${latestMatchId} in channel ${config.channelId}${delayInfo}.`);
-                    if (String(latestMatchId) === '522119203') {
-                        console.log(`🎯 BATTLE 522119203 REPORTED AT ${new Date().toISOString()} - Total delay: ${result.delayMinutes ? result.delayMinutes.toFixed(1)+' min' : 'unknown'}`);
-                    }
+                    console.log(`✅ Auto-Battle report send succeeded for Match ID ${latestMatchId} in channel ${config.channelId}.`);
                 } else {
                     console.log(`ℹ️ Match ID ${latestMatchId} checked below threshold; marking handled.`);
                 }
@@ -3870,14 +3945,16 @@ async function downloadAvaImageBuffer(data, mapName) {
     const GITHUB_BASE_RAW = 'https://raw.githubusercontent.com/ledcbr888-code/albion-discord-bot/main/avalon';
     const GITHUB_BASE_CDN = 'https://cdn.jsdelivr.net/gh/ledcbr888-code/albion-discord-bot@main/avalon';
 
-    // GitHub ONLY - ตามที่คุณต้องการ: https://github.com/ledcbr888-code/albion-discord-bot/tree/main/avalon อย่างเดียว
+    // GitHub ONLY - WebP optimized (84MB) - https://github.com/ledcbr888-code/albion-discord-bot/tree/main/avalon
     const githubCandidates = [
+        `${GITHUB_BASE_RAW}/${encodeURIComponent(slugLower)}.webp`,
+        `${GITHUB_BASE_CDN}/${encodeURIComponent(slugLower)}.webp`,
+        `${GITHUB_BASE_RAW}/${encodeURIComponent(slugOriginal)}.webp`,
+        `${GITHUB_BASE_CDN}/${encodeURIComponent(slugOriginal)}.webp`,
         `${GITHUB_BASE_RAW}/${encodeURIComponent(slugLower)}.png`,
         `${GITHUB_BASE_RAW}/${encodeURIComponent(slugOriginal)}.png`,
         `${GITHUB_BASE_CDN}/${encodeURIComponent(slugLower)}.png`,
         `${GITHUB_BASE_CDN}/${encodeURIComponent(slugOriginal)}.png`,
-        `${GITHUB_BASE_RAW}/${encodeURIComponent(slugLower)}.webp`,
-        `${GITHUB_BASE_CDN}/${encodeURIComponent(slugLower)}.webp`,
     ];
 
     for (const url of githubCandidates) {
@@ -3907,8 +3984,10 @@ async function downloadAvaImageBuffer(data, mapName) {
         }
     }
 
-    // Local fallback (same machine, not external web)
+    // Local fallback - WebP first (now 84MB only)
     const localCandidates = [
+        path.join(__dirname, 'avalon', `${slugLower}.webp`),
+        path.join(__dirname, 'avalon', `${slugOriginal}.webp`),
         path.join(__dirname, 'avalon', `${slugLower}.png`),
         path.join(__dirname, 'avalon', `${slugOriginal}.png`),
     ];
@@ -3925,12 +4004,38 @@ async function downloadAvaImageBuffer(data, mapName) {
         } catch {}
     }
 
-    console.error('❌ [GitHub ONLY] Map image not found for ' + slugLower + ' - please upload to https://github.com/ledcbr888-code/albion-discord-bot/tree/main/avalon/' + slugLower + '.png');
+    console.error('❌ [GitHub ONLY] Map image not found for ' + slugLower + ' - please upload to https://github.com/ledcbr888-code/albion-discord-bot/tree/main/avalon/' + slugLower + '.webp');
     return null;
 }
 
 
-function avaIdentityFallback(mapName){const n=String(mapName||'').trim();const s=n.toLowerCase();return {slug:s,name:n,tier:'T?',counts:{},totalChests:0,totalResources:0,totalDungeons:0,mapImage:`https://cdn.jsdelivr.net/gh/ledcbr888-code/albion-discord-bot@main/avalon/${encodeURIComponent(s)}.webp`,sourceUrl:`https://cdn.jsdelivr.net/gh/ledcbr888-code/albion-discord-bot@main/avalon/${encodeURIComponent(s)}.webp`,verifiedOnly:true};} function avalIdentityFallback(m){return avaIdentityFallback(m);} async function withAvaTimeout(promise, timeoutMs, label) {
+
+function avaIdentityFallback(mapName) {
+    const name = (typeof normalizeAvaOcrMapName === 'function' ? normalizeAvaOcrMapName(mapName) : String(mapName||'').trim());
+    const slug = (typeof normalizeAvaSlug === 'function' ? normalizeAvaSlug(name) : String(name||'').toLowerCase());
+    let tier = 'T?';
+    try {
+        const localMaps = require('./ava-maps.js');
+        const tiers = localMaps.TIERS || localMaps.AVA_MAP_TIERS || {};
+        const exact = tiers[name] || tiers[Object.keys(tiers).find(k => k.toLowerCase() === String(name).toLowerCase())] || tiers[Object.keys(tiers).find(k => k.toLowerCase() === String(slug).toLowerCase())];
+        if (exact) tier = exact;
+    } catch {}
+    const counts = {
+        'Green chest': 0, 'Blue chest': 0, 'Gold chest': 0,
+        Stone: 0, Wood: 0, Ore: 0, Hide: 0, Fiber: 0,
+        'Solo dungeon': 0, 'Group dungeon': 0
+    };
+    return {
+        slug, name, tier, layout: '', connection: '', counts,
+        totalChests: 0, totalResources: 0, totalDungeons: 0,
+        mapImage: `https://cdn.jsdelivr.net/gh/ledcbr888-code/albion-discord-bot@main/avalon/${encodeURIComponent(String(slug).toLowerCase())}.webp`,
+        sourceUrl: `https://cdn.jsdelivr.net/gh/ledcbr888-code/albion-discord-bot@main/avalon/${encodeURIComponent(String(slug).toLowerCase())}.webp`,
+        verifiedOnly: true
+    };
+}
+function avalIdentityFallback(mapName) { return avaIdentityFallback(mapName); }
+
+async function withAvaTimeout(promise, timeoutMs, label) {
     let timer;
     try {
         return await Promise.race([
@@ -4465,8 +4570,9 @@ const commands = [
         .addSubcommand(s => s.setName('guilds').setDescription('แสดงรายชื่อกิลด์ที่ติดตาม'))
         .addSubcommand(s => s.setName('members').setDescription('แสดงรายชื่อผู้เล่นที่ติดตาม')),
     new SlashCommandBuilder().setName('add').setDescription('เพิ่มรายการติดตาม')
-        .addSubcommand(s => s.setName('guild').setDescription('เพิ่มกิลด์ที่ต้องการติดตาม')
-            .addStringOption(o => o.setName('name').setDescription('ชื่อกิลด์').setRequired(true)))
+        .addSubcommand(s => s.setName('guild').setDescription('เพิ่มกิลด์และกำหนดห้องสำหรับดึงข้อมูลเมื่อวางลิงก์')
+            .addStringOption(o => o.setName('name').setDescription('ชื่อกิลด์').setRequired(true))
+            .addChannelOption(o => o.setName('channel').setDescription('ห้องที่อนุญาตให้วางลิงก์เพื่อดึงข้อมูลอัตโนมัติ').addChannelTypes(ChannelType.GuildText).setRequired(true)))
         .addSubcommand(s => s.setName('player').setDescription('เพิ่มผู้เล่น').addStringOption(o => o.setName('name').setDescription('ชื่อผู้เล่น').setRequired(true))),
     new SlashCommandBuilder().setName('remove').setDescription('ลบรายการติดตาม')
         .addSubcommand(s => s.setName('guild').setDescription('ลบกิลด์').addStringOption(o => o.setName('name').setDescription('ชื่อกิลด์').setRequired(true)))
@@ -4580,24 +4686,34 @@ client.once('ready', async () => {
         console.log(`🛡️ Auto-Battle initialized: marked ${seeded} existing battle(s) as already seen. No historical backlog will be reported.`);
     }, 5000);
 
-        // PEAK HOURS OPTIMIZATION: สู้บ่อยแค่ 5-8 UTC และ 10-17 UTC - Peak 1min, Off-peak 5min
-    let autoBattleLastOffPeakRun = 0;
-    function isAutoBattlePeakHour() {
+    // AUTO-BATTLE SCHEDULE: 3-tier based on user request
+    // Peak 5-8 UTC (12:00-15:00 ไทย) + 10-17 UTC (17:00-00:00 ไทย) = 1 min ⚡
+    // Mid 8-10 UTC (15:00-17:00 ไทย) + 17-20 UTC (00:00-03:00 ไทย) = 5 min
+    // Deep 20-5 UTC (03:00-12:00 ไทย ตี3-เที่ยง) = 10 min safe 💤
+    let autoBattleLastMidRun = 0;
+    let autoBattleLastDeepRun = 0;
+    function getAutoBattleTier() {
         const h = new Date().getUTCHours();
-        return (h >= 5 && h < 8) || (h >= 10 && h < 17);
+        if ((h >= 5 && h < 8) || (h >= 10 && h < 17)) return { min: 1, label: 'Peak' };
+        if (h >= 20 || h < 5) return { min: 10, label: 'Deep Off-peak (03:00-12:00 TH)' };
+        return { min: 5, label: 'Mid Off-peak' };
     }
     setInterval(() => {
-        const isPeak = isAutoBattlePeakHour();
+        const tier = getAutoBattleTier();
         const now = Date.now();
-        if (!isPeak) {
-            if (now - autoBattleLastOffPeakRun < 5 * 60 * 1000) return;
-            autoBattleLastOffPeakRun = now;
-            console.log('💤 Off-peak hour ' + new Date().getUTCHours() + ' UTC - slow check (5min interval)');
+        if (tier.min === 10) {
+            if (now - autoBattleLastDeepRun < 10 * 60 * 1000) return;
+            autoBattleLastDeepRun = now;
+            console.log(`💤 ${tier.label} ${new Date().getUTCHours()} UTC - slow check (10min interval - safe)`);
+        } else if (tier.min === 5) {
+            if (now - autoBattleLastMidRun < 5 * 60 * 1000) return;
+            autoBattleLastMidRun = now;
+            console.log(`⏳ ${tier.label} ${new Date().getUTCHours()} UTC - mid check (5min interval)`);
         } else {
-            console.log('⚡ Peak hour ' + new Date().getUTCHours() + ' UTC - fast check (1min)');
+            console.log(`⚡ ${tier.label} ${new Date().getUTCHours()} UTC - fast check (1min)`);
         }
         checkAutoBattles().catch(err => console.error('❌ Auto-Battle scheduler error:', err));
-    }, 60 * 1000); // Peak 1min, Off-peak 5min
+    }, 60 * 1000); // ULTRA FAST
     setTimeout(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA initial poll error:', err)), 3000);
     setInterval(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA poll error:', err)), 5000);
     fetchBattleHubMapIndex()
@@ -4914,16 +5030,18 @@ client.on('interactionCreate', async interaction => {
         const sub = interaction.options.getSubcommand();
         if (sub === 'guild') {
             const name = interaction.options.getString('name').trim();
+            const channel = interaction.options.getChannel('channel');
 
             const existingIndex = targetGuilds.findIndex(x => x.name.toLowerCase() === name.toLowerCase());
             if (existingIndex >= 0) {
+                targetGuilds[existingIndex].channelId = channel.id;
                 saveData();
-                return interaction.reply({ content: `⚠️ กิลด์ **${name}** มีอยู่แล้ว`, flags: 64 });
+                return interaction.reply({ content: `🛡️ อัปเดตห้องสำหรับกิลด์ **${name}** เป็น <#${channel.id}> เรียบร้อยแล้ว`, flags: 64 });
             }
 
-            targetGuilds.push({ name, channelId: null });
+            targetGuilds.push({ name, channelId: channel.id });
             saveData();
-            return interaction.reply({ content: `✅ เพิ่มกิลด์ **${name}** แล้ว`, flags: 64 });
+            return interaction.reply({ content: `🛡️ เพิ่มกิลด์ **${name}** และกำหนดให้ดึงข้อมูลอัตโนมัติเฉพาะในห้อง <#${channel.id}> เรียบร้อยแล้วครับ`, flags: 64 });
         }
         if (sub === 'player') {
             const name = interaction.options.getString('name').trim();
@@ -5092,25 +5210,7 @@ client.on('interactionCreate', async interaction => {
             else setupGuildConfig.avaAuto.push(config);
             avaPollState.delete(String(interaction.guildId) + ':' + String(channel.id));
             saveData();
-            // PEAK HOURS OPTIMIZATION: สู้บ่อยแค่ 5-8 UTC และ 10-17 UTC - Peak 1min, Off-peak 5min
-    let autoBattleLastOffPeakRun = 0;
-    function isAutoBattlePeakHour() {
-        const h = new Date().getUTCHours();
-        return (h >= 5 && h < 8) || (h >= 10 && h < 17);
-    }
-    setInterval(() => {
-        const isPeak = isAutoBattlePeakHour();
-        const now = Date.now();
-        if (!isPeak) {
-            if (now - autoBattleLastOffPeakRun < 5 * 60 * 1000) return;
-            autoBattleLastOffPeakRun = now;
-            console.log('💤 Off-peak hour ' + new Date().getUTCHours() + ' UTC - slow check (5min interval)');
-        } else {
-            console.log('⚡ Peak hour ' + new Date().getUTCHours() + ' UTC - fast check (1min)');
-        }
-        checkAutoBattles().catch(err => console.error('❌ Auto-Battle scheduler error:', err));
-    }, 60 * 1000); // Peak 1min, Off-peak 5min
-    setTimeout(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA setup poll error:', err)), 500);
+            setTimeout(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA setup poll error:', err)), 500);
             return interaction.reply(
                 '✅ ตั้งค่าตรวจรูป AVA อัตโนมัติแล้ว\n' +
                 '📢 ห้อง: <#' + channel.id + '>\n' +
