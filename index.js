@@ -1,3 +1,4 @@
+try{ require('dotenv').config(); }catch(e){}
 // AUTO-BATTLE FIX V3 (STABLE CANVAS) + AVA + BANDIT AUTOMATION
 const {
     Client,
@@ -3965,6 +3966,27 @@ async function downloadImageForCanvas(url) {
         return await loadImage(Buffer.from(response.data));
     } catch (_) { return null; }
 }
+
+
+function avaIdentityFallback(mapName) {
+    try {
+        const lm = require('./ava-maps.js');
+        const TIERS = lm.TIERS || {};
+        const search = String(mapName||'').toLowerCase();
+        let foundKey = Object.keys(TIERS).find(k => k.toLowerCase() === search);
+        if (!foundKey) {
+            // try normalized slug
+            const normalized = search.replace(/[^a-z0-9]/g, '');
+            foundKey = Object.keys(TIERS).find(k => k.toLowerCase().replace(/[^a-z0-9]/g,'') === normalized);
+        }
+        const key = foundKey || mapName;
+        const tier = foundKey ? TIERS[foundKey] : (TIERS[mapName] || 'T?');
+        return { name: key, tier: tier || 'T?', mapImage: null };
+    } catch (e) {
+        return { name: mapName, tier: 'T?', mapImage: null };
+    }
+}
+
 
 async function downloadAvaImageBuffer(data, mapName) {
     const slug = normalizeAvaSlug(data?.name || mapName);
