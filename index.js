@@ -3945,15 +3945,6 @@ async function downloadImageForCanvas(url) {
     } catch (_) { return null; }
 }
 
-async function downloadAvaImageBuffer(data, mapName) {
-    const slug = normalizeAvaSlug(data?.name || mapName);
-    const slugLower = String(slug || '').toLowerCase();
-    const slugOriginal = String(slug || '');
-
-    const GITHUB_BASE_RAW = 'https://raw.githubusercontent.com/ledcbr888-code/albion-discord-bot/main/avalon';
-    const GITHUB_BASE_CDN = 'https://cdn.jsdelivr.net/gh/ledcbr888-code/albion-discord-bot@main/avalon';
-
-
 function avaIdentityFallback(mapName) {
     try {
         const lm = require('./ava-maps.js');
@@ -3971,6 +3962,17 @@ function avaIdentityFallback(mapName) {
         return { name: mapName, tier: 'T?', mapImage: null };
     }
 }
+
+async function downloadAvaImageBuffer(data, mapName) {
+    const slug = normalizeAvaSlug(data?.name || mapName);
+    const slugLower = String(slug || '').toLowerCase();
+    const slugOriginal = String(slug || '');
+
+    const GITHUB_BASE_RAW = 'https://raw.githubusercontent.com/ledcbr888-code/albion-discord-bot/main/avalon';
+    const GITHUB_BASE_CDN = 'https://cdn.jsdelivr.net/gh/ledcbr888-code/albion-discord-bot@main/avalon';
+
+
+
 
 
     // GitHub ONLY - ตามที่คุณต้องการ: https://github.com/ledcbr888-code/albion-discord-bot/tree/main/avalon อย่างเดียว
