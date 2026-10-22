@@ -3952,6 +3952,26 @@ async function downloadAvaImageBuffer(data, mapName) {
     const GITHUB_BASE_RAW = 'https://raw.githubusercontent.com/ledcbr888-code/albion-discord-bot/main/avalon';
     const GITHUB_BASE_CDN = 'https://cdn.jsdelivr.net/gh/ledcbr888-code/albion-discord-bot@main/avalon';
 
+
+function avaIdentityFallback(mapName) {
+    try {
+        const lm = require('./ava-maps.js');
+        const TIERS = lm.TIERS || {};
+        const search = String(mapName||'').toLowerCase();
+        let foundKey = Object.keys(TIERS).find(k => k.toLowerCase() === search);
+        if (!foundKey) {
+            const normalized = search.replace(/[^a-z0-9]/g, '');
+            foundKey = Object.keys(TIERS).find(k => k.toLowerCase().replace(/[^a-z0-9]/g,'') === normalized);
+        }
+        const key = foundKey || mapName;
+        const tier = foundKey ? TIERS[foundKey] : (TIERS[mapName] || 'T?');
+        return { name: key, tier: tier || 'T?', mapImage: null };
+    } catch (e) {
+        return { name: mapName, tier: 'T?', mapImage: null };
+    }
+}
+
+
     // GitHub ONLY - ตามที่คุณต้องการ: https://github.com/ledcbr888-code/albion-discord-bot/tree/main/avalon อย่างเดียว
     const githubCandidates = [
         `${GITHUB_BASE_RAW}/${encodeURIComponent(slugLower)}.webp`,
