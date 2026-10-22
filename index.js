@@ -5491,6 +5491,20 @@ client.on('messageCreate', async message => {
 
 client.on('error', err => console.error('❌ Discord client error:', err));
 client.on('warn', warning => console.warn('⚠️ discord.js warning:', warning));
+// Log Discord REST rate limits with the server-provided wait duration.
+// discord.js reports retryAfter/timeToReset in milliseconds; do not log tokens or headers.
+client.rest.on('rateLimited', info => {
+    const waitMs = Number(info?.retryAfter ?? info?.timeToReset);
+    const waitSeconds = Number.isFinite(waitMs) && waitMs >= 0 ? Math.ceil(waitMs / 1000) : null;
+    const waitMinutes = waitSeconds === null ? null : (waitSeconds / 60).toFixed(2);
+    const route = String(info?.route || info?.url || 'unknown route').replace(/\s+/g, ' ').slice(0, 180);
+    console.warn(
+        '⏳ Discord REST rate limit: ' +
+        (info?.global ? 'GLOBAL' : 'route-specific') +
+        '; retry after ' + (waitSeconds === null ? 'duration unavailable' : waitSeconds + 's (~' + waitMinutes + ' min)') +
+        '; route=' + route
+    );
+});
 client.on('debug', info => {
     // discord.js includes a partial token in this debug message; never print token material.
     if (/Provided token:/i.test(String(info))) {
