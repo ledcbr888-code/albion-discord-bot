@@ -5491,19 +5491,24 @@ client.on('messageCreate', async message => {
 
 client.on('error', err => console.error('❌ Discord client error:', err));
 client.on('warn', warning => console.warn('⚠️ discord.js warning:', warning));
-// Log Discord REST rate limits with the server-provided wait duration.
-// discord.js reports retryAfter/timeToReset in milliseconds; do not log tokens or headers.
+// รายงาน Discord 429 เป็นภาษาไทย โดยใช้เวลารอที่ Discord ส่งกลับมา (หน่วย ms)
+// ไม่พิมพ์ Token หรือ headers ที่อาจมีข้อมูลลับ
 client.rest.on('rateLimited', info => {
-    const waitMs = Number(info?.retryAfter ?? info?.timeToReset);
-    const waitSeconds = Number.isFinite(waitMs) && waitMs >= 0 ? Math.ceil(waitMs / 1000) : null;
-    const waitMinutes = waitSeconds === null ? null : (waitSeconds / 60).toFixed(2);
-    const route = String(info?.route || info?.url || 'unknown route').replace(/\s+/g, ' ').slice(0, 180);
-    console.warn(
-        '⏳ Discord REST rate limit: ' +
-        (info?.global ? 'GLOBAL' : 'route-specific') +
-        '; retry after ' + (waitSeconds === null ? 'duration unavailable' : waitSeconds + 's (~' + waitMinutes + ' min)') +
-        '; route=' + route
-    );
+    const waitMsRaw = info?.retryAfter ?? info?.timeToReset;
+    const waitMs = Number(waitMsRaw);
+    const validWait = waitMsRaw != null && Number.isFinite(waitMs) && waitMs >= 0;
+    const waitSeconds = validWait ? Math.ceil(waitMs / 1000) : null;
+    const waitMinutes = validWait ? (waitMs / 60000).toFixed(2) : null;
+    const route = String(info?.route || info?.url || 'ไม่ทราบเส้นทาง').replace(/\s+/g, ' ').slice(0, 180);
+    console.warn('⏳ Discord จำกัดอัตราการเรียก API (429)' +
+        (info?.global ? ' [GLOBAL: มีผลกับ API โดยรวม]' : ' [เฉพาะเส้นทางนี้]'));
+    if (validWait) {
+        console.warn('⏳ ต้องรอ Discord ปลดจำกัด: ' + waitMs + ' ms = ' +
+            waitSeconds + ' วินาที ≈ ' + waitMinutes + ' นาที');
+    } else {
+        console.warn('⚠️ Discord ไม่ได้ส่งเวลารอที่อ่านได้มาใน rateLimited event');
+    }
+    console.warn('🔎 เส้นทาง API: ' + route);
 });
 client.on('debug', info => {
     // discord.js includes a partial token in this debug message; never print token material.
@@ -5584,9 +5589,37 @@ initializeTrackingPersistence()
         }
     })
     .catch(err => {
-        console.error('❌ Discord startup/login error:', err?.message || err);
-        if (err?.code) console.error('❌ Discord error code:', err.code);
-        console.error('⚠️ Keeping the Render web process alive to avoid a restart loop. Check the Gateway/REST error above before retrying.');
-        // Intentionally do not call process.exit(): repeated restarts can hammer
-        // an API endpoint that is already returning a long-lived Cloudflare 429.
+        const status = Number(err?.status ?? err?.statusCode ?? err?.response?.status);
+        const code = err?.code;
+        const message = String(err?.message || err || 'ไม่ทราบสาเหตุ');
+        if (status === 429 || Number(code) === 429 || /HTTP.?429|rate.?limit/i.test(message)) {
+            console.error('❌ Discord ตอบกลับว่าโดนจำกัดการเรียกใช้งาน (429)');
+            const rawRetry = err?.response?.headers?.['retry-after'] ??
+                err?.response?.headers?.['Retry-After'] ??
+                err?.retry_after ?? err?.retryAfter;
+            let waitMs = null;
+            if (rawRetry != null) {
+                const seconds = Number(rawRetry);
+                if (Number.isFinite(seconds) && seconds >= 0) waitMs = seconds * 1000;
+                else {
+                    const dateMs = Date.parse(String(rawRetry));
+                    if (Number.isFinite(dateMs)) waitMs = Math.max(0, dateMs - Date.now());
+                }
+            }
+            if (waitMs != null) {
+                console.error('⏳ ต้องรอ Discord ปลดจำกัด: ' + Math.round(waitMs) + ' ms = ' +
+                    Math.ceil(waitMs / 1000) + ' วินาที ≈ ' + (waitMs / 60000).toFixed(2) + ' นาที');
+            } else {
+                console.error('⚠️ ไม่พบเวลาปลดจำกัดในข้อผิดพลาดนี้ ให้ตรวจค่า Retry-After จาก Log ของ Discord');
+            }
+        } else if (/timed out|timeout/i.test(message)) {
+            console.error('⏱️ Discord เชื่อมต่อไม่สำเร็จภายในเวลาที่กำหนด (Timeout)');
+            console.error('ℹ️ ข้อผิดพลาดนี้ไม่ได้ระบุ HTTP 429 จึงยังยืนยันไม่ได้ว่าโดนจำกัดการเรียก API หรือไม่');
+            console.error('ℹ️ ตรวจ Log ก่อนหน้าเพื่อดูว่า REST API หรือ WebSocket เป็นจุดที่ค้าง');
+        } else {
+            console.error('❌ เกิดข้อผิดพลาดระหว่างเริ่ม Discord:', message);
+        }
+        if (code) console.error('🔎 รหัสข้อผิดพลาด:', code);
+        console.error('⚠️ คง Render web process ไว้เพื่อป้องกันการรีสตาร์ตวน ตรวจ Log ข้างต้นก่อนลองใหม่');
+        // ไม่เรียก process.exit(): ป้องกันการรีสตาร์ตซ้ำระหว่าง Discord จำกัดอัตรา API
     });
