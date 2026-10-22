@@ -2146,10 +2146,18 @@ async function fetchGuildRecentBattles(guildOrConfig) {
     if (!targetGuildId && !targetGuild) return null;
     let lastError = null;
 
+    // --- Circuit Breaker ---
+    const circuit = fetchGuildRecentBattles._circuit || (fetchGuildRecentBattles._circuit = { failures: 0, openUntil: 0 });
+    if (Date.now() < circuit.openUntil) {
+        console.log(`🔌 Circuit OPEN - ข้าม AlbionBB อีก ${Math.ceil((circuit.openUntil - Date.now())/1000)}s | ใช้ Official แทน`);
+    }
+    const isCircuitOpen = Date.now() < circuit.openUntil;
+
     // --- โหมดสลับอัตโนมัติตามเวลา ---
-    const hour = new Date().getUTCHours();
-    const isOffPeak = (hour >= 17 || hour < 4); // 00:00-11:00 ไทย
-    console.log(`🔄 Auto-Battle mode: ${isOffPeak ? 'OFF-PEAK Officialหลัก' : 'PEAK/NORMAL AlbionBBหลัก'} | UTC ${hour}h`);
+    let hour = new Date().getUTCHours();
+    let isOffPeak = (hour >= 17 || hour < 4); // 00:00-11:00 ไทย
+    if (isCircuitOpen) isOffPeak = true; // ถ้าโดนเบรกเกอร์ตัด บังคับใช้ Official
+    console.log(`🔄 Auto-Battle mode: ${isOffPeak ? 'OFF-PEAK Officialหลัก' : 'PEAK/NORMAL AlbionBBหลัก'} | UTC ${hour}h | Fail ${circuit.failures}/3`);
 
     const officialCache = fetchGuildRecentBattles._officialCache || (fetchGuildRecentBattles._officialCache = new Map());
     const verify = async (ids) => {
@@ -2179,14 +2187,30 @@ async function fetchGuildRecentBattles(guildOrConfig) {
         return [];
     };
     const fetchBB = async () => {
+        if (isCircuitOpen) return []; // ถ้าโดนตัดไฟ ข้ามเลย
         const url=`https://east.albionbb.com/guilds/${encodeURIComponent(targetGuildId)}/battles`;
         try {
             const html = String(await cloudscraper.get({uri:url, timeout:20000})||'');
             const unique = extractBattleIdsFromHtml(html);
             const good = await verify(unique);
             console.log(`✅ [AlbionBB] verified ${good.length}/${unique.length}`);
+            // สำเร็จ รีเซ็ต
+            circuit.failures = 0;
             if (good.length) return good;
-        } catch(e){ lastError=e; console.warn(`⚠️ AlbionBB failed: ${e.message}`); }
+            return [];
+        } catch(e){ 
+            lastError=e; 
+            // ถ้า 403 นับเป็น fail
+            if (String(e.message).includes('403') || e.response?.status===403 || String(e).includes('403')) {
+                circuit.failures++;
+                console.warn(`⚠️ AlbionBB 403 ครั้งที่ ${circuit.failures}/3`);
+                if (circuit.failures >= 3) {
+                    circuit.openUntil = Date.now() + 30*60*1000; // พัก 30 นาที
+                    console.error(`🔌 Circuit OPEN 30 นาที! โดน 403 ติดกัน 3 ครั้ง`);
+                }
+            }
+            console.warn(`⚠️ AlbionBB failed: ${e.message}`); 
+        }
         return [];
     };
 
@@ -2202,30 +2226,13 @@ async function fetchGuildRecentBattles(guildOrConfig) {
     if (!targetGuild) return null;
     const urls=[ 'https://albionbattles.com/east?search='+encodeURIComponent(targetGuild)+'&minPlayers=1', 'https://albionbattles.com/east?q='+encodeURIComponent(targetGuild)+'&minPlayers=1', 'https://albionbattles.com/east' ];
     for (const url of urls) try {
+        if (isCircuitOpen) break; // ถ้าโดนตัดไฟ ไม่ต้องค้นชื่อด้วย
         const html = String(await cloudscraper.get({uri:url, timeout:20000})||'');
         const unique = extractBattleIdsFromHtml(html), good=await verify(unique);
-        if(good.length){ console.log(`✅ AlbionBattles ${good.length}/${unique.length} for ${targetGuild}.`); return good; }
+        if(good.length){ console.log(`✅ AlbionBattles ${good.length}/${unique.length} for ${targetGuild}.`); circuit.failures=0; return good; }
     } catch(e){ lastError=e; }
     console.warn(`❌ No battles for ${targetGuild}: ${lastError?.message||'none'}`);
     return [];
-}
-
-async function primeAutoBattleHistory() {
-    // Only seed the recent-history baseline on a truly fresh install.
-    // On normal restarts, do NOT mark every currently visible battle as seen:
-    // that would silently discard battles posted while Render was restarting/offline.
-    if (processedBattles.size > 0) {
-        console.log(`🛡️ Auto-Battle startup: keeping ${processedBattles.size} saved battle ID(s); checking for new fights normally.`);
-        return 0;
-    }
-    const guilds = getAllGuildConfigs();
-    let totalAdded = 0;
-    for (const { guildId } of guilds) {
-        totalAdded += await guildContext.run({ guildId }, async () => {
-            return await primeAutoBattleHistoryForGuild();
-        }) || 0;
-    }
-    return totalAdded;
 }
 
 async function primeAutoBattleHistoryForGuild(configs = autoBattleConfigs) {
