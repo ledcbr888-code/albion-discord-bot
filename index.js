@@ -532,14 +532,69 @@ function extractMainHandInfo(obj) {
 async function fetchAlbionBBWeaponMap(matchId) {
     const urls = [
         `https://api.albionbb.com/asia/battles/kills?ids=${encodeURIComponent(matchId)}`,
-        `https://api.albionbb.com/asia/battles/kills?ids%5B%5D=${encodeURIComponent(matchId)}`
+        `https://api.albionbb.com/asia/battles/kills?ids%5B%5D=${encodeURIComponent(matchId)}`,
+        `https://east.albionbb.com/api/battles/kills?ids=${encodeURIComponent(matchId)}`
     ];
 
+    const browserHeaders = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept': 'application/json, text/plain, */*',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Referer': 'https://east.albionbb.com/',
+        'Origin': 'https://east.albionbb.com',
+        'Sec-Fetch-Site': 'same-site',
+        'Sec-Fetch-Mode': 'cors'
+    };
+
     for (const url of urls) {
+        // 1) ลอง cloudscraper ก่อน - บายพาส Cloudflare
+        try {
+            const raw = await cloudscraper.get({
+                uri: url,
+                timeout: 18000,
+                headers: browserHeaders,
+                json: true
+            });
+            const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
+            const events = Array.isArray(data) ? data :
+                Array.isArray(data?.events) ? data.events :
+                Array.isArray(data?.kills) ? data.kills : [];
+            if (events.length) {
+                const map = new Map();
+                const addEntity = (entity) => {
+                    if (!entity || typeof entity !== 'object') return;
+                    const name = String(entity.Name ?? entity.name ?? '').trim();
+                    if (!name) return;
+                    const info = extractMainHandInfo(entity);
+                    if (info) map.set(name.toLowerCase(), info);
+                };
+                for (const event of events) {
+                    addEntity(event.Killer || event.killer);
+                    addEntity(event.Victim || event.victim);
+                    const groups = [
+                        ...(Array.isArray(event.Participants) ? event.Participants : []),
+                        ...(Array.isArray(event.GroupMembers) ? event.GroupMembers : [])
+                    ];
+                    groups.forEach(addEntity);
+                }
+                if (map.size) {
+                    console.log(`✅ AlbionBB weapon fallback HIT via cloudscraper: ${url}`);
+                    return map;
+                }
+            }
+        } catch (err) {
+            const status = err?.statusCode || err?.response?.status;
+            if (status === 403 || status === 401 || status === 503) {
+                console.warn(`⚠️ AlbionBB weapon cloudscraper blocked (HTTP ${status}) for ${url}, trying axios...`);
+            }
+        }
+
+        // 2) Axios fallback
         try {
             const response = await axios.get(url, {
                 timeout: 15000,
-                headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' }
+                headers: browserHeaders,
+                validateStatus: s => s >= 200 && s < 400
             });
             const data = response.data;
             const events = Array.isArray(data) ? data :
@@ -555,7 +610,6 @@ async function fetchAlbionBBWeaponMap(matchId) {
                 const info = extractMainHandInfo(entity);
                 if (info) map.set(name.toLowerCase(), info);
             };
-
             for (const event of events) {
                 addEntity(event.Killer || event.killer);
                 addEntity(event.Victim || event.victim);
@@ -567,10 +621,11 @@ async function fetchAlbionBBWeaponMap(matchId) {
             }
             if (map.size) return map;
         } catch (err) {
-            const status = err?.response?.status;
+            const status = err?.response?.status || err?.statusCode;
             if (status === 403 || status === 401) {
                 console.warn(`⚠️ AlbionBB weapon fallback blocked (HTTP ${status}); skipping remaining AlbionBB URL variants.`);
-                break;
+                await new Promise(r => setTimeout(r, 1500 + Math.random()*1000));
+                continue;
             }
             console.warn('⚠️ AlbionBB weapon fallback failed:', err.message);
         }
@@ -2301,7 +2356,21 @@ async function checkAutoBattlesForGuild() {
                     } else {
                         await channel.send({ content: alertText + '\n' + (result.payload.content || '') });
                     }
-                    console.log(`✅ Auto-Battle report send succeeded for Match ID ${latestMatchId} in channel ${config.channelId}.`);
+                    let delayText = '';
+                    try {
+                        const bt = officialBattle?.startTime || officialBattle?.timestamp || officialBattle?.start || apiData?.startTime || null;
+                        if (bt) {
+                            const battleMs = new Date(bt).getTime();
+                            if (!isNaN(battleMs)) {
+                                const diffSec = Math.max(0, Math.floor((Date.now() - battleMs)/1000));
+                                const mins = Math.floor(diffSec/60);
+                                const secs = diffSec%60;
+                                delayText = ` | ⏱️ ดีเลย์ ${mins}นาที ${secs}วิ (ไฟต์เกิด ${new Date(battleMs).toISOString()})`;
+                                if (mins >= 10) delayText += ' ⚠️ ช้า';
+                            }
+                        }
+                    } catch {}
+                    console.log(`✅ Auto-Battle report send succeeded for Match ID ${latestMatchId} in channel ${config.channelId}.${delayText}`);
                 } else {
                     console.log(`ℹ️ Match ID ${latestMatchId} checked below threshold; marking handled.`);
                 }
