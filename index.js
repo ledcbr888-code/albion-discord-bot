@@ -1,3 +1,4 @@
+
 // AUTO-BATTLE FIX V3 (STABLE CANVAS) + AVA + BANDIT AUTOMATION
 const {
     Client,
