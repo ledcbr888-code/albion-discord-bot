@@ -4758,10 +4758,14 @@ client.once('ready', async () => {
     }, 5000);
 
     function getAutoBattleIntervalMs() {
-        const hour = new Date().getUTCHours();
-        if ((hour >= 6 && hour < 9) || (hour >= 11 && hour < 17)) return 1 * 60 * 1000;
-        if (hour >= 17 || hour < 4) return 10 * 60 * 1000;
-        return 5 * 60 * 1000;
+    const hour = new Date().getUTCHours();
+    let base = 5 * 60 * 1000;
+    if ((hour >= 6 && hour < 9) || (hour >= 11 && hour < 17)) base = 1 * 60 * 1000;
+    else if (hour >= 17 || hour < 4) base = 10 * 60 * 1000;
+    const jitter = Math.floor(Math.random() * 30 * 1000); // สุ่ม +0 ถึง +30 วิ
+    const finalMs = base + jitter;
+    console.log(`⏱️ Next check in ${Math.floor(finalMs/1000)}s (UTC ${hour}h)`);
+    return finalMs;
     }
     function scheduleNextAutoBattleCheck() {
         const ms = getAutoBattleIntervalMs();
