@@ -4757,7 +4757,21 @@ client.once('ready', async () => {
         console.log(`🛡️ Auto-Battle initialized: marked ${seeded} existing battle(s) as already seen. No historical backlog will be reported.`);
     }, 5000);
 
-    setInterval(() => checkAutoBattles().catch(err => console.error('❌ Auto-Battle scheduler error:', err)), 5 * 60 * 1000);
+    function getAutoBattleIntervalMs() {
+        const hour = new Date().getUTCHours();
+        if ((hour >= 6 && hour < 9) || (hour >= 11 && hour < 17)) return 1 * 60 * 1000;
+        if (hour >= 17 || hour < 4) return 10 * 60 * 1000;
+        return 5 * 60 * 1000;
+    }
+    function scheduleNextAutoBattleCheck() {
+        const ms = getAutoBattleIntervalMs();
+        setTimeout(async () => {
+            try { await checkAutoBattles(); } 
+            catch (err) { console.error('❌ Auto-Battle scheduler error:', err); }
+            finally { scheduleNextAutoBattleCheck(); }
+        }, ms);
+    }
+    scheduleNextAutoBattleCheck();
     setTimeout(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA initial poll error:', err)), 3000);
     setInterval(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA poll error:', err)), 5000);
     fetchBattleHubMapIndex()
