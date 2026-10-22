@@ -2145,6 +2145,12 @@ async function fetchGuildRecentBattles(guildOrConfig) {
     const targetGuild = String(config.targetGuild || parsed.name || '').trim();
     if (!targetGuildId && !targetGuild) return null;
     let lastError = null;
+
+    // --- โหมดสลับอัตโนมัติตามเวลา ---
+    const hour = new Date().getUTCHours();
+    const isOffPeak = (hour >= 17 || hour < 4); // 00:00-11:00 ไทย
+    console.log(`🔄 Auto-Battle mode: ${isOffPeak ? 'OFF-PEAK Officialหลัก' : 'PEAK/NORMAL AlbionBBหลัก'} | UTC ${hour}h`);
+
     const officialCache = fetchGuildRecentBattles._officialCache || (fetchGuildRecentBattles._officialCache = new Map());
     const verify = async (ids) => {
         const matched=[];
@@ -2161,58 +2167,46 @@ async function fetchGuildRecentBattles(guildOrConfig) {
         }
         return matched;
     };
-    if (targetGuildId) {
-        // Primary source: Albion's Gameinfo API for the Asia/East server.
-        // This endpoint supports guildId directly and avoids AlbionBB's
-        // Cloudflare/API restrictions on Render.
+
+    const fetchOfficial = async () => {
         const apiUrl = 'https://gameinfo-sgp.albiononline.com/api/gameinfo/battles';
         try {
-            const response = await axios.get(apiUrl, {
-                timeout: 20000,
-                headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
-                params: {
-                    range: 'week', offset: 0, limit: 50,
-                    sort: 'recent', guildId: targetGuildId
-                }
-            });
+            const response = await axios.get(apiUrl, { timeout: 20000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' }, params: { range: 'week', offset: 0, limit: 50, sort: 'recent', guildId: targetGuildId } });
             const rows = Array.isArray(response.data) ? response.data : [];
-            const unique = [...new Set(rows
-                .map(row => row?.id ?? row?.albionId ?? row?.battleId)
-                .filter(id => /^\d+$/.test(String(id)))
-                .map(String))];
-            if (unique.length) {
-                console.log(`✅ Official Gameinfo Asia Guild ID ${targetGuildId} (${targetGuild || 'unknown'}) returned ${unique.length} Battle ID(s).`);
-                return unique;
-            }
-            console.warn(`⚠️ Official Gameinfo API returned no Battle IDs for Guild ID ${targetGuildId}.`);
-        } catch (e) {
-            lastError = e;
-            console.warn(`⚠️ Official Gameinfo Asia Guild ID lookup failed for ${targetGuildId}: ${e.response?.status || e.message}`);
-        }
-
-        // Secondary source: AlbionBB, retained only as a fallback.
+            const unique = [...new Set(rows.map(r=>r?.id??r?.albionId??r?.battleId).filter(id=>/^\d+$/.test(String(id))).map(String))];
+            if (unique.length) { console.log(`✅ [Official] ${unique.length} IDs`); return unique; }
+        } catch(e){ lastError=e; console.warn(`⚠️ Official failed: ${e.response?.status||e.message}`); }
+        return [];
+    };
+    const fetchBB = async () => {
         const url=`https://east.albionbb.com/guilds/${encodeURIComponent(targetGuildId)}/battles`;
         try {
-            const html = String(await cloudscraper.get(url,{timeout:20000}) || '');
+            const html = String(await cloudscraper.get({uri:url, timeout:20000})||'');
             const unique = extractBattleIdsFromHtml(html);
-            const good=await verify(unique);
-            if (!unique.length) console.warn(`⚠️ AlbionBB Guild ID page returned no Battle links: ${url} (HTML ${html.length} chars).`);
-            console.log(`✅ AlbionBB Guild ID ${targetGuildId} (${targetGuild||'unknown'}) verified ${good.length}/${unique.length} battle(s).`);
+            const good = await verify(unique);
+            console.log(`✅ [AlbionBB] verified ${good.length}/${unique.length}`);
             if (good.length) return good;
-        } catch(e) { lastError=e; console.warn(`⚠️ AlbionBB Guild ID fallback failed for ${targetGuildId}: ${e.message}`); }
+        } catch(e){ lastError=e; console.warn(`⚠️ AlbionBB failed: ${e.message}`); }
+        return [];
+    };
+
+    if (targetGuildId) {
+        if (isOffPeak) {
+            const a = await fetchOfficial(); if (a.length) return a;
+            const b = await fetchBB(); if (b.length) return b;
+        } else {
+            const b = await fetchBB(); if (b.length) return b;
+            const a = await fetchOfficial(); if (a.length) return a;
+        }
     }
     if (!targetGuild) return null;
-    const urls=[
-        'https://albionbattles.com/east?search='+encodeURIComponent(targetGuild)+'&minPlayers=1',
-        'https://albionbattles.com/east?q='+encodeURIComponent(targetGuild)+'&minPlayers=1',
-        'https://albionbattles.com/east'
-    ];
+    const urls=[ 'https://albionbattles.com/east?search='+encodeURIComponent(targetGuild)+'&minPlayers=1', 'https://albionbattles.com/east?q='+encodeURIComponent(targetGuild)+'&minPlayers=1', 'https://albionbattles.com/east' ];
     for (const url of urls) try {
-        const html = String(await cloudscraper.get(url,{timeout:20000}) || '');
+        const html = String(await cloudscraper.get({uri:url, timeout:20000})||'');
         const unique = extractBattleIdsFromHtml(html), good=await verify(unique);
-        if(good.length){ console.log(`✅ AlbionBattles Official-verified ${good.length}/${unique.length} battle(s) for ${targetGuild}.`); return good; }
-    } catch(e) { lastError=e; console.warn(`⚠️ AlbionBattles discovery failed for ${targetGuild}: ${e.message}`); }
-    console.warn(`❌ No Official-verified battles found for ${targetGuild}; leaving battles unprocessed: ${lastError?.message||'none'}`);
+        if(good.length){ console.log(`✅ AlbionBattles ${good.length}/${unique.length} for ${targetGuild}.`); return good; }
+    } catch(e){ lastError=e; }
+    console.warn(`❌ No battles for ${targetGuild}: ${lastError?.message||'none'}`);
     return [];
 }
 
