@@ -2157,7 +2157,7 @@ async function processBattleReport(input, targetContext, isMessage = false) {
             );
             try {
                 const mergedGuildImage = await generateGuildSummaryImage(mergedGuildRows, { includeAll: true, includeAlliance: true });
-                if (mergedGuildImage) files.push(mergedGuildImage);
+                if (mergedGuildImage) files.unshift(mergedGuildImage);
             } catch (err) {
                 console.error('❌ BattleLink merged guild summary error:', err.message);
             }
@@ -2189,6 +2189,9 @@ async function processBattleReport(input, targetContext, isMessage = false) {
         const payload = battleResult.payload;
         const files = Array.isArray(payload.files) ? payload.files : [];
         if (isMessage && guildConfig?.battleLinkChannelId && targetContext?.channel?.id === guildConfig.battleLinkChannelId) {
+            // BattleLink only: put the guild report first, followed by per-fight weapon/player images.
+            const guildReportIndex = files.findIndex(file => String(file?.name || file?.attachment?.name || '') === 'guild-summary.png');
+            if (guildReportIndex > 0) files.unshift(files.splice(guildReportIndex, 1)[0]);
             const totalKills = Number(battleResult.totalKills) || 0;
             const totalDeaths = Number(battleResult.totalDeaths) || 0;
             const battleUrl = battleResult.battleUrl || 'https://east.albionbb.com/battles/' + matchId;
