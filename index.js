@@ -5518,7 +5518,29 @@ client.on('debug', info => {
     }
     console.log('🔎 discord.js debug:', info);
 });
-client.on('shardError', err => console.error('❌ Discord Gateway shard error:', err?.stack || err));
+client.on('shardError', err => {
+    const status = Number(err?.status ?? err?.statusCode ?? err?.response?.status);
+    const code = err?.code;
+    const message = String(err?.message || err || 'ไม่ทราบสาเหตุ');
+    if (status === 429 || Number(code) === 429 || /HTTP.?429|rate.?limit/i.test(message)) {
+        console.error('❌ Discord Gateway/REST แจ้งข้อจำกัด 429:', message);
+        const retry = err?.response?.headers?.['retry-after'] ?? err?.retry_after ?? err?.retryAfter;
+        if (retry != null) {
+            const seconds = Number(retry);
+            if (Number.isFinite(seconds) && seconds >= 0) {
+                console.error('⏳ เวลารอที่แจ้งมา: ' + Math.ceil(seconds) + ' วินาที (' + (seconds / 60).toFixed(2) + ' นาที)');
+            } else {
+                const dateMs = Date.parse(String(retry));
+                if (Number.isFinite(dateMs)) {
+                    const ms = Math.max(0, dateMs - Date.now());
+                    console.error('⏳ เวลารอที่แจ้งมา: ' + Math.ceil(ms / 1000) + ' วินาที (' + (ms / 60000).toFixed(2) + ' นาที)');
+                } else console.error('⚠️ Discord ไม่ได้ให้เวลารอที่แปลงได้:', String(retry));
+            }
+        } else console.error('⚠️ ข้อผิดพลาด 429 นี้ไม่มี Retry-After ให้คำนวณเวลารอ');
+    } else {
+        console.error('❌ Discord Gateway shard error:', message, code ? '(รหัส ' + code + ')' : '');
+    }
+});
 client.on('shardDisconnect', (event, shardId) => console.error(`⚠️ Discord shard ${shardId} disconnected:`, event?.code || event, event?.reason || ''));
 client.on('shardReconnecting', shardId => console.warn(`⚠️ Discord shard ${shardId} reconnecting`));
 client.on('shardResume', (shardId, replayedEvents) => console.log(`✅ Discord shard ${shardId} resumed; replayed events: ${replayedEvents}`));
@@ -5614,8 +5636,9 @@ initializeTrackingPersistence()
             }
         } else if (/timed out|timeout/i.test(message)) {
             console.error('⏱️ Discord เชื่อมต่อไม่สำเร็จภายในเวลาที่กำหนด (Timeout)');
-            console.error('ℹ️ ข้อผิดพลาดนี้ไม่ได้ระบุ HTTP 429 จึงยังยืนยันไม่ได้ว่าโดนจำกัดการเรียก API หรือไม่');
-            console.error('ℹ️ ตรวจ Log ก่อนหน้าเพื่อดูว่า REST API หรือ WebSocket เป็นจุดที่ค้าง');
+            console.error('ℹ️ Timeout อย่างเดียวไม่ใช่หลักฐานว่าโดน HTTP 429 และไม่มีเวลาปลดจำกัดให้คำนวณ');
+            console.error('🔎 ตรวจ Log ของ Gateway/REST ก่อนหน้านี้เพื่อดูสถานะ HTTP, รหัสข้อผิดพลาด และ Retry-After หาก Discord ส่งมา');
+            console.error('⚠️ ระบบจะไม่เดาเวลารอหรือส่งคำขอซ้ำเพื่อทดสอบโดยอัตโนมัติ');
         } else {
             console.error('❌ เกิดข้อผิดพลาดระหว่างเริ่ม Discord:', message);
         }
