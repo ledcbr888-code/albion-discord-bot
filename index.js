@@ -2064,54 +2064,96 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
 
 async function processBattleReport(input, targetContext, isMessage = false) {
     try {
-        const matchId = extractMatchId(input);
         const guildId = currentGuildId();
         const guildConfig = guildId ? getGuildConfig(guildId, false) : null;
-        const battleResult = await buildBattleReportPayload(matchId, targetGuilds, {
-            guildId,
-            trackedPlayers: Array.isArray(guildConfig?.players) ? guildConfig.players : []
-        });
+        const trackedPlayers = Array.isArray(guildConfig?.players) ? guildConfig.players : [];
+        const rawInput = String(input || '').trim();
+        let multiIds = null;
+        if (/^https?:\/\//i.test(rawInput)) {
+            let parsedUrl;
+            try { parsedUrl = new URL(rawInput); } catch (_) { throw new Error('ไม่สามารถอ่าน URL Battle Link ได้'); }
+            if (/\/battles\/multi\/?$/i.test(parsedUrl.pathname)) {
+                const idsParam = parsedUrl.searchParams.get('ids') || '';
+                const rawIds = idsParam.split(',').map(id => id.trim());
+                const ids = [...new Set(rawIds.filter(id => /^\d+$/.test(id)))];
+                if (!idsParam || !ids.length || ids.length !== rawIds.filter(Boolean).length) throw new Error('ลิงก์รวมไฟต์มี Match ID ไม่ถูกต้อง');
+                if (ids.length > 10) throw new Error('ลิงก์รวมไฟต์รองรับสูงสุด 10 ไฟต์ต่อครั้ง');
+                multiIds = ids;
+            }
+        }
+        if (multiIds && multiIds.length > 1) {
+            const results = [], failures = [];
+            for (const id of multiIds) {
+                try {
+                    results.push(await buildBattleReportPayload(id, targetGuilds, { guildId, trackedPlayers }));
+                } catch (err) {
+                    failures.push({ id, reason: err?.message || 'ไม่ทราบสาเหตุ' });
+                    console.error('❌ BattleLink multi: Match ID ' + id + ' failed:', err);
+                }
+            }
+            if (!results.length) throw new Error('ดึงข้อมูลไฟต์จากลิงก์รวมไม่สำเร็จ (' + failures.map(f => f.id).join(', ') + ')');
+            const totalKills = results.reduce((sum, r) => sum + (Number(r.totalKills) || 0), 0);
+            const totalDeaths = results.reduce((sum, r) => sum + (Number(r.totalDeaths) || 0), 0);
+            const totalFame = results.reduce((sum, r) => sum + (Number(r.totalFame) || 0), 0);
+            const links = results.map(r => '• [' + r.matchId + '](https://east.albionbb.com/battles/' + r.matchId + ')').join('\n');
+            const warning = failures.length ? '\n⚠️ ดึงข้อมูลไม่สำเร็จ ' + failures.length + ' ไฟต์: ' + failures.map(f => f.id + ' (' + f.reason + ')').join('; ') : '';
+            const files = results.flatMap(r => Array.isArray(r.payload.files) ? r.payload.files : []);
+            const payload = {
+                content: '⚔️ **BattleLink — รายงานรวม ' + results.length + '/' + multiIds.length + ' ไฟต์**\n' +
+                    '⚔️ **Kills รวม:** ' + totalKills.toLocaleString() + '\n' +
+                    '☠️ **Deaths รวม:** ' + totalDeaths.toLocaleString() + '\n' +
+                    '➕ **Kills + Deaths:** ' + (totalKills + totalDeaths).toLocaleString() + '\n' +
+                    '✨ **Fame รวม:** ' + totalFame.toLocaleString() + '\n' +
+                    '🔗 **ไฟต์ที่รวม:**\n' + links + warning +
+                    (files.length ? '\n🖼️ รายงานภาพแยกตาม Match ID อยู่ด้านล่าง' : ''),
+                files
+            };
+            if (files.length > 1) {
+                const firstPayload = { content: payload.content, files: [files[0]] };
+                if (isMessage) {
+                    await targetContext.edit(firstPayload);
+                    for (const file of files.slice(1)) await targetContext.channel.send({ files: [file] });
+                } else {
+                    await targetContext.editReply(firstPayload);
+                    for (const file of files.slice(1)) await targetContext.followUp({ files: [file] });
+                }
+            } else if (isMessage) await targetContext.edit(payload);
+            else await targetContext.editReply(payload);
+            return;
+        }
+        const matchId = multiIds?.[0] || extractMatchId(input);
+        const battleResult = await buildBattleReportPayload(matchId, targetGuilds, { guildId, trackedPlayers });
         const payload = battleResult.payload;
         const files = Array.isArray(payload.files) ? payload.files : [];
         if (isMessage && guildConfig?.battleLinkChannelId && targetContext?.channel?.id === guildConfig.battleLinkChannelId) {
             const totalKills = Number(battleResult.totalKills) || 0;
             const totalDeaths = Number(battleResult.totalDeaths) || 0;
-            const battleUrl = battleResult.battleUrl || `https://east.albionbb.com/battles/${matchId}`;
-            payload.content = `🚨 **Battle การต่อสู้ของกิลด์**\n` +
-                `⚔️ **Kills:** ${totalKills.toLocaleString()}\n` +
-                `☠️ **Deaths:** ${totalDeaths.toLocaleString()}\n` +
-                `➕ **Kills + Deaths:** ${(totalKills + totalDeaths).toLocaleString()}\n` +
-                `🔗 **Battle Link:** <${battleUrl}>` +
+            const battleUrl = battleResult.battleUrl || 'https://east.albionbb.com/battles/' + matchId;
+            payload.content = '🚨 **Battle การต่อสู้ของกิลด์**\n' +
+                '⚔️ **Kills:** ' + totalKills.toLocaleString() + '\n' +
+                '☠️ **Deaths:** ' + totalDeaths.toLocaleString() + '\n' +
+                '➕ **Kills + Deaths:** ' + (totalKills + totalDeaths).toLocaleString() + '\n' +
+                '🔗 **Battle Link:** <' + battleUrl + '>' +
                 (files.length ? '\n🖼️ **Battle Report:** รายงานแบบรูปภาพด้านล่าง' : '');
         }
-
         if (files.length > 1) {
-            const firstPayload = {
-                content: payload.content,
-                files: [files[0]]
-            };
+            const firstPayload = { content: payload.content, files: [files[0]] };
             if (isMessage) {
                 await targetContext.edit(firstPayload);
-                for (const file of files.slice(1)) {
-                    await targetContext.channel.send({ files: [file] });
-                }
+                for (const file of files.slice(1)) await targetContext.channel.send({ files: [file] });
             } else {
                 await targetContext.editReply(firstPayload);
-                for (const file of files.slice(1)) {
-                    await targetContext.followUp({ files: [file] });
-                }
+                for (const file of files.slice(1)) await targetContext.followUp({ files: [file] });
             }
             return;
         }
-
         if (isMessage) await targetContext.edit(payload); else await targetContext.editReply(payload);
     } catch (err) {
         console.error('❌ Process battle report error:', err);
-        const message = `❌ เกิดข้อผิดพลาดในการประมวลผลไฟต์: \`${err.message}\``;
+        const message = '❌ เกิดข้อผิดพลาดในการประมวลผลไฟต์: ' + err.message;
         if (isMessage) await targetContext.edit(message); else await targetContext.editReply(message);
     }
 }
-
 function parseGuildReference(value) {
     const raw = String(value || '').trim();
     const urlMatch = raw.match(/\/guilds\/([A-Za-z0-9_-]+)(?:\/|$)/i);
