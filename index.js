@@ -2092,6 +2092,7 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
         guildTotalFrames,
         battleUrl,
         guildSummaryData,
+        playerReportData: reportRosterRows,
         payload: { content: responseContent, files: attachments }
     };
 }
@@ -2131,11 +2132,70 @@ async function processBattleReport(input, targetContext, isMessage = false) {
             const totalFame = results.reduce((sum, r) => sum + (Number(r.totalFame) || 0), 0);
             const links = results.map(r => '• [' + r.matchId + '](https://east.albionbb.com/battles/' + r.matchId + ')').join('\n');
             const warning = failures.length ? '\n⚠️ ดึงข้อมูลไม่สำเร็จ ' + failures.length + ' ไฟต์: ' + failures.map(f => f.id + ' (' + f.reason + ')').join('; ') : '';
-            // Format B: preserve per-fight player/weapon images and combine guild rows.
+            // BattleLink only: combine player K/D and fame across all linked fights.
+            // Keep the first weapon found for each player, in link order.
+            const combinedPlayers = new Map();
+            for (const result of results) {
+                for (const player of (Array.isArray(result.playerReportData) ? result.playerReportData : [])) {
+                    const name = String(player.displayName || player.name || '').trim();
+                    if (!name) continue;
+                    const key = name.toLowerCase();
+                    const old = combinedPlayers.get(key);
+                    if (!old) {
+                        combinedPlayers.set(key, {
+                            ...player,
+                            kills: Number(player.kills) || 0,
+                            deaths: Number(player.deaths) || 0,
+                            fame: Number(player.fame) || 0,
+                            damage: Number(player.damage) || 0,
+                            healing: Number(player.healing) || 0,
+                            weapon: player.weapon || '',
+                            weaponQuality: Number(player.weaponQuality) || 1
+                        });
+                    } else {
+                        old.kills += Number(player.kills) || 0;
+                        old.deaths += Number(player.deaths) || 0;
+                        old.fame += Number(player.fame) || 0;
+                        old.damage += Number(player.damage) || 0;
+                        old.healing += Number(player.healing) || 0;
+                        if (!old.weapon && player.weapon) {
+                            old.weapon = player.weapon;
+                            old.weaponQuality = Number(player.weaponQuality) || 1;
+                        }
+                    }
+                }
+            }
+            const combinedPlayerRows = [...combinedPlayers.values()].sort((a, b) =>
+                (Number(b.fame) || 0) - (Number(a.fame) || 0) ||
+                (Number(b.kills) || 0) - (Number(a.kills) || 0)
+            );
             const files = results.flatMap(r =>
                 (Array.isArray(r.payload.files) ? r.payload.files : [])
-                    .filter(file => String(file?.name || file?.attachment?.name || '') !== 'guild-summary.png')
+                    .filter(file => {
+                        const name = String(file?.name || file?.attachment?.name || '');
+                        return name !== 'guild-summary.png' && name !== 'battle-report.png';
+                    })
             );
+            // Replace per-fight weapon/player cards with a single combined report.
+            const combinedReportPages = [];
+            for (let offset = 0; offset < combinedPlayerRows.length; offset += 10) {
+                combinedReportPages.push(combinedPlayerRows.slice(offset, offset + 10));
+            }
+            for (let pageIndex = 0; pageIndex < combinedReportPages.length; pageIndex++) {
+                try {
+                    const reportImage = await generatePlayerWeaponReportImage(combinedReportPages[pageIndex], {
+                        matchId: 'COMBINED',
+                        page: pageIndex + 1,
+                        totalPages: combinedReportPages.length
+                    });
+                    if (reportImage) {
+                        reportImage.name = 'battle-report-combined-' + (pageIndex + 1) + '.png';
+                        files.push(reportImage);
+                    }
+                } catch (err) {
+                    console.error('❌ BattleLink combined player report error:', err.message);
+                }
+            }
             const guildTotals = new Map();
             for (const result of results) {
                 for (const guild of (Array.isArray(result.guildSummaryData) ? result.guildSummaryData : [])) {
@@ -2168,7 +2228,7 @@ async function processBattleReport(input, targetContext, isMessage = false) {
                     '➕ **Kills + Deaths:** ' + (totalKills + totalDeaths).toLocaleString() + '\n' +
                     '✨ **Fame รวม:** ' + totalFame.toLocaleString() + '\n' +
                     '🔗 **ไฟต์ที่รวม:**\n' + links + warning +
-                    (files.length ? '\n🖼️ รูปผู้เล่นแยกตามไฟต์ และตารางกิลด์รวมอยู่ด้านล่าง' : ''),
+                    (files.length ? '\n🖼️ ตารางกิลด์และรายงานผู้เล่นรวมทุกไฟต์อยู่ด้านล่าง' : ''),
                 files
             };
             if (files.length > 1) {
