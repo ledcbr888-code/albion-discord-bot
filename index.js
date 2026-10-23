@@ -1041,14 +1041,14 @@ async function loadFameIcon() {
     }
 }
 
-async function generateGuildSummaryImage(guildsData) {
+async function generateGuildSummaryImage(guildsData, options = {}) {
     if (!guildsData || !guildsData.length) return null;
 
-    // The caller may provide more data for other commands, but AUTO-BATTLE
-    // is intentionally limited to the top 4 before this renderer is called.
-    const topGuilds = [...guildsData].slice(0, 4);
+    // Preserve the existing four-guild default. BattleLink can opt into a
+    // complete merged table without changing Auto-Battle or single-fight output.
+    const topGuilds = options.includeAll ? [...guildsData] : [...guildsData].slice(0, 4);
 
-    const width = 760;
+    const width = 1000;
     const rowHeight = 56;
     const headerHeight = 64;
     const padding = 20;
@@ -1063,11 +1063,12 @@ async function generateGuildSummaryImage(guildsData) {
 
     ctx.fillStyle = '#949ba4';
     ctx.font = 'bold 16px sans-serif';
-    ctx.fillText('NAME', padding + 10, padding + 38);
-    ctx.fillText('PLAYERS', 340, padding + 38);
-    ctx.fillText('KILLS', 460, padding + 38);
-    ctx.fillText('DEATHS', 560, padding + 38);
-    ctx.fillText('FAME', 660, padding + 38);
+    ctx.fillText('ALLIANCE', padding + 10, padding + 38);
+    ctx.fillText('NAME', 220, padding + 38);
+    ctx.fillText('PLAYERS', 465, padding + 38);
+    ctx.fillText('KILLS', 595, padding + 38);
+    ctx.fillText('DEATHS', 700, padding + 38);
+    ctx.fillText('FAME', 820, padding + 38);
 
     ctx.strokeStyle = '#2b2d31';
     ctx.lineWidth = 2;
@@ -1079,22 +1080,27 @@ async function generateGuildSummaryImage(guildsData) {
     topGuilds.forEach((g, i) => {
         const y = padding + headerHeight + (i * rowHeight);
 
+        const allianceName = String(g.alliance || '-').trim();
+        ctx.fillStyle = '#c084fc';
+        ctx.font = 'bold 16px sans-serif';
+        ctx.fillText(allianceName.length > 16 ? allianceName.slice(0, 14) + '..' : allianceName, padding + 10, y + 36);
+
         ctx.fillStyle = '#ffffff';
         ctx.font = 'bold 20px sans-serif';
-        const gName = g.name.length > 20 ? g.name.slice(0, 18) + '..' : g.name;
-        ctx.fillText(gName, padding + 10, y + 36);
+        const gName = String(g.name || 'Unknown');
+        ctx.fillText(gName.length > 22 ? gName.slice(0, 20) + '..' : gName, 220, y + 36);
 
         ctx.fillStyle = '#3399ff';
-        ctx.fillText(String(g.playersCount || 0), 340, y + 36);
+        ctx.fillText(String(g.playersCount || 0), 465, y + 36);
 
         ctx.fillStyle = '#ff5555';
-        ctx.fillText(String(g.kills || 0), 460, y + 36);
+        ctx.fillText(String(g.kills || 0), 595, y + 36);
 
         ctx.fillStyle = '#ff66cc';
-        ctx.fillText(String(g.deaths || 0), 560, y + 36);
+        ctx.fillText(String(g.deaths || 0), 700, y + 36);
 
         ctx.fillStyle = '#ffcc00';
-        ctx.fillText(formatFame(g.killFame || 0), 660, y + 36);
+        ctx.fillText(formatFame(g.killFame || 0), 820, y + 36);
     });
 
     return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: 'guild-summary.png' });
@@ -1739,6 +1745,7 @@ function isExactGuildMatch(playerGuild, targetGuilds) {
 }
 
 async function buildBattleReportPayload(matchId, customTargetGuilds = [], options = {}) {
+    let guildSummaryData = [];
     const apiData = options.apiData || (/^\d+$/.test(matchId) ? await fetchOfficialBattle(matchId) : null);
     if (!apiData) throw new Error('ไม่พบข้อมูลไฟต์จาก Official Albion API');
 
@@ -2008,9 +2015,15 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
             let guildsData = Object.values(apiData.guilds).map(g => {
                 const guildName = String(g.name || 'Unknown').trim();
                 const guildKey = guildName.toLowerCase();
+                const allianceId = String(g.allianceId || g.alliance || '').trim();
+                const allianceRecord = allianceId && apiData.alliances
+                    ? (apiData.alliances[allianceId] || Object.values(apiData.alliances).find(a => String(a.id || a.allianceId || '') === allianceId))
+                    : null;
+                const allianceName = String(allianceRecord?.name || (allianceId && !/^[0-9]+$/.test(allianceId) ? allianceId : '') || '-').trim();
 
                 return {
                     name: guildName,
+                    alliance: allianceName,
                     playersCount: playerCountByGuild.get(guildKey)?.size || 0,
                     kills: g.kills || 0,
                     deaths: g.deaths || 0,
@@ -2035,6 +2048,7 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
                 guildsData.sort((a, b) => b.killFame - a.killFame);
             }
 
+            guildSummaryData = guildsData;
             guildSummaryAttachment = await generateGuildSummaryImage(guildsData);
         }
     } catch (err) {
@@ -2058,6 +2072,7 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
         totalFame,
         guildTotalFrames,
         battleUrl,
+        guildSummaryData,
         payload: { content: responseContent, files: attachments }
     };
 }
@@ -2097,7 +2112,36 @@ async function processBattleReport(input, targetContext, isMessage = false) {
             const totalFame = results.reduce((sum, r) => sum + (Number(r.totalFame) || 0), 0);
             const links = results.map(r => '• [' + r.matchId + '](https://east.albionbb.com/battles/' + r.matchId + ')').join('\n');
             const warning = failures.length ? '\n⚠️ ดึงข้อมูลไม่สำเร็จ ' + failures.length + ' ไฟต์: ' + failures.map(f => f.id + ' (' + f.reason + ')').join('; ') : '';
-            const files = results.flatMap(r => Array.isArray(r.payload.files) ? r.payload.files : []);
+            // Format B: preserve per-fight player/weapon images and combine guild rows.
+            const files = results.flatMap(r =>
+                (Array.isArray(r.payload.files) ? r.payload.files : [])
+                    .filter(file => String(file?.name || file?.attachment?.name || '') !== 'guild-summary.png')
+            );
+            const guildTotals = new Map();
+            for (const result of results) {
+                for (const guild of (Array.isArray(result.guildSummaryData) ? result.guildSummaryData : [])) {
+                    const key = String(guild.name || '').trim().toLowerCase();
+                    if (!key) continue;
+                    const old = guildTotals.get(key);
+                    if (!old) guildTotals.set(key, { ...guild });
+                    else {
+                        old.playersCount += Number(guild.playersCount) || 0;
+                        old.kills += Number(guild.kills) || 0;
+                        old.deaths += Number(guild.deaths) || 0;
+                        old.killFame += Number(guild.killFame) || 0;
+                        if ((!old.alliance || old.alliance === '-') && guild.alliance) old.alliance = guild.alliance;
+                    }
+                }
+            }
+            const mergedGuildRows = [...guildTotals.values()].sort((a, b) =>
+                (Number(b.killFame) || 0) - (Number(a.killFame) || 0)
+            );
+            try {
+                const mergedGuildImage = await generateGuildSummaryImage(mergedGuildRows, { includeAll: true });
+                if (mergedGuildImage) files.push(mergedGuildImage);
+            } catch (err) {
+                console.error('❌ BattleLink merged guild summary error:', err.message);
+            }
             const payload = {
                 content: '⚔️ **BattleLink — รายงานรวม ' + results.length + '/' + multiIds.length + ' ไฟต์**\n' +
                     '⚔️ **Kills รวม:** ' + totalKills.toLocaleString() + '\n' +
@@ -2105,7 +2149,7 @@ async function processBattleReport(input, targetContext, isMessage = false) {
                     '➕ **Kills + Deaths:** ' + (totalKills + totalDeaths).toLocaleString() + '\n' +
                     '✨ **Fame รวม:** ' + totalFame.toLocaleString() + '\n' +
                     '🔗 **ไฟต์ที่รวม:**\n' + links + warning +
-                    (files.length ? '\n🖼️ รายงานภาพแยกตาม Match ID อยู่ด้านล่าง' : ''),
+                    (files.length ? '\n🖼️ รูปผู้เล่นแยกตามไฟต์ และตารางกิลด์รวมอยู่ด้านล่าง' : ''),
                 files
             };
             if (files.length > 1) {
@@ -5518,6 +5562,10 @@ client.on('messageCreate', async message => {
         const matchingGuildConfig = targetGuilds.find(g => g.channelId === message.channel.id);
         if (targetGuilds.some(g => g.channelId) && !matchingGuildConfig) return;
     }
+
+    // Hide the embed preview on this recognized BattleLink source message; keep its URL.
+    try { if (typeof message.suppressEmbeds === 'function') await message.suppressEmbeds(true); }
+    catch (err) { console.warn('⚠️ Could not suppress AlbionBB embed:', err.message); }
 
     const rateKey = battleUrl, now = Date.now();
     for (const [key, stamp] of battleUrlRateLimit) if (now - stamp > 10 * 60 * 1000) battleUrlRateLimit.delete(key);
