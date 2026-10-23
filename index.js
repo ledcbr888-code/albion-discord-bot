@@ -1048,7 +1048,8 @@ async function generateGuildSummaryImage(guildsData, options = {}) {
     // complete merged table without changing Auto-Battle or single-fight output.
     const topGuilds = options.includeAll ? [...guildsData] : [...guildsData].slice(0, 4);
 
-    const width = 1000;
+    const includeAlliance = options.includeAlliance === true;
+    const width = includeAlliance ? 1000 : 760;
     const rowHeight = 56;
     const headerHeight = 64;
     const padding = 20;
@@ -1063,12 +1064,20 @@ async function generateGuildSummaryImage(guildsData, options = {}) {
 
     ctx.fillStyle = '#949ba4';
     ctx.font = 'bold 16px sans-serif';
-    ctx.fillText('ALLIANCE', padding + 10, padding + 38);
-    ctx.fillText('NAME', 220, padding + 38);
-    ctx.fillText('PLAYERS', 465, padding + 38);
-    ctx.fillText('KILLS', 595, padding + 38);
-    ctx.fillText('DEATHS', 700, padding + 38);
-    ctx.fillText('FAME', 820, padding + 38);
+    if (includeAlliance) {
+        ctx.fillText('ALLIANCE', padding + 10, padding + 38);
+        ctx.fillText('NAME', 220, padding + 38);
+        ctx.fillText('PLAYERS', 465, padding + 38);
+        ctx.fillText('KILLS', 595, padding + 38);
+        ctx.fillText('DEATHS', 700, padding + 38);
+        ctx.fillText('FAME', 820, padding + 38);
+    } else {
+        ctx.fillText('NAME', padding + 10, padding + 38);
+        ctx.fillText('PLAYERS', 340, padding + 38);
+        ctx.fillText('KILLS', 460, padding + 38);
+        ctx.fillText('DEATHS', 560, padding + 38);
+        ctx.fillText('FAME', 660, padding + 38);
+    }
 
     ctx.strokeStyle = '#2b2d31';
     ctx.lineWidth = 2;
@@ -1080,27 +1089,37 @@ async function generateGuildSummaryImage(guildsData, options = {}) {
     topGuilds.forEach((g, i) => {
         const y = padding + headerHeight + (i * rowHeight);
 
-        const allianceName = String(g.alliance || '-').trim();
-        ctx.fillStyle = '#c084fc';
-        ctx.font = 'bold 16px sans-serif';
-        ctx.fillText(allianceName.length > 16 ? allianceName.slice(0, 14) + '..' : allianceName, padding + 10, y + 36);
-
         ctx.fillStyle = '#ffffff';
         ctx.font = 'bold 20px sans-serif';
         const gName = String(g.name || 'Unknown');
-        ctx.fillText(gName.length > 22 ? gName.slice(0, 20) + '..' : gName, 220, y + 36);
-
-        ctx.fillStyle = '#3399ff';
-        ctx.fillText(String(g.playersCount || 0), 465, y + 36);
-
-        ctx.fillStyle = '#ff5555';
-        ctx.fillText(String(g.kills || 0), 595, y + 36);
-
-        ctx.fillStyle = '#ff66cc';
-        ctx.fillText(String(g.deaths || 0), 700, y + 36);
-
-        ctx.fillStyle = '#ffcc00';
-        ctx.fillText(formatFame(g.killFame || 0), 820, y + 36);
+        if (includeAlliance) {
+            const allianceName = String(g.alliance || '-').trim();
+            ctx.fillStyle = '#c084fc';
+            ctx.font = 'bold 16px sans-serif';
+            ctx.fillText(allianceName.length > 16 ? allianceName.slice(0, 14) + '..' : allianceName, padding + 10, y + 36);
+            ctx.fillStyle = '#ffffff';
+            ctx.font = 'bold 20px sans-serif';
+            ctx.fillText(gName.length > 22 ? gName.slice(0, 20) + '..' : gName, 220, y + 36);
+            ctx.fillStyle = '#3399ff';
+            ctx.fillText(String(g.playersCount || 0), 465, y + 36);
+            ctx.fillStyle = '#ff5555';
+            ctx.fillText(String(g.kills || 0), 595, y + 36);
+            ctx.fillStyle = '#ff66cc';
+            ctx.fillText(String(g.deaths || 0), 700, y + 36);
+            ctx.fillStyle = '#ffcc00';
+            ctx.fillText(formatFame(g.killFame || 0), 820, y + 36);
+        } else {
+            const legacyName = gName.length > 20 ? gName.slice(0, 18) + '..' : gName;
+            ctx.fillText(legacyName, padding + 10, y + 36);
+            ctx.fillStyle = '#3399ff';
+            ctx.fillText(String(g.playersCount || 0), 340, y + 36);
+            ctx.fillStyle = '#ff5555';
+            ctx.fillText(String(g.kills || 0), 460, y + 36);
+            ctx.fillStyle = '#ff66cc';
+            ctx.fillText(String(g.deaths || 0), 560, y + 36);
+            ctx.fillStyle = '#ffcc00';
+            ctx.fillText(formatFame(g.killFame || 0), 660, y + 36);
+        }
     });
 
     return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: 'guild-summary.png' });
@@ -2137,7 +2156,7 @@ async function processBattleReport(input, targetContext, isMessage = false) {
                 (Number(b.killFame) || 0) - (Number(a.killFame) || 0)
             );
             try {
-                const mergedGuildImage = await generateGuildSummaryImage(mergedGuildRows, { includeAll: true });
+                const mergedGuildImage = await generateGuildSummaryImage(mergedGuildRows, { includeAll: true, includeAlliance: true });
                 if (mergedGuildImage) files.push(mergedGuildImage);
             } catch (err) {
                 console.error('❌ BattleLink merged guild summary error:', err.message);
