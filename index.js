@@ -4754,7 +4754,7 @@ client.once('ready', async () => {
     } catch (err) { console.error('❌ Slash command registration error:', err); }
 
     setTimeout(async () => {
-        const seeded = await primeAutoBattleHistory();
+        const seeded = await primeAutoBattleHistoryForGuild();
         console.log(`🛡️ Auto-Battle initialized: marked ${seeded} existing battle(s) as already seen. No historical backlog will be reported.`);
     }, 5000);
 
