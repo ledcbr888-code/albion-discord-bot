@@ -2130,7 +2130,8 @@ async function processBattleReport(input, targetContext, isMessage = false) {
             const totalKills = results.reduce((sum, r) => sum + (Number(r.totalKills) || 0), 0);
             const totalDeaths = results.reduce((sum, r) => sum + (Number(r.totalDeaths) || 0), 0);
             const totalFame = results.reduce((sum, r) => sum + (Number(r.totalFame) || 0), 0);
-            const links = results.map(r => '• [' + r.matchId + '](https://east.albionbb.com/battles/' + r.matchId + ')').join('\n');
+            // Angle-bracket URLs keep Discord from rendering AlbionBB link-preview cards in the bot report.
+            const links = results.map(r => '• <https://east.albionbb.com/battles/' + r.matchId + '>').join('\n');
             const warning = failures.length ? '\n⚠️ ดึงข้อมูลไม่สำเร็จ ' + failures.length + ' ไฟต์: ' + failures.map(f => f.id + ' (' + f.reason + ')').join('; ') : '';
             // BattleLink only: combine player K/D and fame across all linked fights.
             // Keep the first weapon found for each player, in link order.
