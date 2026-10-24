@@ -109,6 +109,25 @@ function tryLoadCanvas() {
     return null;
 }
 
+let ctaThaiFontRegistered = false;
+function ensureCtaThaiFont(canvasLib) {
+    if (ctaThaiFontRegistered || !canvasLib) return;
+    const fontPath = path.join(__dirname, 'assets', 'NotoSansThai-CondensedBold.ttf');
+    if (!fs.existsSync(fontPath)) return;
+    try {
+        if (canvasLib.GlobalFonts && typeof canvasLib.GlobalFonts.registerFromPath === 'function') {
+            canvasLib.GlobalFonts.registerFromPath(fontPath, 'CtaThai');
+        } else if (typeof canvasLib.registerFont === 'function') {
+            canvasLib.registerFont(fontPath, { family: 'CtaThai', weight: 'bold' });
+        } else {
+            return;
+        }
+        ctaThaiFontRegistered = true;
+    } catch (err) {
+        console.warn('CTA Thai font registration failed:', err.message);
+    }
+}
+
 // ===== FUZZY SEARCH =====
 function fuzzyScore(target, query) {
     if (!query) return 0;
@@ -257,21 +276,26 @@ async function loadWeaponImageCached(name, loadImage) {
     return null;
 }
 
-async function buildWeaponGridImage(weapons, usedMap, currentRole) {
-    const cacheKey = `${currentRole}:${weapons.join(',')}:${Array.from(usedMap.entries()).join(';')}`;
+async function buildWeaponGridImage(weapons, usedMap, currentRole, gridPage = 0) {
+    const PAGE_SIZE = 16;
+    const totalPages = Math.max(1, Math.ceil(weapons.length / PAGE_SIZE));
+    const safePage = Math.min(totalPages - 1, Math.max(0, Number(gridPage) || 0));
+    const pageWeapons = weapons.slice(safePage * PAGE_SIZE, safePage * PAGE_SIZE + PAGE_SIZE);
+    const cacheKey = `${currentRole}:${weapons.join(',')}:${Array.from(usedMap.entries()).join(';')}:page-${safePage}`;
     if (gridCache.has(cacheKey)) return gridCache.get(cacheKey);
 
     const canvasLib = tryLoadCanvas();
     if (!canvasLib) return null;
+    ensureCtaThaiFont(canvasLib);
     const { createCanvas, loadImage } = canvasLib;
-    
-    // OPTIMIZED SIZE: จากเดิม 420x520 -> 200x240 (เล็กกว่า 4 เท่า = เร็วขึ้น 4 เท่า)
+
+    // Four columns x four rows: fixed 16 weapons per image for readability.
     const cols = 4;
     const cellW = 240;
     const cellH = 220;
     const padding = 12;
     const headerH = 60;
-    const rows = Math.ceil(weapons.length / cols);
+    const rows = Math.ceil(pageWeapons.length / cols);
     const width = cols * cellW + (cols + 1) * padding;
     const height = headerH + rows * cellH + (rows + 1) * padding;
     const canvas = createCanvas(width, height);
@@ -279,14 +303,14 @@ async function buildWeaponGridImage(weapons, usedMap, currentRole) {
     ctx.fillStyle = '#232428'; ctx.fillRect(0, 0, width, height);
     ctx.fillStyle = '#1e1f22'; ctx.fillRect(0, 0, width, headerH);
     ctx.fillStyle = '#ffffff'; ctx.font = 'bold 24px sans-serif';
-    ctx.fillText((ROLE_LABELS_SHORT[currentRole] || currentRole) + ' - ' + weapons.length + ' WEAPONS', padding + 12, 38);
+    ctx.fillText((ROLE_LABELS_SHORT[currentRole] || currentRole) + ' - ' + weapons.length + ' WEAPONS  |  PAGE ' + (safePage + 1) + '/' + totalPages, padding + 12, 38);
 
-    // Parallel load all images
-    const imagePromises = weapons.map(w => loadWeaponImageCached(w, loadImage));
+    // Load only this image page's weapon icons.
+    const imagePromises = pageWeapons.map(w => loadWeaponImageCached(w, loadImage));
     const loadedImages = await Promise.all(imagePromises);
 
-    for (let idx = 0; idx < weapons.length; idx++) {
-        const wName = weapons[idx];
+    for (let idx = 0; idx < pageWeapons.length; idx++) {
+        const wName = pageWeapons[idx];
         const col = idx % cols;
         const row = Math.floor(idx / cols);
         const x = padding + col * (cellW + padding);
@@ -331,6 +355,7 @@ async function buildRosterSmallIconImage(event) {
 
     const canvasLib = tryLoadCanvas();
     if (!canvasLib) return null;
+    ensureCtaThaiFont(canvasLib);
     const { createCanvas, loadImage } = canvasLib;
     const slots = event.slots;
     const cols = 3;
@@ -382,12 +407,12 @@ async function buildRosterSmallIconImage(event) {
         const roleText = (i + 1) + '. ' + (ROLE_LABELS_SHORT[slot.role] || slot.role).toUpperCase();
         ctx.fillStyle = '#f2f3f5'; ctx.font = 'bold 18px sans-serif';
         ctx.fillText(roleText, textX, y + 31, textW);
-        ctx.fillStyle = '#ffd166'; ctx.font = 'bold 17px sans-serif';
+        ctx.fillStyle = '#ffd166'; ctx.font = 'bold 17px "CtaThai", sans-serif';
         ctx.fillText(slot.weapon ? displayWeapon(slot.weapon) : 'ยังไม่กำหนดอาวุธ', textX, y + 57, textW);
-        ctx.fillStyle = slot.userId ? '#ffffff' : '#a0a3ad'; ctx.font = 'bold 16px sans-serif';
+        ctx.fillStyle = slot.userId ? '#ffffff' : '#a0a3ad'; ctx.font = 'bold 16px "CtaThai", sans-serif';
         const playerText = slot.userId ? '@' + (slot.userName || 'Joined') : 'ว่าง • รอผู้ลงชื่อ';
         ctx.fillText(playerText, textX, y + 88, textW);
-        ctx.fillStyle = slot.userId ? '#23a559' : '#6d6f78'; ctx.font = 'bold 12px sans-serif';
+        ctx.fillStyle = slot.userId ? '#23a559' : '#6d6f78'; ctx.font = 'bold 12px "CtaThai", sans-serif';
         ctx.fillText(slot.userId ? 'ลงชื่อแล้ว' : 'OPEN SLOT', textX, y + 112, textW);
     }
     const buffer = canvas.toBuffer('image/png');
@@ -399,16 +424,15 @@ async function buildRosterSmallIconImage(event) {
 function weaponPanel(session) {
     const slot = session.slots[session.slotIndex];
     const pageData = weaponOptions(slot.role, session.page || 0, session.search || '');
-    // Discord allows at most 25 options per select menu. Split the complete weapon list
-    // across menus so users do not need a "next page" button to find the last weapons.
     const rows = [];
-    const allOptions = pageData.filtered.map(name => ({ label: displayWeapon(name), value: name, description: 'เลือก ' + displayWeapon(name) }));
-    for (let start = 0, group = 0; start < allOptions.length; start += 25, group++) {
+
+    // Keep one dropdown only. Use the next selector button for option pages.
+    if (pageData.options.length) {
         const select = new StringSelectMenuBuilder()
-            .setCustomId('cta:weapon:' + session.id + ':' + session.slotIndex + ':' + pageData.page + ':' + group)
-            .setPlaceholder((group ? 'อาวุธเพิ่มเติม' : 'เลือกอาวุธ') + ' • ' + Math.min(start + 1, allOptions.length) + '-' + Math.min(start + 25, allOptions.length) + '/' + allOptions.length)
+            .setCustomId('cta:weapon:' + session.id + ':' + session.slotIndex + ':' + pageData.page)
+            .setPlaceholder('เลือกอาวุธ • ' + (pageData.page + 1) + '/' + pageData.totalPages)
             .setMinValues(1).setMaxValues(1)
-            .addOptions(allOptions.slice(start, start + 25));
+            .addOptions(pageData.options);
         rows.push(new ActionRowBuilder().addComponents(select));
     }
     const controls = [
@@ -416,9 +440,21 @@ function weaponPanel(session) {
         new ButtonBuilder().setCustomId('cta:prev:' + session.id).setLabel('ย้อนกลับ').setStyle(ButtonStyle.Secondary).setDisabled(session.slotIndex === 0),
         new ButtonBuilder().setCustomId('cta:cancel:' + session.id).setLabel('ยกเลิก').setStyle(ButtonStyle.Danger)
     ];
-    const totalImagePages = Math.max(1, Math.ceil(pageData.filtered.length / 12));
+    const totalImagePages = Math.max(1, Math.ceil(pageData.filtered.length / 16));
     if (totalImagePages > 1) {
-        controls.unshift(new ButtonBuilder().setCustomId('cta:gridpage:' + session.id + ':' + ((Number(session.gridPage) || 0) + 1 >= totalImagePages ? 0 : (Number(session.gridPage) || 0) + 1)).setLabel('รูปอาวุธหน้า ' + (((Number(session.gridPage) || 0) + 1) % totalImagePages + 1) + '/' + totalImagePages).setStyle(ButtonStyle.Primary));
+        const currentGridPage = Math.min(totalImagePages - 1, Math.max(0, Number(session.gridPage) || 0));
+        const nextGridPage = (currentGridPage + 1) % totalImagePages;
+        controls.unshift(new ButtonBuilder()
+            .setCustomId('cta:gridpage:' + session.id + ':' + nextGridPage)
+            .setLabel('รูปอาวุธหน้าถัดไป ' + (nextGridPage + 1) + '/' + totalImagePages)
+            .setStyle(ButtonStyle.Primary));
+    }
+    if (pageData.totalPages > 1) {
+        const nextWeaponPage = ((Number(session.page) || 0) + 1) % pageData.totalPages;
+        controls.splice(1, 0, new ButtonBuilder()
+            .setCustomId('cta:page:' + session.id + ':' + nextWeaponPage)
+            .setLabel('ตัวเลือกอาวุธหน้าถัดไป ' + (nextWeaponPage + 1) + '/' + pageData.totalPages)
+            .setStyle(ButtonStyle.Secondary));
     }
     rows.push(new ActionRowBuilder().addComponents(controls));
     const searchInfo = session.search ? ' | ค้นหา: **' + session.search + '** (' + pageData.filtered.length + ' ผลลัพธ์)' : '';
@@ -508,9 +544,9 @@ async function weaponPanelPayload(session) {
     ].filter(Boolean);
     const infoEmbed = new EmbedBuilder().setColor(0xd99a3d).setTitle('🗡️ กำหนดอาวุธ — ' + (ROLE_LABELS[slot.role] || slot.role)).setDescription(description.join('\n').slice(0, 4000)).setFooter({ text: 'Fuzzy Search: blaz → Blazing, bracer → Battle Bracers' });
     let gridBuffer = null;
-    try { const weaponsOnPage = data.filtered.slice(data.page * 25, data.page * 25 + 25); gridBuffer = await buildWeaponGridImage(weaponsOnPage, usedMap, slot.role); } catch (e) { console.error('grid error', e.message); }
+    try { gridBuffer = await buildWeaponGridImage(data.filtered, usedMap, slot.role, session.gridPage || 0); } catch (e) { console.error('grid error', e.message); }
     const files = [];
-    if (gridBuffer) { const attName = 'weapon-grid-' + session.id + '.png'; files.push(new AttachmentBuilder(gridBuffer, { name: attName })); const gridEmbed = new EmbedBuilder().setColor(0x232428).setTitle((ROLE_LABELS_SHORT[slot.role] || slot.role) + ' - ' + data.filtered.length + ' WEAPONS').setImage('attachment://' + attName).setFooter({ text: 'Optimized: 200x240 | Cache enabled | GitHub CDN fallback' }); return { ...panel, embeds: [infoEmbed, gridEmbed], files, attachments: [] }; }
+    if (gridBuffer) { const attName = 'weapon-grid-' + session.id + '.png'; files.push(new AttachmentBuilder(gridBuffer, { name: attName })); const totalGridPages = Math.max(1, Math.ceil(data.filtered.length / 16)); const safeGridPage = Math.min(totalGridPages - 1, Math.max(0, Number(session.gridPage) || 0)); const gridEmbed = new EmbedBuilder().setColor(0x232428).setTitle((ROLE_LABELS_SHORT[slot.role] || slot.role) + ' - ' + data.filtered.length + ' WEAPONS · IMAGE ' + (safeGridPage + 1) + '/' + totalGridPages).setImage('attachment://' + attName).setFooter({ text: '16 weapons per image page' }); return { ...panel, embeds: [infoEmbed, gridEmbed], files, attachments: [] }; }
     else { return { ...panel, embeds: [infoEmbed], files: [], attachments: [] }; }
 }
 
@@ -725,11 +761,11 @@ async function handleInteraction(interaction, deps) {
     if (action === 'searchsubmit') {
         const index = Number(parts[3]);
         if (index !== session.slotIndex) { await interaction.reply({ content: 'ไม่ตรง', flags: MessageFlags.Ephemeral }); return true; }
-        session.search = safeText(interaction.fields.getTextInputValue('query'), 40); session.page = 0;
+        session.search = safeText(interaction.fields.getTextInputValue('query'), 40); session.page = 0; session.gridPage = 0;
         await interaction.update(await weaponPanelPayload(session));
         return true;
     }
-    if (action === 'page') { session.page = Number(parts[3]) || 0; await interaction.update(await weaponPanelPayload(session)); return true; }
+    if (action === 'page') { session.page = Number(parts[3]) || 0; session.gridPage = 0; await interaction.update(await weaponPanelPayload(session)); return true; }
     if (action === 'prev') { session.slotIndex = Math.max(0, session.slotIndex - 1); session.page = 0; session.search = ''; await interaction.update(await weaponPanelPayload(session)); return true; }
     if (action === 'cancel') { sessions.delete(id); await interaction.update({ content: 'ยกเลิกแล้ว', components: [], embeds: [], attachments: [] }); return true; }
     if (action === 'saveyes') { await interaction.showModal(saveModal(id)); return true; }
