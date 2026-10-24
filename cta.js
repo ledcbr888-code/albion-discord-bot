@@ -350,7 +350,7 @@ async function buildWeaponGridImage(weapons, usedMap, currentRole, gridPage = 0)
 }
 
 async function buildRosterSmallIconImage(event) {
-    const cacheKey = event.id + ':' + event.slots.map(s => s.weapon + s.userId).join('|') + ':GRID3';
+    const cacheKey = event.id + ':' + event.slots.map(s => [s.weapon || '', s.userId || '', s.userName || ''].join(':')).join('|') + ':GRID3';
     if (rosterCache.has(cacheKey)) return rosterCache.get(cacheKey);
 
     const canvasLib = tryLoadCanvas();
