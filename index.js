@@ -1064,10 +1064,23 @@ async function generateGuildSummaryImage(guildsData, options = {}) {
 
     ctx.font = 'bold 16px sans-serif';
     if (includeAlliance) {
-        const headers = [{text:'ALLIANCE',x:30,w:150,color:'#4dd0e1'},{text:'NAME',x:190,w:210,color:'#ffd166'},{text:'PLAYERS',x:410,w:110,color:'#a78bfa'},{text:'KILLS',x:530,w:100,color:'#ff9f43'},{text:'DEATHS',x:640,w:110,color:'#f472b6'},{text:'FAME',x:760,w:190,color:'#7ee787'}];
-        for (const h of headers) { ctx.fillStyle=h.color; ctx.textAlign='center'; ctx.fillText(h.text,h.x+h.w/2,padding+38); }
-        ctx.textAlign='left';
-        ctx.strokeStyle='#596273'; ctx.lineWidth=1; ctx.setLineDash([]); ctx.beginPath(); ctx.moveTo(30,padding+49); ctx.lineTo(950,padding+49); ctx.stroke();
+        // Use one fixed column grid for both header labels and row values.
+        // Each label is centered on the exact same column center.
+        const columns = [
+            { key:'alliance', x:30,  w:150, title:'ALLIANCE', color:'#4dd0e1' },
+            { key:'name',     x:180, w:230, title:'NAME',     color:'#ffd166' },
+            { key:'players',  x:410, w:110, title:'PLAYERS',  color:'#a78bfa' },
+            { key:'kills',    x:520, w:110, title:'KILLS',    color:'#ff9f43' },
+            { key:'deaths',   x:630, w:120, title:'DEATHS',   color:'#f472b6' },
+            { key:'fame',     x:750, w:220, title:'FAME',     color:'#7ee787' }
+        ];
+        for (const col of columns) {
+            ctx.fillStyle = col.color;
+            ctx.textAlign = 'center';
+            ctx.fillText(col.title, col.x + col.w / 2, padding + 38);
+        }
+        ctx.textAlign = 'left';
+        ctx.strokeStyle='#596273'; ctx.lineWidth=1; ctx.setLineDash([]); ctx.beginPath(); ctx.moveTo(30,padding+49); ctx.lineTo(970,padding+49); ctx.stroke();
     } else {
         ctx.fillText('NAME', padding + 10, padding + 38);
         ctx.fillText('PLAYERS', 340, padding + 38);
@@ -1091,8 +1104,20 @@ async function generateGuildSummaryImage(guildsData, options = {}) {
         const gName = String(g.name || 'Unknown');
         if (includeAlliance) {
             const allianceName = String(g.alliance || '-').trim();
-            const cells=[{text:allianceName.length>16?allianceName.slice(0,14)+'..':allianceName,x:30,w:150,color:'#c084fc',font:'bold 16px sans-serif'},{text:gName.length>22?gName.slice(0,20)+'..':gName,x:190,w:210,color:'#ffffff',font:'bold 20px sans-serif'},{text:String(g.playersCount||0),x:410,w:110,color:'#3399ff',font:'bold 20px sans-serif'},{text:String(g.kills||0),x:530,w:100,color:'#ff5555',font:'bold 20px sans-serif'},{text:String(g.deaths||0),x:640,w:110,color:'#ff66cc',font:'bold 20px sans-serif'},{text:formatFame(g.killFame||0),x:760,w:190,color:'#ffcc00',font:'bold 20px sans-serif'}];
-            for (const c of cells) { ctx.fillStyle=c.color; ctx.font=c.font; ctx.textAlign='center'; ctx.fillText(c.text,c.x+c.w/2,y+36); }
+            const cells=[
+                {text:allianceName.length>16?allianceName.slice(0,14)+'..':allianceName,x:30,w:150,color:'#c084fc',font:'bold 16px sans-serif'},
+                {text:gName.length>24?gName.slice(0,22)+'..':gName,x:180,w:230,color:'#ffffff',font:'bold 20px sans-serif'},
+                {text:String(g.playersCount||0),x:410,w:110,color:'#3399ff',font:'bold 20px sans-serif'},
+                {text:String(g.kills||0),x:520,w:110,color:'#ff5555',font:'bold 20px sans-serif'},
+                {text:String(g.deaths||0),x:630,w:120,color:'#ff66cc',font:'bold 20px sans-serif'},
+                {text:formatFame(g.killFame||0),x:750,w:220,color:'#ffcc00',font:'bold 20px sans-serif'}
+            ];
+            for (const c of cells) {
+                ctx.fillStyle=c.color;
+                ctx.font=c.font;
+                ctx.textAlign='center';
+                ctx.fillText(c.text,c.x+c.w/2,y+36);
+            }
             ctx.textAlign='left';
         } else {
             const legacyName = gName.length > 20 ? gName.slice(0, 18) + '..' : gName;
