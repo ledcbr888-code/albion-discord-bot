@@ -1067,12 +1067,12 @@ async function generateGuildSummaryImage(guildsData, options = {}) {
         // Use one fixed column grid for both header labels and row values.
         // Each label is centered on the exact same column center.
         const columns = [
-            { key:'alliance', x:30,  w:150, title:'ALLIANCE', color:'#4dd0e1' },
-            { key:'name',     x:180, w:230, title:'NAME',     color:'#ffd166' },
-            { key:'players',  x:410, w:110, title:'PLAYERS',  color:'#a78bfa' },
-            { key:'kills',    x:520, w:110, title:'KILLS',    color:'#ff9f43' },
-            { key:'deaths',   x:630, w:120, title:'DEATHS',   color:'#f472b6' },
-            { key:'fame',     x:750, w:220, title:'FAME',     color:'#7ee787' }
+            { key:'alliance', x:30,  w:150, title:'ALLIANCE', color:'#ffffff' },
+            { key:'name',     x:180, w:230, title:'NAME',     color:'#ffffff' },
+            { key:'players',  x:410, w:110, title:'PLAYERS',  color:'#ffffff' },
+            { key:'kills',    x:520, w:110, title:'KILLS',    color:'#ffffff' },
+            { key:'deaths',   x:630, w:120, title:'DEATHS',   color:'#ffffff' },
+            { key:'fame',     x:750, w:220, title:'FAME',     color:'#ffffff' }
         ];
         for (const col of columns) {
             ctx.fillStyle = col.color;
@@ -2242,7 +2242,7 @@ async function processBattleReport(input, targetContext, isMessage = false) {
             const center = (v,w) => { const t=String(v); const l=Math.max(0,Math.floor((w-t.length)/2)); return ' '.repeat(l)+t+' '.repeat(Math.max(0,w-t.length-l)); };
             const colorNumber = (n,type) => { const v=Number(n)||0; return (v===0?ansi.white:(type==='kills'?ansi.red:ansi.green))+String(v)+ansi.reset; };
             const cellNumber = (n,type,w) => { const v=Number(n)||0; return (v===0?ansi.white:(type==='kills'?ansi.red:ansi.green))+center(v,w)+ansi.reset; };
-            const guildHeaders = () => center(ansi.cyan+'Alliance'+ansi.reset,12)+center(ansi.yellow+'NAME'+ansi.reset,12)+center(ansi.magenta+'PLAYERS'+ansi.reset,9)+center(ansi.yellow+'KILLS'+ansi.reset,8)+center(ansi.cyan+'DEATHS'+ansi.reset,8)+'\n'+ansi.white+'─'.repeat(59)+ansi.reset;
+            const guildHeaders = () => ansi.yellow + center('ALLIANCE',12) + center('NAME',14) + center('PLAYERS',8) + center('KILLS',8) + center('DEATHS',8) + center('FAME',10) + ansi.reset + '\n' + ansi.white + '─'.repeat(60) + ansi.reset;
             let textReport = ansi.blue + 'Battle Report | Date: ' + reportDate + ansi.reset + '\n';
             let totalFameReport = 0;
             if (hasTrackedPlayers && !hasTrackedGuilds) {
@@ -2261,14 +2261,26 @@ async function processBattleReport(input, targetContext, isMessage = false) {
                 }
                 textReport += ansi.red + center('TOTAL',nw)+center(sumKills,kw)+center(sumDeaths,dw) + ansi.reset;
             } else if (hasTrackedGuilds) {
-                const aw=12, nw=12, pw=9, kw=8, dw=8;
+                const aw=12, nw=14, pw=8, kw=8, dw=8, fw=10;
                 textReport += guildHeaders()+'\n';
                 let sumPlayers=0, sumKills=0, sumDeaths=0;
                 for (const g of mergedGuildRows) {
-                    textReport += center(String(g.alliance || '-').slice(0,aw),aw)+center(String(g.name || 'Unknown').slice(0,nw),nw)+cellNumber(g.playersCount,'players',pw)+cellNumber(g.kills,'kills',kw)+cellNumber(g.deaths,'deaths',dw)+'\n';
-                    sumPlayers+=Number(g.playersCount)||0; sumKills+=Number(g.kills)||0; sumDeaths+=Number(g.deaths)||0; totalFameReport+=Number(g.killFame)||0;
+                    textReport += center(String(g.alliance || '-').slice(0,aw),aw) +
+                        center(String(g.name || 'Unknown').slice(0,nw),nw) +
+                        cellNumber(g.playersCount,'players',pw) +
+                        cellNumber(g.kills,'kills',kw) +
+                        cellNumber(g.deaths,'deaths',dw) +
+                        ansi.yellow + center(formatFame(g.killFame || 0),fw) + ansi.reset + '\n';
+                    sumPlayers+=Number(g.playersCount)||0;
+                    sumKills+=Number(g.kills)||0;
+                    sumDeaths+=Number(g.deaths)||0;
+                    totalFameReport+=Number(g.killFame)||0;
                 }
-                textReport += ansi.red+'TOTAL'.padEnd(aw+nw)+cellNumber(sumPlayers,'players',pw)+cellNumber(sumKills,'kills',kw)+cellNumber(sumDeaths,'deaths',dw)+ansi.reset;
+                textReport += ansi.red + center('TOTAL',aw+nw) +
+                    cellNumber(sumPlayers,'players',pw) +
+                    cellNumber(sumKills,'kills',kw) +
+                    cellNumber(sumDeaths,'deaths',dw) +
+                    ansi.yellow + center(formatFame(totalFameReport),fw) + ansi.reset;
             } else { totalFameReport = totalFame; textReport += 'Kills: '+totalKills.toLocaleString()+' | Deaths: '+totalDeaths.toLocaleString(); }
             textReport += '\n' + ansi.red + 'Total Fame: ' + totalFameReport.toLocaleString() + ansi.reset + '\n';            const ticks = String.fromCharCode(96).repeat(3);
             const payload = {
@@ -2302,11 +2314,11 @@ async function processBattleReport(input, targetContext, isMessage = false) {
             const reportDate = new Date(battleResult.battleTime || Date.now()).toLocaleDateString('en-GB', { timeZone: 'UTC' });
             const hasTrackedPlayers = Array.isArray(trackedPlayers) && trackedPlayers.length > 0;
             const hasTrackedGuilds = Array.isArray(guildConfig?.guilds) && guildConfig.guilds.length > 0;
-            const ansi = { blue: '\x1b[34m', red: '\x1b[31m', green: '\x1b[32m', white: '\x1b[37m', reset: '\x1b[0m' };
+            const ansi = { blue: '\x1b[34m', red: '\x1b[31m', green: '\x1b[32m', white: '\x1b[37m', yellow: '\x1b[33m', reset: '\x1b[0m' };
             const center = (v,w) => { const t=String(v); const left=Math.max(0,Math.floor((w-t.length)/2)); return ' '.repeat(left)+t+' '.repeat(Math.max(0,w-t.length-left)); };
             const colorNumber = (n,type) => { const v=Number(n)||0; return (v===0?ansi.white:(type==='kills'?ansi.red:ansi.green))+String(v)+ansi.reset; };
             const cellNumber = (n,type,w) => { const v=Number(n)||0; return (v===0?ansi.white:(type==='kills'?ansi.red:ansi.green))+center(v,w)+ansi.reset; };
-            const guildHeaders = () => center(ansi.cyan+'Alliance'+ansi.reset,12)+center(ansi.yellow+'NAME'+ansi.reset,12)+center(ansi.magenta+'PLAYERS'+ansi.reset,9)+center(ansi.yellow+'KILLS'+ansi.reset,8)+center(ansi.cyan+'DEATHS'+ansi.reset,8)+'\n'+ansi.white+'─'.repeat(59)+ansi.reset;
+            const guildHeaders = () => ansi.yellow + center('ALLIANCE',12) + center('NAME',14) + center('PLAYERS',8) + center('KILLS',8) + center('DEATHS',8) + center('FAME',10) + ansi.reset + '\n' + ansi.white + '─'.repeat(60) + ansi.reset;
             let textReport = ansi.blue + 'Battle Report | Date: ' + reportDate + ansi.reset + '\n';
             let totalFameReport = 0;
             if (hasTrackedPlayers && !hasTrackedGuilds) {
@@ -2318,13 +2330,13 @@ async function processBattleReport(input, targetContext, isMessage = false) {
                 }
                 textReport += ansi.red+center('TOTAL',nw)+center(sumKills,kw)+center(sumDeaths,dw)+ansi.reset;
             } else if (hasTrackedGuilds) {
-                const aw=12,nw=12,pw=9,kw=8,dw=8; textReport += guildHeaders()+'\n';
+                const aw=12,nw=14,pw=8,kw=8,dw=8,fw=10; textReport += guildHeaders()+'\n';
                 let sumPlayers=0,sumKills=0,sumDeaths=0;
                 for (const g of (Array.isArray(battleResult.guildSummaryData)?battleResult.guildSummaryData:[])) {
-                    textReport += center(String(g.alliance||'-').slice(0,aw),aw)+center(String(g.name||'Unknown').slice(0,nw),nw)+cellNumber(g.playersCount,'players',pw)+cellNumber(g.kills,'kills',kw)+cellNumber(g.deaths,'deaths',dw)+'\n';
+                    textReport += center(String(g.alliance||'-').slice(0,aw),aw)+center(String(g.name||'Unknown').slice(0,nw),nw)+cellNumber(g.playersCount,'players',pw)+cellNumber(g.kills,'kills',kw)+cellNumber(g.deaths,'deaths',dw)+ansi.yellow+center(formatFame(g.killFame||0),fw)+ansi.reset+'\n';
                     sumPlayers+=Number(g.playersCount)||0; sumKills+=Number(g.kills)||0; sumDeaths+=Number(g.deaths)||0; totalFameReport+=Number(g.killFame)||0;
                 }
-                textReport += ansi.red+'TOTAL'.padEnd(aw+nw)+cellNumber(sumPlayers,'players',pw)+cellNumber(sumKills,'kills',kw)+cellNumber(sumDeaths,'deaths',dw)+ansi.reset;
+                textReport += ansi.red+center('TOTAL',aw+nw)+cellNumber(sumPlayers,'players',pw)+cellNumber(sumKills,'kills',kw)+cellNumber(sumDeaths,'deaths',dw)+ansi.yellow+center(formatFame(totalFameReport),fw)+ansi.reset;
             } else { totalFameReport=Number(battleResult.totalFame)||0; textReport += 'Kills: '+totalKills.toLocaleString()+' | Deaths: '+totalDeaths.toLocaleString(); }
             textReport += '\n' + ansi.red + 'Total Fame: ' + totalFameReport.toLocaleString() + ansi.reset + '\n';            const ticks = String.fromCharCode(96).repeat(3);
             payload.content = '📋\n' + ticks + 'ansi\n' + textReport + ticks + '\n\n' + '🔗 **Battle Link:** <' + battleUrl + '>' + (files.length ? '\n🖼️ **Battle Report:** รูปรายงานอยู่ด้านล่าง' : '');
