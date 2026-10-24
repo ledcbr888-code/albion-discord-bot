@@ -1067,6 +1067,7 @@ async function generateGuildSummaryImage(guildsData, options = {}) {
         const headers = [{text:'ALLIANCE',x:30,w:150,color:'#4dd0e1'},{text:'NAME',x:190,w:210,color:'#ffd166'},{text:'PLAYERS',x:410,w:110,color:'#a78bfa'},{text:'KILLS',x:530,w:100,color:'#ff9f43'},{text:'DEATHS',x:640,w:110,color:'#f472b6'},{text:'FAME',x:760,w:190,color:'#7ee787'}];
         for (const h of headers) { ctx.fillStyle=h.color; ctx.textAlign='center'; ctx.fillText(h.text,h.x+h.w/2,padding+38); }
         ctx.textAlign='left';
+        ctx.strokeStyle='#596273'; ctx.lineWidth=1; ctx.setLineDash([]); ctx.beginPath(); ctx.moveTo(30,padding+49); ctx.lineTo(950,padding+49); ctx.stroke();
     } else {
         ctx.fillText('NAME', padding + 10, padding + 38);
         ctx.fillText('PLAYERS', 340, padding + 38);
@@ -2216,7 +2217,7 @@ async function processBattleReport(input, targetContext, isMessage = false) {
             const center = (v,w) => { const t=String(v); const l=Math.max(0,Math.floor((w-t.length)/2)); return ' '.repeat(l)+t+' '.repeat(Math.max(0,w-t.length-l)); };
             const colorNumber = (n,type) => { const v=Number(n)||0; return (v===0?ansi.white:(type==='kills'?ansi.red:ansi.green))+String(v)+ansi.reset; };
             const cellNumber = (n,type,w) => { const v=Number(n)||0; return (v===0?ansi.white:(type==='kills'?ansi.red:ansi.green))+center(v,w)+ansi.reset; };
-            const guildHeaders = () => center(ansi.cyan+'Alliance'+ansi.reset,12)+center(ansi.yellow+'NAME'+ansi.reset,12)+center(ansi.magenta+'PLAYERS'+ansi.reset,9)+center(ansi.yellow+'KILLS'+ansi.reset,8)+center(ansi.cyan+'DEATHS'+ansi.reset,8);
+            const guildHeaders = () => center(ansi.cyan+'Alliance'+ansi.reset,12)+center(ansi.yellow+'NAME'+ansi.reset,12)+center(ansi.magenta+'PLAYERS'+ansi.reset,9)+center(ansi.yellow+'KILLS'+ansi.reset,8)+center(ansi.cyan+'DEATHS'+ansi.reset,8)+'\n'+ansi.white+'─'.repeat(59)+ansi.reset;
             let textReport = ansi.blue + 'Battle Report | Date: ' + reportDate + ansi.reset + '\n';
             let totalFameReport = 0;
             if (hasTrackedPlayers && !hasTrackedGuilds) {
