@@ -2068,7 +2068,7 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
             }
 
             guildSummaryData = guildsData;
-            guildSummaryAttachment = await generateGuildSummaryImage(guildsData);
+            guildSummaryAttachment = await generateGuildSummaryImage(guildsData, { includeAlliance: true });
         }
     } catch (err) {
         console.error('❌ Guild summary image error:', err.message);
