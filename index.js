@@ -2227,35 +2227,39 @@ async function processBattleReport(input, targetContext, isMessage = false) {
             const trackingConfig = guildId ? getGuildConfig(guildId, false) : null;
             const hasTrackedPlayers = Array.isArray(trackedPlayers) && trackedPlayers.length > 0;
             const hasTrackedGuilds = Array.isArray(trackingConfig?.guilds) && trackingConfig.guilds.length > 0;
-            let textReport = 'Battle Report | Date: ' + reportDate + '\n';
+            const ansi = { blue: '\x1b[34m', red: '\x1b[31m', green: '\x1b[32m', white: '\x1b[37m', reset: '\x1b[0m' };
+            const center = (v, w) => { const t = String(v); const left = Math.max(0, Math.floor((w - t.length) / 2)); return ' '.repeat(left) + t + ' '.repeat(Math.max(0, w - t.length - left)); };
+            const colorNumber = (n, type) => { const v = Number(n) || 0; const c = v === 0 ? ansi.white : (type === 'kills' ? ansi.red : ansi.green); return c + String(v) + ansi.reset; };
+            let textReport = ansi.blue + 'Battle Report | Date: ' + reportDate + ansi.reset + '\n';
+            let totalFameReport = 0;
             if (hasTrackedPlayers && !hasTrackedGuilds) {
                 const playerTotals = new Map();
                 for (const result of results) for (const p of (Array.isArray(result.playerReportData) ? result.playerReportData : [])) {
                     const name = String(p.displayName || p.name || '').trim(); if (!name) continue;
-                    const key = name.toLowerCase();
-                    const row = playerTotals.get(key) || { name, kills: 0, deaths: 0, fame: 0 };
-                    row.kills += Number(p.kills) || 0; row.deaths += Number(p.deaths) || 0; row.fame += Number(p.fame) || 0;
-                    playerTotals.set(key, row);
+                    const key = name.toLowerCase(); const row = playerTotals.get(key) || { name, kills: 0, deaths: 0, fame: 0 };
+                    row.kills += Number(p.kills) || 0; row.deaths += Number(p.deaths) || 0; row.fame += Number(p.fame) || 0; playerTotals.set(key, row);
                 }
-                textReport += 'Name'.padEnd(22) + 'Kills'.padEnd(10) + 'Deaths\n';
-                let sumKills = 0, sumDeaths = 0, sumFame = 0;
+                const nw=22, kw=10, dw=10;
+                textReport += center('Name',nw)+center('Kills',kw)+center('Deaths',dw)+'\n';
+                let sumKills=0, sumDeaths=0;
                 for (const p of playerTotals.values()) {
-                    textReport += p.name.padEnd(22).slice(0, 22) + String(p.kills).padEnd(10) + String(p.deaths) + '\n';
-                    sumKills += p.kills; sumDeaths += p.deaths; sumFame += p.fame;
+                    textReport += center(p.name.slice(0,nw),nw)+center(colorNumber(p.kills,'kills'),kw)+center(colorNumber(p.deaths,'deaths'),dw)+'\n';
+                    sumKills+=p.kills; sumDeaths+=p.deaths; totalFameReport+=p.fame;
                 }
-                textReport += 'TOTAL'.padEnd(22) + String(sumKills).padEnd(10) + String(sumDeaths) + '\nTotal Fame: ' + sumFame.toLocaleString();
+                textReport += ansi.red + center('TOTAL',nw)+center(sumKills,kw)+center(sumDeaths,dw) + ansi.reset;
             } else if (hasTrackedGuilds) {
-                textReport += 'Alliance'.padEnd(20) + 'NAME'.padEnd(24) + 'PLAYERS'.padEnd(10) + 'KILLS'.padEnd(9) + 'DEATHS'.padEnd(9) + 'FAME\n';
-                let sumPlayers = 0, sumKills = 0, sumDeaths = 0, sumFame = 0;
+                const aw=12, nw=12, pw=9, kw=8, dw=8;
+                textReport += center('Alliance',aw)+center('NAME',nw)+center('PLAYERS',pw)+center('KILLS',kw)+center('DEATHS',dw)+'\n';
+                let sumPlayers=0, sumKills=0, sumDeaths=0;
                 for (const g of mergedGuildRows) {
-                    textReport += String(g.alliance || '-').padEnd(20).slice(0, 20) + String(g.name || 'Unknown').padEnd(24).slice(0, 24) + String(Number(g.playersCount) || 0).padEnd(10) + String(Number(g.kills) || 0).padEnd(9) + String(Number(g.deaths) || 0).padEnd(9) + (Number(g.killFame) || 0).toLocaleString() + '\n';
-                    sumPlayers += Number(g.playersCount) || 0; sumKills += Number(g.kills) || 0; sumDeaths += Number(g.deaths) || 0; sumFame += Number(g.killFame) || 0;
+                    textReport += center(String(g.alliance || '-').slice(0,aw),aw)+center(String(g.name || 'Unknown').slice(0,nw),nw)+center(Number(g.playersCount)||0,pw)+center(colorNumber(g.kills,'kills'),kw)+center(colorNumber(g.deaths,'deaths'),dw)+'\n';
+                    sumPlayers+=Number(g.playersCount)||0; sumKills+=Number(g.kills)||0; sumDeaths+=Number(g.deaths)||0; totalFameReport+=Number(g.killFame)||0;
                 }
-                textReport += 'TOTAL'.padEnd(44) + String(sumPlayers).padEnd(10) + String(sumKills).padEnd(9) + String(sumDeaths).padEnd(9) + sumFame.toLocaleString();
-            } else textReport += 'Kills: ' + totalKills.toLocaleString() + ' | Deaths: ' + totalDeaths.toLocaleString() + ' | Fame: ' + totalFame.toLocaleString();
-            const ticks = String.fromCharCode(96).repeat(3);
+                textReport += ansi.red+center('TOTAL',aw+nw)+center(sumPlayers,pw)+center(sumKills,kw)+center(sumDeaths,dw)+ansi.reset;
+            } else { totalFameReport = totalFame; textReport += 'Kills: '+totalKills.toLocaleString()+' | Deaths: '+totalDeaths.toLocaleString(); }
+            textReport += '\n' + ansi.red + 'Total Fame: ' + totalFameReport.toLocaleString() + ansi.reset + '\n';            const ticks = String.fromCharCode(96).repeat(3);
             const payload = {
-                content: '📋\n' + ticks + 'text\n' + textReport + '\n' + ticks + '\n\n' + '⚔️ **BattleLink — รายงานรวม ' + results.length + '/' + multiIds.length + ' ไฟต์**\n' + '🔗 **ไฟต์ที่รวม:**\n' + links + warning + (files.length ? '\n🖼️ รายงานรูปภาพอยู่ด้านล่าง' : ''),
+                content: '📋\n' + ticks + 'ansi\n' + textReport + ticks + '\n\n' + '⚔️ **BattleLink — รายงานรวม ' + results.length + '/' + multiIds.length + ' ไฟต์**\n' + '🔗 **ไฟต์ที่รวม:**\n' + links + warning + (files.length ? '\n🖼️ รายงานรูปภาพอยู่ด้านล่าง' : ''),
                 files
             };
             if (files.length > 1) {
@@ -2285,27 +2289,30 @@ async function processBattleReport(input, targetContext, isMessage = false) {
             const reportDate = new Date(battleResult.battleTime || Date.now()).toLocaleDateString('en-GB', { timeZone: 'UTC' });
             const hasTrackedPlayers = Array.isArray(trackedPlayers) && trackedPlayers.length > 0;
             const hasTrackedGuilds = Array.isArray(guildConfig?.guilds) && guildConfig.guilds.length > 0;
-            let textReport = 'Battle Report | Date: ' + reportDate + '\n';
+            const ansi = { blue: '\x1b[34m', red: '\x1b[31m', green: '\x1b[32m', white: '\x1b[37m', reset: '\x1b[0m' };
+            const center = (v,w) => { const t=String(v); const left=Math.max(0,Math.floor((w-t.length)/2)); return ' '.repeat(left)+t+' '.repeat(Math.max(0,w-t.length-left)); };
+            const colorNumber = (n,type) => { const v=Number(n)||0; return (v===0?ansi.white:(type==='kills'?ansi.red:ansi.green))+String(v)+ansi.reset; };
+            let textReport = ansi.blue + 'Battle Report | Date: ' + reportDate + ansi.reset + '\n';
+            let totalFameReport = 0;
             if (hasTrackedPlayers && !hasTrackedGuilds) {
-                textReport += 'Name'.padEnd(22) + 'Kills'.padEnd(10) + 'Deaths\n';
-                let sumKills = 0, sumDeaths = 0, sumFame = 0;
-                for (const p of (Array.isArray(battleResult.playerReportData) ? battleResult.playerReportData : [])) {
-                    const name = String(p.displayName || p.name || '').trim();
-                    textReport += name.padEnd(22).slice(0, 22) + String(Number(p.kills) || 0).padEnd(10) + String(Number(p.deaths) || 0) + '\n';
-                    sumKills += Number(p.kills) || 0; sumDeaths += Number(p.deaths) || 0; sumFame += Number(p.fame) || 0;
+                const nw=22, kw=10, dw=10; textReport += center('Name',nw)+center('Kills',kw)+center('Deaths',dw)+'\n';
+                let sumKills=0, sumDeaths=0;
+                for (const p of (Array.isArray(battleResult.playerReportData)?battleResult.playerReportData:[])) {
+                    const name=String(p.displayName||p.name||'').trim(); textReport += center(name.slice(0,nw),nw)+center(colorNumber(p.kills,'kills'),kw)+center(colorNumber(p.deaths,'deaths'),dw)+'\n';
+                    sumKills+=Number(p.kills)||0; sumDeaths+=Number(p.deaths)||0; totalFameReport+=Number(p.fame)||0;
                 }
-                textReport += 'TOTAL'.padEnd(22) + String(sumKills).padEnd(10) + String(sumDeaths) + '\nTotal Fame: ' + sumFame.toLocaleString();
+                textReport += ansi.red+center('TOTAL',nw)+center(sumKills,kw)+center(sumDeaths,dw)+ansi.reset;
             } else if (hasTrackedGuilds) {
-                textReport += 'Alliance'.padEnd(20) + 'NAME'.padEnd(24) + 'PLAYERS'.padEnd(10) + 'KILLS'.padEnd(9) + 'DEATHS'.padEnd(9) + 'FAME\n';
-                let sumPlayers = 0, sumKills = 0, sumDeaths = 0, sumFame = 0;
-                for (const g of (Array.isArray(battleResult.guildSummaryData) ? battleResult.guildSummaryData : [])) {
-                    textReport += String(g.alliance || '-').padEnd(20).slice(0, 20) + String(g.name || 'Unknown').padEnd(24).slice(0, 24) + String(Number(g.playersCount) || 0).padEnd(10) + String(Number(g.kills) || 0).padEnd(9) + String(Number(g.deaths) || 0).padEnd(9) + (Number(g.killFame) || 0).toLocaleString() + '\n';
-                    sumPlayers += Number(g.playersCount) || 0; sumKills += Number(g.kills) || 0; sumDeaths += Number(g.deaths) || 0; sumFame += Number(g.killFame) || 0;
+                const aw=12,nw=12,pw=9,kw=8,dw=8; textReport += center('Alliance',aw)+center('NAME',nw)+center('PLAYERS',pw)+center('KILLS',kw)+center('DEATHS',dw)+'\n';
+                let sumPlayers=0,sumKills=0,sumDeaths=0;
+                for (const g of (Array.isArray(battleResult.guildSummaryData)?battleResult.guildSummaryData:[])) {
+                    textReport += center(String(g.alliance||'-').slice(0,aw),aw)+center(String(g.name||'Unknown').slice(0,nw),nw)+center(Number(g.playersCount)||0,pw)+center(colorNumber(g.kills,'kills'),kw)+center(colorNumber(g.deaths,'deaths'),dw)+'\n';
+                    sumPlayers+=Number(g.playersCount)||0; sumKills+=Number(g.kills)||0; sumDeaths+=Number(g.deaths)||0; totalFameReport+=Number(g.killFame)||0;
                 }
-                textReport += 'TOTAL'.padEnd(44) + String(sumPlayers).padEnd(10) + String(sumKills).padEnd(9) + String(sumDeaths).padEnd(9) + sumFame.toLocaleString();
-            } else textReport += 'Kills: ' + totalKills.toLocaleString() + ' | Deaths: ' + totalDeaths.toLocaleString() + ' | Fame: ' + (Number(battleResult.totalFame) || 0).toLocaleString();
-            const ticks = String.fromCharCode(96).repeat(3);
-            payload.content = '📋\n' + ticks + 'text\n' + textReport + '\n' + ticks + '\n\n' + '🔗 **Battle Link:** <' + battleUrl + '>' + (files.length ? '\n🖼️ **Battle Report:** รูปรายงานอยู่ด้านล่าง' : '');
+                textReport += ansi.red+center('TOTAL',aw+nw)+center(sumPlayers,pw)+center(sumKills,kw)+center(sumDeaths,dw)+ansi.reset;
+            } else { totalFameReport=Number(battleResult.totalFame)||0; textReport += 'Kills: '+totalKills.toLocaleString()+' | Deaths: '+totalDeaths.toLocaleString(); }
+            textReport += '\n' + ansi.red + 'Total Fame: ' + totalFameReport.toLocaleString() + ansi.reset + '\n';            const ticks = String.fromCharCode(96).repeat(3);
+            payload.content = '📋\n' + ticks + 'ansi\n' + textReport + ticks + '\n\n' + '🔗 **Battle Link:** <' + battleUrl + '>' + (files.length ? '\n🖼️ **Battle Report:** รูปรายงานอยู่ด้านล่าง' : '');
         }
         if (files.length > 1) {
             const firstPayload = { content: payload.content, files: [files[0]] };
