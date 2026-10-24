@@ -266,9 +266,9 @@ async function buildWeaponGridImage(weapons, usedMap, currentRole) {
     const { createCanvas, loadImage } = canvasLib;
     
     // OPTIMIZED SIZE: จากเดิม 420x520 -> 200x240 (เล็กกว่า 4 เท่า = เร็วขึ้น 4 เท่า)
-    const cols = 5;
-    const cellW = 200;
-    const cellH = 240;
+    const cols = 4;
+    const cellW = 240;
+    const cellH = 220;
     const padding = 12;
     const headerH = 60;
     const rows = Math.ceil(weapons.length / cols);
@@ -300,7 +300,7 @@ async function buildWeaponGridImage(weapons, usedMap, currentRole) {
         ctx.strokeRect(x, y, cellW, cellH);
 
         const loadedImg = loadedImages[idx];
-        const iconSize = 140;
+        const iconSize = 160;
         if (loadedImg) {
             const ix = x + (cellW - iconSize) / 2;
             const iy = y + 10;
@@ -311,12 +311,12 @@ async function buildWeaponGridImage(weapons, usedMap, currentRole) {
             ctx.fillText('⚔️', x + cellW/2, y + 80); ctx.textAlign='left';
         }
         // ชื่ออาวุธใหญ่กว่าเดิม 3 เท่า และเอาคำใต้ชื่ออาวุธออกทั้งหมด
-        ctx.fillStyle = '#1a1b1e'; ctx.fillRect(x, y + 165, cellW, 70);
+        ctx.fillStyle = '#1a1b1e'; ctx.fillRect(x, y + 170, cellW, 50);
         ctx.fillStyle = isUsed ? '#f0c35a' : '#ffffff';
-        ctx.font = 'bold 39px sans-serif'; ctx.textAlign = 'center';
+        ctx.font = 'bold 31px sans-serif'; ctx.textAlign = 'center';
         const displayName = displayWeapon(wName);
-        const shortName = displayName.length > 12 ? displayName.slice(0, 10) + '..' : displayName;
-        ctx.fillText(shortName, x + cellW / 2, y + 210, cellW - 10);
+        const shortName = displayName.length > 15 ? displayName.slice(0, 13) + '..' : displayName;
+        ctx.fillText(shortName, x + cellW / 2, y + 202, cellW - 10);
         ctx.textAlign = 'left';
     }
     const buffer = canvas.toBuffer('image/png');
@@ -326,53 +326,69 @@ async function buildWeaponGridImage(weapons, usedMap, currentRole) {
 }
 
 async function buildRosterSmallIconImage(event) {
-    const cacheKey = event.id + ':' + event.slots.map(s => s.weapon + s.userId).join('|') + ':BIG';
+    const cacheKey = event.id + ':' + event.slots.map(s => s.weapon + s.userId).join('|') + ':GRID3';
     if (rosterCache.has(cacheKey)) return rosterCache.get(cacheKey);
 
     const canvasLib = tryLoadCanvas();
     if (!canvasLib) return null;
     const { createCanvas, loadImage } = canvasLib;
     const slots = event.slots;
-    // ขยายแถวให้สูงขึ้นเพื่อรองรับตัวหนังสือใหญ่
-    const rowH = 130;
+    const cols = 3;
     const width = 1100;
-    const height = slots.length * rowH + 10;
-    const canvas = createCanvas(width, height); const ctx = canvas.getContext('2d');
-    ctx.fillStyle = '#2b2d31'; ctx.fillRect(0, 0, width, height);
-    
-    const imagePromises = slots.map(s => loadWeaponImageCached(s.weapon, loadImage));
-    const loadedImages = await Promise.all(imagePromises);
+    const padding = 12;
+    const gap = 10;
+    const headerH = 54;
+    const cardW = Math.floor((width - padding * 2 - gap * (cols - 1)) / cols);
+    const cardH = 132;
+    const rows = Math.ceil(slots.length / cols);
+    const height = headerH + padding * 2 + rows * cardH + Math.max(0, rows - 1) * gap;
+    const canvas = createCanvas(width, height);
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = '#232428'; ctx.fillRect(0, 0, width, height);
+    ctx.fillStyle = '#4dd0e1'; ctx.font = 'bold 25px sans-serif';
+    ctx.fillText('CTA ROSTER  •  ' + slots.length + ' SLOTS', padding + 4, 35);
+    const loadedImages = await Promise.all(slots.map(slot => loadWeaponImageCached(slot.weapon, loadImage)));
 
     for (let i = 0; i < slots.length; i++) {
-        const s = slots[i]; const y = i * rowH;
-        ctx.fillStyle = i % 2 === 0 ? '#313338' : '#2b2d31'; ctx.fillRect(0, y, width, rowH);
-        if (i === 0) { ctx.fillStyle = '#00b0f4'; ctx.fillRect(0, 0, 6, height); }
-        const iconX = 12, iconY = y + 10, iconS = 100;
+        const slot = slots[i];
+        const col = i % cols;
+        const row = Math.floor(i / cols);
+        const x = padding + col * (cardW + gap);
+        const y = headerH + padding + row * (cardH + gap);
+        ctx.fillStyle = row % 2 === 0 ? '#313338' : '#2b2d31';
+        ctx.fillRect(x, y, cardW, cardH);
+        ctx.strokeStyle = slot.userId ? '#23a559' : '#484b54';
+        ctx.lineWidth = slot.userId ? 2 : 1;
+        ctx.strokeRect(x, y, cardW, cardH);
+
+        const iconS = 76;
+        const iconX = x + 12;
+        const iconY = y + 12;
         ctx.fillStyle = '#1e1f22'; ctx.fillRect(iconX, iconY, iconS, iconS);
-        ctx.strokeStyle = '#3f4147'; ctx.lineWidth = 1; ctx.strokeRect(iconX, iconY, iconS, iconS);
-        const loadedImg = loadedImages[i];
-        if (loadedImg) {
-            try { ctx.drawImage(loadedImg, iconX + 2, iconY + 2, iconS - 4, iconS - 4); } catch {}
-        } else {
-            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 28px sans-serif'; ctx.textAlign='center';
-            ctx.fillText(ROLE_EMOJIS[s.role] || '⚔️', iconX + iconS/2, iconY + iconS/2 + 8); ctx.textAlign='left';
+        const img = loadedImages[i];
+        if (img) { try { ctx.drawImage(img, iconX + 2, iconY + 2, iconS - 4, iconS - 4); } catch {} }
+        else {
+            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 24px sans-serif'; ctx.textAlign = 'center';
+            ctx.fillText(ROLE_EMOJIS[slot.role] || '⚔️', iconX + iconS / 2, iconY + iconS / 2 + 8);
+            ctx.textAlign = 'left';
         }
-        if (s.userId) {
-            ctx.fillStyle = '#23a559'; ctx.beginPath(); ctx.arc(iconX + iconS + 16, iconY + iconS / 2, 10, 0, Math.PI * 2); ctx.fill();
-            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 14px sans-serif'; ctx.textAlign = 'center'; ctx.fillText('✓', iconX + iconS + 16, iconY + iconS / 2 + 5); ctx.textAlign = 'left';
+        if (slot.userId) {
+            ctx.fillStyle = '#23a559'; ctx.beginPath(); ctx.arc(iconX + iconS - 2, iconY + iconS - 2, 9, 0, Math.PI * 2); ctx.fill();
+            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center';
+            ctx.fillText('✓', iconX + iconS - 2, iconY + iconS + 2); ctx.textAlign = 'left';
         }
-        // ชื่ออาวุธกับชื่อคนลงชื่อ - ใหญ่เท่ากันและใหญ่กว่าเดิมเยอะๆ
-        ctx.fillStyle = '#f2f3f5'; ctx.font = 'bold 28px sans-serif';
-        const roleText = (i + 1) + '. ' + (ROLE_LABELS_SHORT[s.role] || s.role).toUpperCase() + (s.weapon ? ' - ' + displayWeapon(s.weapon) : '');
-        ctx.fillText(roleText.slice(0, 45), 145, y + 55);
-        if (s.userId) { 
-            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 26px sans-serif'; 
-            ctx.fillText('@' + (s.userName || 'Joined').slice(0, 24), 145, y + 95); 
-        }
-        else { 
-            ctx.fillStyle = '#6d6f78'; ctx.font = 'bold 22px sans-serif'; 
-            ctx.fillText('Vacant', 145, y + 95); 
-        }
+        const textX = iconX + iconS + 14;
+        const textW = cardW - (textX - x) - 10;
+        const roleText = (i + 1) + '. ' + (ROLE_LABELS_SHORT[slot.role] || slot.role).toUpperCase();
+        ctx.fillStyle = '#f2f3f5'; ctx.font = 'bold 18px sans-serif';
+        ctx.fillText(roleText, textX, y + 31, textW);
+        ctx.fillStyle = '#ffd166'; ctx.font = 'bold 17px sans-serif';
+        ctx.fillText(slot.weapon ? displayWeapon(slot.weapon) : 'ยังไม่กำหนดอาวุธ', textX, y + 57, textW);
+        ctx.fillStyle = slot.userId ? '#ffffff' : '#a0a3ad'; ctx.font = 'bold 16px sans-serif';
+        const playerText = slot.userId ? '@' + (slot.userName || 'Joined') : 'ว่าง • รอผู้ลงชื่อ';
+        ctx.fillText(playerText, textX, y + 88, textW);
+        ctx.fillStyle = slot.userId ? '#23a559' : '#6d6f78'; ctx.font = 'bold 12px sans-serif';
+        ctx.fillText(slot.userId ? 'ลงชื่อแล้ว' : 'OPEN SLOT', textX, y + 112, textW);
     }
     const buffer = canvas.toBuffer('image/png');
     rosterCache.set(cacheKey, buffer);
