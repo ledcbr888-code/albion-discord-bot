@@ -2305,6 +2305,8 @@ async function processBattleReport(input, targetContext, isMessage = false) {
             const ansi = { blue: '\x1b[34m', red: '\x1b[31m', green: '\x1b[32m', white: '\x1b[37m', reset: '\x1b[0m' };
             const center = (v,w) => { const t=String(v); const left=Math.max(0,Math.floor((w-t.length)/2)); return ' '.repeat(left)+t+' '.repeat(Math.max(0,w-t.length-left)); };
             const colorNumber = (n,type) => { const v=Number(n)||0; return (v===0?ansi.white:(type==='kills'?ansi.red:ansi.green))+String(v)+ansi.reset; };
+            const cellNumber = (n,type,w) => { const v=Number(n)||0; return (v===0?ansi.white:(type==='kills'?ansi.red:ansi.green))+center(v,w)+ansi.reset; };
+            const guildHeaders = () => center(ansi.cyan+'Alliance'+ansi.reset,12)+center(ansi.yellow+'NAME'+ansi.reset,12)+center(ansi.magenta+'PLAYERS'+ansi.reset,9)+center(ansi.yellow+'KILLS'+ansi.reset,8)+center(ansi.cyan+'DEATHS'+ansi.reset,8)+'\n'+ansi.white+'─'.repeat(59)+ansi.reset;
             let textReport = ansi.blue + 'Battle Report | Date: ' + reportDate + ansi.reset + '\n';
             let totalFameReport = 0;
             if (hasTrackedPlayers && !hasTrackedGuilds) {
