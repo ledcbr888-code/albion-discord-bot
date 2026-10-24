@@ -399,25 +399,31 @@ async function buildRosterSmallIconImage(event) {
 function weaponPanel(session) {
     const slot = session.slots[session.slotIndex];
     const pageData = weaponOptions(slot.role, session.page || 0, session.search || '');
-    const select = new StringSelectMenuBuilder()
-        .setCustomId('cta:weapon:' + session.id + ':' + session.slotIndex + ':' + pageData.page)
-        .setPlaceholder('พิมพ์ชื่ออาวุธเพื่อค้นหา... | ' + (pageData.filtered.length ? pageData.filtered.length + ' ชิ้นเจอ' : 'พิมพ์เช่น blaz, bracer, clarent'))
-        .setMinValues(1).setMaxValues(1);
-    if (pageData.options.length) select.addOptions(pageData.options);
+    // Discord allows at most 25 options per select menu. Split the complete weapon list
+    // across menus so users do not need a "next page" button to find the last weapons.
     const rows = [];
-    if (pageData.options.length) rows.push(new ActionRowBuilder().addComponents(select));
+    const allOptions = pageData.filtered.map(name => ({ label: displayWeapon(name), value: name, description: 'เลือก ' + displayWeapon(name) }));
+    for (let start = 0, group = 0; start < allOptions.length; start += 25, group++) {
+        const select = new StringSelectMenuBuilder()
+            .setCustomId('cta:weapon:' + session.id + ':' + session.slotIndex + ':' + pageData.page + ':' + group)
+            .setPlaceholder((group ? 'อาวุธเพิ่มเติม' : 'เลือกอาวุธ') + ' • ' + Math.min(start + 1, allOptions.length) + '-' + Math.min(start + 25, allOptions.length) + '/' + allOptions.length)
+            .setMinValues(1).setMaxValues(1)
+            .addOptions(allOptions.slice(start, start + 25));
+        rows.push(new ActionRowBuilder().addComponents(select));
+    }
     const controls = [
         new ButtonBuilder().setCustomId('cta:search:' + session.id + ':' + session.slotIndex).setLabel('🔎 พิมพ์ค้นหา (Fuzzy)').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('cta:prev:' + session.id).setLabel('ย้อนกลับ').setStyle(ButtonStyle.Secondary).setDisabled(session.slotIndex === 0),
         new ButtonBuilder().setCustomId('cta:cancel:' + session.id).setLabel('ยกเลิก').setStyle(ButtonStyle.Danger)
     ];
-    if (pageData.totalPages > 1) {
-        controls.unshift(new ButtonBuilder().setCustomId('cta:page:' + session.id + ':' + (pageData.page > 0 ? pageData.page - 1 : pageData.page + 1)).setLabel(pageData.page > 0 ? 'หน้าก่อน' : 'หน้าถัดไป (' + (pageData.page + 1) + '/' + pageData.totalPages + ')').setStyle(ButtonStyle.Primary));
+    const totalImagePages = Math.max(1, Math.ceil(pageData.filtered.length / 12));
+    if (totalImagePages > 1) {
+        controls.unshift(new ButtonBuilder().setCustomId('cta:gridpage:' + session.id + ':' + ((Number(session.gridPage) || 0) + 1 >= totalImagePages ? 0 : (Number(session.gridPage) || 0) + 1)).setLabel('รูปอาวุธหน้า ' + (((Number(session.gridPage) || 0) + 1) % totalImagePages + 1) + '/' + totalImagePages).setStyle(ButtonStyle.Primary));
     }
     rows.push(new ActionRowBuilder().addComponents(controls));
     const searchInfo = session.search ? ' | ค้นหา: **' + session.search + '** (' + pageData.filtered.length + ' ผลลัพธ์)' : '';
     return {
-        content: '🗡️ **กำหนดอาวุธ: ช่อง ' + (session.slotIndex + 1) + '/' + session.slots.length + '**\nตำแหน่ง: **' + (ROLE_LABELS[slot.role] || slot.role) + '** | หน้า ' + (pageData.page + 1) + '/' + pageData.totalPages + searchInfo + '\n💡 **Fuzzy Search:** พิมพ์ `blaz` → Blazing, `bracer` → Battle Bracers, `carv` → Carving, `blood` → Bloodletter ได้เลย',
+        content: '🗡️ **กำหนดอาวุธ: ช่อง ' + (session.slotIndex + 1) + '/' + session.slots.length + '**\nตำแหน่ง: **' + (ROLE_LABELS[slot.role] || slot.role) + '**' + searchInfo + '\n💡 **Fuzzy Search:** พิมพ์ `blaz` → Blazing, `bracer` → Battle Bracers, `carv` → Carving, `blood` → Bloodletter ได้เลย',
         components: rows
     };
 }
@@ -694,13 +700,18 @@ async function handleInteraction(interaction, deps) {
         await interaction.update(await weaponPanelPayload(session));
         return true;
     }
+    if (action === 'gridpage') {
+        session.gridPage = Number(parts[3]) || 0;
+        await interaction.update(await weaponPanelPayload(session));
+        return true;
+    }
     if (action === 'weapon') {
         const slotIndex = Number(parts[3]); const page = Number(parts[4]) || 0;
         const weapon = interaction.values[0];
         if (slotIndex !== session.slotIndex) { await interaction.reply({ content: 'ไม่ตรง', flags: MessageFlags.Ephemeral }); return true; }
         session.slots[slotIndex].weapon = weapon;
         session.slotIndex++;
-        session.page = 0; session.search = '';
+        session.page = 0; session.gridPage = 0; session.search = '';
         if (session.slotIndex >= session.slots.length) { await interaction.update(savePrompt(session)); return true; }
         await interaction.update(await weaponPanelPayload(session));
         return true;
