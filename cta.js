@@ -350,12 +350,11 @@ async function buildWeaponGridImage(weapons, usedMap, currentRole, gridPage = 0)
 }
 
 async function buildRosterSmallIconImage(event) {
-    const cacheKey = event.id + ':' + event.slots.map(s => [s.weapon || '', s.userId || '', s.userName || ''].join(':')).join('|') + ':GRID3';
+    const cacheKey = event.id + ':' + event.slots.map(s => [s.weapon || '', s.userId || '', s.userName || ''].join(':')).join('|') + ':GRID4_EN';
     if (rosterCache.has(cacheKey)) return rosterCache.get(cacheKey);
 
     const canvasLib = tryLoadCanvas();
     if (!canvasLib) return null;
-    ensureCtaThaiFont(canvasLib);
     const { createCanvas, loadImage } = canvasLib;
     const slots = event.slots;
     const cols = 3;
@@ -393,27 +392,26 @@ async function buildRosterSmallIconImage(event) {
         const img = loadedImages[i];
         if (img) { try { ctx.drawImage(img, iconX + 2, iconY + 2, iconS - 4, iconS - 4); } catch {} }
         else {
-            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 24px sans-serif'; ctx.textAlign = 'center';
-            ctx.fillText(ROLE_EMOJIS[slot.role] || '⚔️', iconX + iconS / 2, iconY + iconS / 2 + 8);
+            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 16px sans-serif'; ctx.textAlign = 'center';
+            ctx.fillText('N/A', iconX + iconS / 2, iconY + iconS / 2 + 6);
             ctx.textAlign = 'left';
         }
         if (slot.userId) {
             ctx.fillStyle = '#23a559'; ctx.beginPath(); ctx.arc(iconX + iconS - 2, iconY + iconS - 2, 9, 0, Math.PI * 2); ctx.fill();
-            ctx.fillStyle = '#ffffff'; ctx.font = 'bold 12px sans-serif'; ctx.textAlign = 'center';
-            ctx.fillText('✓', iconX + iconS - 2, iconY + iconS + 2); ctx.textAlign = 'left';
+            // The green status dot and border indicate the slot is occupied; avoid special glyphs.
         }
         const textX = iconX + iconS + 14;
         const textW = cardW - (textX - x) - 10;
         const roleText = (i + 1) + '. ' + (ROLE_LABELS_SHORT[slot.role] || slot.role).toUpperCase();
         ctx.fillStyle = '#f2f3f5'; ctx.font = 'bold 18px sans-serif';
         ctx.fillText(roleText, textX, y + 31, textW);
-        ctx.fillStyle = '#ffd166'; ctx.font = 'bold 17px "CtaThai", sans-serif';
-        ctx.fillText(slot.weapon ? displayWeapon(slot.weapon) : 'ยังไม่กำหนดอาวุธ', textX, y + 57, textW);
-        ctx.fillStyle = slot.userId ? '#ffffff' : '#a0a3ad'; ctx.font = 'bold 16px "CtaThai", sans-serif';
-        const playerText = slot.userId ? '@' + (slot.userName || 'Joined') : 'ว่าง • รอผู้ลงชื่อ';
+        ctx.fillStyle = '#ffd166'; ctx.font = 'bold 17px sans-serif';
+        ctx.fillText(slot.weapon ? displayWeapon(slot.weapon) : 'WEAPON NOT SET', textX, y + 57, textW);
+        ctx.fillStyle = slot.userId ? '#ffffff' : '#a0a3ad'; ctx.font = 'bold 16px sans-serif';
+        const playerText = slot.userId ? 'PLAYER JOINED' : 'WAITING FOR PLAYER';
         ctx.fillText(playerText, textX, y + 88, textW);
-        ctx.fillStyle = slot.userId ? '#23a559' : '#6d6f78'; ctx.font = 'bold 12px "CtaThai", sans-serif';
-        ctx.fillText(slot.userId ? 'ลงชื่อแล้ว' : 'OPEN SLOT', textX, y + 112, textW);
+        ctx.fillStyle = slot.userId ? '#23a559' : '#6d6f78'; ctx.font = 'bold 12px sans-serif';
+        ctx.fillText(slot.userId ? 'JOINED' : 'OPEN SLOT', textX, y + 112, textW);
     }
     const buffer = canvas.toBuffer('image/png');
     rosterCache.set(cacheKey, buffer);
