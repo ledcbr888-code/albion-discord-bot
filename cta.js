@@ -426,20 +426,23 @@ function weaponPanel(session) {
     const pageData = weaponOptions(slot.role, session.page || 0, session.search || '');
     const rows = [];
 
-    // Display every matching weapon on the same screen.
-    // Discord limits each dropdown to 25 options, so only roles with >25 weapons
-    // (currently DPS) use a second dropdown on the same panel, not a next-page button.
-    const allOptions = pageData.filtered.map(name => ({
+    // Match dropdown names to the exact 16 weapons shown in the current image page.
+    // This stays below Discord's 25-option limit and needs no option-page button.
+    const dropdownPageSize = 16;
+    const dropdownTotalPages = Math.max(1, Math.ceil(pageData.filtered.length / dropdownPageSize));
+    const dropdownPage = Math.min(dropdownTotalPages - 1, Math.max(0, Number(session.gridPage) || 0));
+    const visibleWeapons = pageData.filtered.slice(dropdownPage * dropdownPageSize, dropdownPage * dropdownPageSize + dropdownPageSize);
+    const visibleOptions = visibleWeapons.map(name => ({
         label: displayWeapon(name),
         value: name,
         description: 'เลือก ' + displayWeapon(name)
     }));
-    for (let start = 0, group = 0; start < allOptions.length; start += 25, group++) {
+    if (visibleOptions.length) {
         const select = new StringSelectMenuBuilder()
-            .setCustomId('cta:weapon:' + session.id + ':' + session.slotIndex + ':' + (session.page || 0) + ':' + group)
-            .setPlaceholder((group ? 'เลือกอาวุธเพิ่มเติม' : 'เลือกอาวุธ') + ' • ' + Math.min(start + 1, allOptions.length) + '-' + Math.min(start + 25, allOptions.length) + '/' + allOptions.length)
+            .setCustomId('cta:weapon:' + session.id + ':' + session.slotIndex + ':' + dropdownPage)
+            .setPlaceholder('เลือกอาวุธจากภาพ • ' + (dropdownPage + 1) + '/' + dropdownTotalPages)
             .setMinValues(1).setMaxValues(1)
-            .addOptions(allOptions.slice(start, start + 25));
+            .addOptions(visibleOptions);
         rows.push(new ActionRowBuilder().addComponents(select));
     }
     const controls = [
