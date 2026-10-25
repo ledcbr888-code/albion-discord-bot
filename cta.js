@@ -355,6 +355,7 @@ async function buildRosterSmallIconImage(event) {
 
     const canvasLib = tryLoadCanvas();
     if (!canvasLib) return null;
+    ensureCtaThaiFont(canvasLib);
     const { createCanvas, loadImage } = canvasLib;
     const slots = event.slots;
     const cols = 3;
@@ -407,8 +408,16 @@ async function buildRosterSmallIconImage(event) {
         ctx.fillText(roleText, textX, y + 31, textW);
         ctx.fillStyle = '#ffd166'; ctx.font = 'bold 17px sans-serif';
         ctx.fillText(slot.weapon ? displayWeapon(slot.weapon) : 'WEAPON NOT SET', textX, y + 57, textW);
-        ctx.fillStyle = slot.userId ? '#ffffff' : '#a0a3ad'; ctx.font = 'bold 16px sans-serif';
-        const playerText = slot.userId ? 'PLAYER JOINED' : 'WAITING FOR PLAYER';
+        const actualPlayerName = String(slot.userName || '').trim();
+        const playerNameHasThai = /[\u0E00-\u0E7F]/.test(actualPlayerName);
+        const canRenderPlayerName = !!slot.userId && !!actualPlayerName && (!playerNameHasThai || ctaThaiFontRegistered);
+        const playerText = slot.userId
+            ? (canRenderPlayerName ? actualPlayerName : 'PLAYER JOINED')
+            : 'WAITING FOR PLAYER';
+        ctx.fillStyle = slot.userId ? '#ffffff' : '#a0a3ad';
+        ctx.font = playerNameHasThai && ctaThaiFontRegistered
+            ? 'bold 16px "CtaThai", sans-serif'
+            : 'bold 16px sans-serif';
         ctx.fillText(playerText, textX, y + 88, textW);
         ctx.fillStyle = slot.userId ? '#23a559' : '#6d6f78'; ctx.font = 'bold 12px sans-serif';
         ctx.fillText(slot.userId ? 'JOINED' : 'OPEN SLOT', textX, y + 112, textW);
