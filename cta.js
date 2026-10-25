@@ -426,13 +426,20 @@ function weaponPanel(session) {
     const pageData = weaponOptions(slot.role, session.page || 0, session.search || '');
     const rows = [];
 
-    // Keep one dropdown only. Use the next selector button for option pages.
-    if (pageData.options.length) {
+    // Display every matching weapon on the same screen.
+    // Discord limits each dropdown to 25 options, so only roles with >25 weapons
+    // (currently DPS) use a second dropdown on the same panel, not a next-page button.
+    const allOptions = pageData.filtered.map(name => ({
+        label: displayWeapon(name),
+        value: name,
+        description: 'เลือก ' + displayWeapon(name)
+    }));
+    for (let start = 0, group = 0; start < allOptions.length; start += 25, group++) {
         const select = new StringSelectMenuBuilder()
-            .setCustomId('cta:weapon:' + session.id + ':' + session.slotIndex + ':' + pageData.page)
-            .setPlaceholder('เลือกอาวุธ • ' + (pageData.page + 1) + '/' + pageData.totalPages)
+            .setCustomId('cta:weapon:' + session.id + ':' + session.slotIndex + ':' + (session.page || 0) + ':' + group)
+            .setPlaceholder((group ? 'เลือกอาวุธเพิ่มเติม' : 'เลือกอาวุธ') + ' • ' + Math.min(start + 1, allOptions.length) + '-' + Math.min(start + 25, allOptions.length) + '/' + allOptions.length)
             .setMinValues(1).setMaxValues(1)
-            .addOptions(pageData.options);
+            .addOptions(allOptions.slice(start, start + 25));
         rows.push(new ActionRowBuilder().addComponents(select));
     }
     const controls = [
@@ -448,13 +455,6 @@ function weaponPanel(session) {
             .setCustomId('cta:gridpage:' + session.id + ':' + nextGridPage)
             .setLabel('รูปอาวุธหน้าถัดไป ' + (nextGridPage + 1) + '/' + totalImagePages)
             .setStyle(ButtonStyle.Primary));
-    }
-    if (pageData.totalPages > 1) {
-        const nextWeaponPage = ((Number(session.page) || 0) + 1) % pageData.totalPages;
-        controls.splice(1, 0, new ButtonBuilder()
-            .setCustomId('cta:page:' + session.id + ':' + nextWeaponPage)
-            .setLabel('ตัวเลือกอาวุธหน้าถัดไป ' + (nextWeaponPage + 1) + '/' + pageData.totalPages)
-            .setStyle(ButtonStyle.Secondary));
     }
     rows.push(new ActionRowBuilder().addComponents(controls));
     const searchInfo = session.search ? ' | ค้นหา: **' + session.search + '** (' + pageData.filtered.length + ' ผลลัพธ์)' : '';
