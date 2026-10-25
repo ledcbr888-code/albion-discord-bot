@@ -2276,13 +2276,14 @@ async function processBattleReport(input, targetContext, isMessage = false) {
                     sumDeaths+=Number(g.deaths)||0;
                     totalFameReport+=Number(g.killFame)||0;
                 }
-                textReport += ansi.red + center('TOTAL',aw+nw) +
+                textReport += ansi.white + '┄'.repeat(60) + ansi.reset + '\n';
+                textReport += ansi.red + 'TOTAL'.padEnd(aw+nw) +
                     cellNumber(sumPlayers,'players',pw) +
                     cellNumber(sumKills,'kills',kw) +
                     cellNumber(sumDeaths,'deaths',dw) +
                     ansi.yellow + center(formatFame(totalFameReport),fw) + ansi.reset;
             } else { totalFameReport = totalFame; textReport += 'Kills: '+totalKills.toLocaleString()+' | Deaths: '+totalDeaths.toLocaleString(); }
-            textReport += '\n' + ansi.red + 'Total Fame: ' + totalFameReport.toLocaleString() + ansi.reset + '\n';            const ticks = String.fromCharCode(96).repeat(3);
+            textReport += '\n\n' + ansi.red + 'Total Fame: ' + totalFameReport.toLocaleString() + ansi.reset + '\n';            const ticks = String.fromCharCode(96).repeat(3);
             const payload = {
                 content: '📋\n' + ticks + 'ansi\n' + textReport + ticks + '\n\n' + '⚔️ **BattleLink — รายงานรวม ' + results.length + '/' + multiIds.length + ' ไฟต์**\n' + '🔗 **ไฟต์ที่รวม:**\n' + links + warning + (files.length ? '\n🖼️ รายงานรูปภาพอยู่ด้านล่าง' : ''),
                 files
@@ -2336,9 +2337,10 @@ async function processBattleReport(input, targetContext, isMessage = false) {
                     textReport += center(String(g.alliance||'-').slice(0,aw),aw)+center(String(g.name||'Unknown').slice(0,nw),nw)+cellNumber(g.playersCount,'players',pw)+cellNumber(g.kills,'kills',kw)+cellNumber(g.deaths,'deaths',dw)+ansi.yellow+center(formatFame(g.killFame||0),fw)+ansi.reset+'\n';
                     sumPlayers+=Number(g.playersCount)||0; sumKills+=Number(g.kills)||0; sumDeaths+=Number(g.deaths)||0; totalFameReport+=Number(g.killFame)||0;
                 }
-                textReport += ansi.red+center('TOTAL',aw+nw)+cellNumber(sumPlayers,'players',pw)+cellNumber(sumKills,'kills',kw)+cellNumber(sumDeaths,'deaths',dw)+ansi.yellow+center(formatFame(totalFameReport),fw)+ansi.reset;
+                textReport += ansi.white+'┄'.repeat(60)+ansi.reset+'\n';
+                textReport += ansi.red+'TOTAL'.padEnd(aw+nw)+cellNumber(sumPlayers,'players',pw)+cellNumber(sumKills,'kills',kw)+cellNumber(sumDeaths,'deaths',dw)+ansi.yellow+center(formatFame(totalFameReport),fw)+ansi.reset;
             } else { totalFameReport=Number(battleResult.totalFame)||0; textReport += 'Kills: '+totalKills.toLocaleString()+' | Deaths: '+totalDeaths.toLocaleString(); }
-            textReport += '\n' + ansi.red + 'Total Fame: ' + totalFameReport.toLocaleString() + ansi.reset + '\n';            const ticks = String.fromCharCode(96).repeat(3);
+            textReport += '\n\n' + ansi.red + 'Total Fame: ' + totalFameReport.toLocaleString() + ansi.reset + '\n';            const ticks = String.fromCharCode(96).repeat(3);
             payload.content = '📋\n' + ticks + 'ansi\n' + textReport + ticks + '\n\n' + '🔗 **Battle Link:** <' + battleUrl + '>' + (files.length ? '\n🖼️ **Battle Report:** รูปรายงานอยู่ด้านล่าง' : '');
         }
         if (files.length > 1) {
