@@ -4648,10 +4648,10 @@ async function processAvaImageMessageInternal(message, fallbackAttachments = [])
                 .setImage(exampleImageUrl);
             await status.edit({
                 content:
-                    '⚠️ **ไม่สามารถอ่านรูปนี้ได้เนื่องจากรูปภาพไม่ชัดเจน**\n' +
-                    '⚠️ **This image could not be read because it is unclear.**\n\n' +
-                    'กรุณาแคปรูปชื่อแมพมาใหม่ กดปุ่ม **N** เพื่อเปิดแมพ แล้วแคปให้เห็นชื่อแมพชัดเจน\n' +
-                    'Please take a new screenshot of the map name. Press **N** to open the map, then capture the screen with the map name clearly visible.',
+                    '⚠️ **บอทยังอ่านชื่อแมพจากรูปนี้ไม่ได้**\n' +
+                    '⚠️ **The bot couldn\'t detect the map name in this screenshot.**\n\n' +
+                    '**วิธีแก้ไข:** กดปุ่ม **N** เพื่อเปิดแผนที่ แล้วถ่ายภาพใหม่ให้เห็นแถบชื่อแมพครบและชัดเจน ส่งภาพต้นฉบับที่มีความละเอียดเพียงพอ อย่าส่งภาพที่ชื่อแมพเล็กหรือถูกตัดออก\n' +
+                    '**How to fix it:** Press **N** to open the map. Take a new screenshot with the full map name clearly visible. Upload the original, full-resolution screenshot; make sure the map name is not too small or cropped out.',
                 embeds: [helpEmbed],
                 components: []
             }).catch(editErr => console.error('❌ AVA unreadable-image guidance reply failed:', editErr.message));
