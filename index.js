@@ -2397,7 +2397,8 @@ function extractBattleIdsFromHtml(html) {
     return [...new Set(ids)];
 }
 
-async function fetchGuildRecentBattles(guildOrConfig) {
+async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
+    const baselineOnly = options?.baselineOnly === true;
     const config = guildOrConfig && typeof guildOrConfig === 'object' ? guildOrConfig : {};
     const rawTarget = typeof guildOrConfig === 'string' ? guildOrConfig : (config.targetGuild || '');
     const parsed = parseGuildReference(config.targetGuildId || rawTarget);
@@ -2420,9 +2421,13 @@ async function fetchGuildRecentBattles(guildOrConfig) {
     console.log(`🔄 Auto-Battle mode: ${isOffPeak ? 'OFF-PEAK Officialหลัก' : 'PEAK/NORMAL AlbionBBหลัก'} | UTC ${hour}h | Fail ${circuit.failures}/3`);
 
     const officialCache = fetchGuildRecentBattles._officialCache || (fetchGuildRecentBattles._officialCache = new Map());
-    const verify = async (ids) => {
+    const verify = async (ids, trustedGuildScope = false) => {
+        const uniqueIds = [...new Set(ids.map(String))];
+        // For one-time startup/config baselining, a guild-ID-filtered source is enough:
+        // avoid fetching every battle individually just to suppress historical alerts.
+        if (baselineOnly && trustedGuildScope) return uniqueIds;
         const matched=[];
-        for (const id of [...new Set(ids)]) {
+        for (const id of uniqueIds) {
             if (officialApiRateLimitedUntil > Date.now()) break;
             let cached=officialCache.get(String(id));
             if (!cached || cached.expiresAt <= Date.now()) {
@@ -2452,7 +2457,7 @@ async function fetchGuildRecentBattles(guildOrConfig) {
         try {
             const html = String(await cloudscraper.get({uri:url, timeout:20000})||'');
             const unique = extractBattleIdsFromHtml(html);
-            const good = await verify(unique);
+            const good = await verify(unique, Boolean(targetGuildId));
             console.log(`✅ [AlbionBB] verified ${good.length}/${unique.length}`);
             // สำเร็จ รีเซ็ต
             circuit.failures = 0;
@@ -2475,7 +2480,9 @@ async function fetchGuildRecentBattles(guildOrConfig) {
     };
 
     if (targetGuildId) {
-        if (isOffPeak) {
+        // Startup/config baselines should use the one-request, Guild-ID-filtered
+        // Official API first to avoid dozens of per-battle verification calls.
+        if (baselineOnly || isOffPeak) {
             const a = await fetchOfficial(); if (a.length) return a;
             const b = await fetchBB(); if (b.length) return b;
         } else {
@@ -2503,7 +2510,7 @@ async function primeAutoBattleHistoryForGuild(configs = autoBattleConfigs) {
     let added = 0;
     for (const config of configs) {
         try {
-            const recentMatches = await fetchGuildRecentBattles(config);
+            const recentMatches = await fetchGuildRecentBattles(config, { baselineOnly: true });
             for (const id of recentMatches) {
                 const key = String(id);
                 if (!processedBattles.has(key)) {
@@ -5491,7 +5498,7 @@ client.on('interactionCreate', async interaction => {
             // Baseline asynchronously after the interaction has completed.
             void (async () => {
                 try {
-                    const recentMatches = await fetchGuildRecentBattles(configData);
+                    const recentMatches = await fetchGuildRecentBattles(configData, { baselineOnly: true });
                     const existingIds = [...new Set(
                         (Array.isArray(recentMatches) ? recentMatches : []).map(String).filter(Boolean)
                     )];
