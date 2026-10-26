@@ -4532,7 +4532,7 @@ async function processAvaImageMessageInternal(message, fallbackAttachments = [])
         ' channel=' + messageChannelId + ' file=' + (imageAttachments[0].name || 'unknown'));
 
     const priorState = getGuildConfig(String(messageGuildId), false)?.avaMessageStates?.[String(message.id)]?.state;
-    if (priorState === 'succeeded' || avaProcessedMessages.has(message.id)) return true;
+    if (priorState === 'succeeded' || priorState === 'unclear' || avaProcessedMessages.has(message.id)) return true;
     if (avaProcessingMessages.has(String(message.id))) return true;
     const now = Date.now();
     if (avaUserRateLimit.size > 1000) for (const [key, stamp] of avaUserRateLimit) if (now - stamp > 10 * 60 * 1000) avaUserRateLimit.delete(key);
@@ -4593,7 +4593,24 @@ async function processAvaImageMessageInternal(message, fallbackAttachments = [])
         }));
 
         if (!ocr.mapName) {
-            throw new Error('อ่านชื่อแมพจากรูปไม่สำเร็จ\nOCR: ' + String(ocr.rawText || '').slice(0, 300));
+            // An unreadable screenshot is terminal for this message: do not let the poller OCR it again.
+            setAvaMessageState(messageGuildId, message.id, 'unclear', 'OCR could not confidently read map name; user must submit a clearer screenshot.');
+            const exampleImageUrl = 'https://raw.githubusercontent.com/ledcbr888-code/albion-discord-bot/main/assets/AVAT.png';
+            const helpEmbed = new EmbedBuilder()
+                .setColor(0xF1C40F)
+                .setTitle('ตัวอย่างรูปที่ชัดเจน / Example of a clear screenshot')
+                .setImage(exampleImageUrl);
+            await status.edit({
+                content:
+                    '⚠️ **ไม่สามารถอ่านรูปนี้ได้เนื่องจากรูปภาพไม่ชัดเจน**\n' +
+                    '⚠️ **This image could not be read because it is unclear.**\n\n' +
+                    'กรุณาแคปรูปชื่อแมพมาใหม่ กดปุ่ม **N** เพื่อเปิดแมพ แล้วแคปให้เห็นชื่อแมพชัดเจน\n' +
+                    'Please take a new screenshot of the map name. Press **N** to open the map, then capture the screen with the map name clearly visible.',
+                embeds: [helpEmbed],
+                components: []
+            }).catch(editErr => console.error('❌ AVA unreadable-image guidance reply failed:', editErr.message));
+            console.warn('⚠️ AVA image marked unclear; automatic reprocessing disabled for message=' + message.id);
+            return true;
         }
 
         const ocrCandidates = [ocr.mapName, ...(ocr.candidates || [])].filter(Boolean);
@@ -4965,7 +4982,10 @@ async function pollAvaConfiguredChannels() {
                 });
                 const retryableFailures = messages.filter(message => {
                     const state = getGuildConfig(String(guildId), false)?.avaMessageStates?.[String(message.id)];
-                    return state?.state === 'failed' && (Number(state.attempts) || 0) < 3 && Date.now() - (Number(state.updatedAt) || 0) >= 30000;
+                    const isUnreadableOcrFailure = /อ่านชื่อแมพจากรูปไม่สำเร็จ|OCR:/i.test(String(state?.details || ''));
+                    return state?.state === 'failed' && !isUnreadableOcrFailure &&
+                        (Number(state.attempts) || 0) < 3 &&
+                        Date.now() - (Number(state.updatedAt) || 0) >= 30000;
                 });
                 const workMessages = [...new Map([...newer, ...retryableFailures].map(message => [String(message.id), message])).values()];
                 if (workMessages.length) {
