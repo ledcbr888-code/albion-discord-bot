@@ -2568,7 +2568,7 @@ async function checkAutoBattlesForGuild() {
                 // still return battles from several days ago after restarts or outages.
                 // Skip and persist stale IDs so the same historical fight is not retried
                 // and incorrectly announced on every poll.
-                const rawBattleTime = officialBattle.startTime ?? officialBattle.timestamp ?? officialBattle.start ?? null;
+                const rawBattleTime = officialBattle.startTime || officialBattle.startedAt || officialBattle.started_at || officialBattle.start_time || officialBattle.timestamp || officialBattle.start || officialBattle.battleDate || officialBattle.date || null;
                 let battleTimeMs = null;
                 if (rawBattleTime !== null && rawBattleTime !== undefined) {
                     const timeText = String(rawBattleTime).trim();
