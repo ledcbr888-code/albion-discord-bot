@@ -2564,6 +2564,32 @@ async function checkAutoBattlesForGuild() {
                     continue;
                 }
 
+                // Auto-Battle must report recent fights only. Some source pages can
+                // still return battles from several days ago after restarts or outages.
+                // Skip and persist stale IDs so the same historical fight is not retried
+                // and incorrectly announced on every poll.
+                const rawBattleTime = officialBattle.startTime ?? officialBattle.timestamp ?? officialBattle.start ?? null;
+                let battleTimeMs = null;
+                if (rawBattleTime !== null && rawBattleTime !== undefined) {
+                    const timeText = String(rawBattleTime).trim();
+                    const numericTime = /^\\d{10,13}$/.test(timeText) ? Number(timeText) : NaN;
+                    if (Number.isFinite(numericTime)) {
+                        battleTimeMs = numericTime < 1e12 ? numericTime * 1000 : numericTime;
+                    } else {
+                        const parsedTime = Date.parse(timeText);
+                        if (Number.isFinite(parsedTime)) battleTimeMs = parsedTime;
+                    }
+                }
+                const maxAutoBattleAgeMs = 24 * 60 * 60 * 1000;
+                if (Number.isFinite(battleTimeMs) && battleTimeMs > 0 &&
+                    Date.now() - battleTimeMs > maxAutoBattleAgeMs) {
+                    processedBattles.add(String(latestMatchId));
+                    saveData();
+                    const ageHours = Math.floor((Date.now() - battleTimeMs) / (60 * 60 * 1000));
+                    console.log(`⏭️ Skip stale Auto-Battle Match ID ${latestMatchId} for ${config.targetGuild}: battle is ${ageHours}h old (limit 24h); marked as handled.`);
+                    continue;
+                }
+
                 const officialGuildNames = officialBattle.guilds
                     ? Object.values(officialBattle.guilds).map(g => g?.name).filter(Boolean)
                     : [];
