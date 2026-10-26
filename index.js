@@ -383,7 +383,18 @@ function queueSupabaseTrackingSave(content) {
 }
 async function initializeTrackingPersistence() {
     if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) {
-        if (await pullSupabaseTrackingData()) return;
+        if (await pullSupabaseTrackingData()) {
+            // Supabase remains the source of truth. Enable GitHub as a mirror
+            // without pulling its potentially stale copy over the restored data.
+            if (GITHUB_DATA_TOKEN && GITHUB_DATA_REPO) {
+                githubPersistenceReady = true;
+                console.log('💾 GitHub tracking backup enabled as a mirror for Supabase data.');
+                saveData();
+            } else {
+                console.warn('💾 GitHub tracking mirror is not configured. Set GITHUB_DATA_TOKEN and GITHUB_DATA_REPO in Render Environment.');
+            }
+            return;
+        }
         console.warn('⚠️ Supabase configured but not ready; external writes remain disabled to protect existing data.');
         if (GITHUB_DATA_TOKEN && GITHUB_DATA_REPO) await pullGitHubTrackingData();
         return;
