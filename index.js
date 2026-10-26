@@ -2458,7 +2458,9 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
             const html = String(await cloudscraper.get({uri:url, timeout:20000})||'');
             const unique = extractBattleIdsFromHtml(html);
             const good = await verify(unique, Boolean(targetGuildId));
-            console.log(`✅ [AlbionBB] verified ${good.length}/${unique.length}`);
+            console.log(baselineOnly && targetGuildId
+                ? `✅ [AlbionBB] baseline IDs collected ${good.length}/${unique.length}`
+                : `✅ [AlbionBB] verified ${good.length}/${unique.length}`);
             // สำเร็จ รีเซ็ต
             circuit.failures = 0;
             if (good.length) return good;
