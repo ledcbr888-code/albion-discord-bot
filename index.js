@@ -5034,8 +5034,20 @@ client.once('ready', async () => {
     } catch (err) { console.error('❌ Slash command registration error:', err); }
 
     setTimeout(async () => {
-        const seeded = await primeAutoBattleHistoryForGuild();
-        console.log(`🛡️ Auto-Battle initialized: marked ${seeded} existing battle(s) as already seen. No historical backlog will be reported.`);
+        let seeded = 0;
+        const serverConfigs = getAllGuildConfigs();
+        for (const { guildId, config } of serverConfigs) {
+            const serverAutoBattles = Array.isArray(config?.autoBattles) ? config.autoBattles : [];
+            if (!serverAutoBattles.length) continue;
+            try {
+                seeded += await guildContext.run({ guildId }, async () =>
+                    primeAutoBattleHistoryForGuild(serverAutoBattles)
+                );
+            } catch (err) {
+                console.warn(`⚠️ Auto-Battle startup baseline failed for Discord server ${guildId}: ${err.message}`);
+            }
+        }
+        console.log(`🛡️ Auto-Battle initialized: marked ${seeded} existing battle(s) as already seen across ${serverConfigs.length} Discord server configuration(s). No historical backlog should be reported.`);
     }, 5000);
 
     function getAutoBattleIntervalMs() {
@@ -5480,16 +5492,14 @@ client.on('interactionCreate', async interaction => {
             void (async () => {
                 try {
                     const recentMatches = await fetchGuildRecentBattles(configData);
-                    const existingIds = Array.isArray(recentMatches) ? recentMatches.map(String) : [];
-                    // Mark older visible fights as seen but leave the newest one
-                    // eligible for the next polling pass.
-                    const newestId = existingIds[0] || null;
-                    for (const id of existingIds) {
-                        if (id !== newestId) processedBattles.add(id);
-                    }
-                    if (newestId) processedBattles.delete(newestId);
+                    const existingIds = [...new Set(
+                        (Array.isArray(recentMatches) ? recentMatches : []).map(String).filter(Boolean)
+                    )];
+                    // Treat every battle already visible when this tracker is configured
+                    // as history. Never leave an older Match ID eligible for a new alert.
+                    for (const id of existingIds) processedBattles.add(id);
                     saveData();
-                    console.log(`✅ Auto-Battle baseline completed for ${guildName}${targetGuildId ? ` (${targetGuildId})` : ''}: ${existingIds.length} battle(s).`);
+                    console.log(`✅ Auto-Battle baseline completed for ${guildName}${targetGuildId ? ` (${targetGuildId})` : ''}: marked ${existingIds.length} existing battle(s) as already seen.`);
                 } catch (err) {
                     console.warn(`⚠️ Auto-Battle baseline failed for ${guildName}: ${err.message}`);
                 }
