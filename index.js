@@ -2572,7 +2572,7 @@ async function checkAutoBattlesForGuild() {
                 let battleTimeMs = null;
                 if (rawBattleTime !== null && rawBattleTime !== undefined) {
                     const timeText = String(rawBattleTime).trim();
-                    const numericTime = /^\\d{10,13}$/.test(timeText) ? Number(timeText) : NaN;
+                    const numericTime = /^\d{10,13}$/.test(timeText) ? Number(timeText) : NaN;
                     if (Number.isFinite(numericTime)) {
                         battleTimeMs = numericTime < 1e12 ? numericTime * 1000 : numericTime;
                     } else {
