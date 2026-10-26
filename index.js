@@ -4954,9 +4954,8 @@ const commands = [
         .addSubcommand(s => s.setName('guilds').setDescription('แสดงรายชื่อกิลด์ที่ติดตาม'))
         .addSubcommand(s => s.setName('members').setDescription('แสดงรายชื่อผู้เล่นที่ติดตาม')),
     new SlashCommandBuilder().setName('add').setDescription('เพิ่มรายการติดตาม')
-        .addSubcommand(s => s.setName('guild').setDescription('เพิ่มกิลด์และกำหนดห้องสำหรับดึงข้อมูลเมื่อวางลิงก์')
-            .addStringOption(o => o.setName('name').setDescription('ชื่อกิลด์').setRequired(true))
-            .addChannelOption(o => o.setName('channel').setDescription('ห้องที่อนุญาตให้วางลิงก์เพื่อดึงข้อมูลอัตโนมัติ').addChannelTypes(ChannelType.GuildText).setRequired(true)))
+        .addSubcommand(s => s.setName('guild').setDescription('เพิ่มกิลด์ที่ต้องการติดตามทั้งกิลด์')
+            .addStringOption(o => o.setName('name').setDescription('ชื่อกิลด์').setRequired(true)))
         .addSubcommand(s => s.setName('player').setDescription('เพิ่มผู้เล่น').addStringOption(o => o.setName('name').setDescription('ชื่อผู้เล่น').setRequired(true))),
     new SlashCommandBuilder().setName('remove').setDescription('ลบรายการติดตาม')
         .addSubcommand(s => s.setName('guild').setDescription('ลบกิลด์').addStringOption(o => o.setName('name').setDescription('ชื่อกิลด์').setRequired(true)))
@@ -5403,7 +5402,7 @@ client.on('interactionCreate', async interaction => {
         const sub = interaction.options.getSubcommand();
         if (sub === 'guilds') {
             if (!targetGuilds.length) return interaction.reply({ content: '🛡️ ไม่มีกิลด์ในระบบติดตาม', flags: 64 });
-            const listFormatted = targetGuilds.map((g, i) => `${i + 1}. ${g.name} ${g.channelId ? `(ห้อง: <#${g.channelId}>)` : ''}`).join('\n');
+            const listFormatted = targetGuilds.map((g, i) => `${i + 1}. ${g.name}`).join('\n');
             return interaction.reply({ content: `🛡️ **กิลด์ที่ติดตาม (${targetGuilds.length})**\n\`\`\`\n${listFormatted}\n\`\`\``, flags: 64 });
         }
         if (sub === 'members') {
@@ -5420,18 +5419,15 @@ client.on('interactionCreate', async interaction => {
         const sub = interaction.options.getSubcommand();
         if (sub === 'guild') {
             const name = interaction.options.getString('name').trim();
-            const channel = interaction.options.getChannel('channel');
 
             const existingIndex = targetGuilds.findIndex(x => x.name.toLowerCase() === name.toLowerCase());
             if (existingIndex >= 0) {
-                targetGuilds[existingIndex].channelId = channel.id;
-                saveData();
-                return interaction.reply({ content: `🛡️ อัปเดตห้องสำหรับกิลด์ **${name}** เป็น <#${channel.id}> เรียบร้อยแล้ว`, flags: 64 });
+                return interaction.reply({ content: `⚠️ กิลด์ **${name}** อยู่ในรายการติดตามแล้ว`, flags: 64 });
             }
 
-            targetGuilds.push({ name, channelId: channel.id });
+            targetGuilds.push({ name });
             saveData();
-            return interaction.reply({ content: `🛡️ เพิ่มกิลด์ **${name}** และกำหนดให้ดึงข้อมูลอัตโนมัติเฉพาะในห้อง <#${channel.id}> เรียบร้อยแล้วครับ`, flags: 64 });
+            return interaction.reply({ content: `🛡️ เพิ่มกิลด์ **${name}** ในรายการติดตามเรียบร้อยแล้ว`, flags: 64 });
         }
         if (sub === 'player') {
             const name = interaction.options.getString('name').trim();
@@ -5794,13 +5790,7 @@ client.on('messageCreate', async message => {
 
     const guildConfig = getGuildConfig(message.guildId, false);
     const dedicatedBattleLinkChannel = guildConfig?.battleLinkChannelId;
-    if (dedicatedBattleLinkChannel) {
-        if (message.channel.id !== dedicatedBattleLinkChannel) return;
-    } else {
-        // Preserve legacy /add guild channel behavior until /battlelink setup is configured.
-        const matchingGuildConfig = targetGuilds.find(g => g.channelId === message.channel.id);
-        if (targetGuilds.some(g => g.channelId) && !matchingGuildConfig) return;
-    }
+    if (dedicatedBattleLinkChannel && message.channel.id !== dedicatedBattleLinkChannel) return;
 
     // Hide the embed preview on this recognized BattleLink source message; keep its URL.
     try { if (typeof message.suppressEmbeds === 'function') await message.suppressEmbeds(true); }
