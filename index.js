@@ -2831,7 +2831,6 @@ async function checkAutoBattlesForGuild() {
                     console.warn('⚠️ ยังดึงข้อมูล Battle ' + latestMatchId + ' ไม่สำเร็จ; ยังไม่ทำเครื่องหมายว่าเสร็จ | detailFetch=' + battleDetailFetchMs + 'ms | firstSeenAt=' + new Date(battleListFirstSeenAt).toISOString());
                     continue;
                 }
-                detailRetryStates.delete(String(latestMatchId));
 
                 // Auto-Battle must report recent fights only. Some source pages can
                 // still return battles from several days ago after restarts or outages.
@@ -2885,6 +2884,7 @@ async function checkAutoBattlesForGuild() {
                         `⏭️ Skip Match ${latestMatchId}: tracked Guild "${config.targetGuild}" ` +
                         `ไม่ตรงกับ Official Guilds: ${officialGuildNames.join(', ') || 'N/A'}`
                     );
+                    detailRetryStates.delete(String(latestMatchId));
                     // Do not globally mark an unrelated candidate as processed;
                     // this battle may later be discovered for another tracked guild.
                     pendingEventIds.delete(String(latestMatchId));
@@ -2903,6 +2903,8 @@ async function checkAutoBattlesForGuild() {
                         trackedGuilds: autoTrackedGuilds
                     }
                 );
+                // Clear retry state only after Official details and the tracked roster are usable.
+                detailRetryStates.delete(String(latestMatchId));
                 const checkValue = config.minFrames;
                 const officialPlayerCountForLog = getApiPlayers(officialBattle).length;
                 // min_frames is the minimum total Fame from tracked players/
@@ -2944,7 +2946,7 @@ async function checkAutoBattlesForGuild() {
                         delayText = ' | ⏱️ ดีเลย์รวมตั้งแต่เริ่มไฟต์จนส่งรายงาน=ไม่ทราบ (Official API ไม่มีเวลาเริ่มไฟต์)';
                     }
 
-                                        console.log('✅ ส่งรายงาน Auto-Battle สำเร็จ | Match ID=' + latestMatchId +
+                    console.log('✅ ส่งรายงาน Auto-Battle สำเร็จ | Match ID=' + latestMatchId +
                         ' | ห้อง=' + config.channelId + '.' + delayText +
                         ' | แหล่งที่พบก่อน=' + detectionSource +
                         ' | เวลาจากพบ Match ID จนส่งรายงาน=' + Math.max(0, Date.now() - battleListFirstSeenAt) + 'ms' +
