@@ -2566,6 +2566,130 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
     return [];
 }
 
+
+// Auto-Battle Kill Events probe (observe-only).
+// It never triggers Discord reports; disable with AUTO_BATTLE_EVENTS_PROBE=false.
+async function probeAutoBattleEvents(config) {
+    const toggle = String(process.env.AUTO_BATTLE_EVENTS_PROBE ?? 'true').trim().toLowerCase();
+    if (!['1', 'true', 'yes', 'on'].includes(toggle)) return null;
+
+    const parsed = parseGuildReference(config?.targetGuildId || config?.targetGuild || '');
+    const guildId = String(config?.targetGuildId || parsed.id || '').trim();
+    const guildName = String(config?.targetGuild || parsed.name || guildId).trim();
+    if (!guildId) return null;
+
+    const states = probeAutoBattleEvents._states || (probeAutoBattleEvents._states = new Map());
+    let state = states.get(guildId);
+    if (!state) {
+        state = { seenIds: new Set(), baselineComplete: false, lastRequestAt: 0, lastResult: null, inFlight: null };
+        states.set(guildId, state);
+    }
+
+    const now = Date.now();
+    if (state.lastRequestAt && now - state.lastRequestAt < 60000) {
+        return state.inFlight ? await state.inFlight : state.lastResult;
+    }
+
+    state.lastRequestAt = now;
+    if (!probeAutoBattleEvents._announced) {
+        probeAutoBattleEvents._announced = true;
+        console.log('🧪 Auto-Battle Kill Events probe ENABLED in observe-only mode; it will not send Discord reports. Set AUTO_BATTLE_EVENTS_PROBE=false to disable.');
+    }
+
+    state.inFlight = (async () => {
+        try {
+            const response = await axios.get(
+                'https://gameinfo-sgp.albiononline.com/api/gameinfo/events',
+                {
+                    timeout: 10000,
+                    headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
+                    params: { limit: 50, offset: 0, guildId: guildId }
+                }
+            );
+
+            if (!Array.isArray(response.data)) {
+                const result = { ok: false, baseline: !state.baselineComplete, newEvents: [], battleIds: [] };
+                console.warn('⚠️ [Events Probe] Unexpected response format for Guild ' + guildName + '.');
+                state.lastResult = result;
+                return result;
+            }
+
+            const rows = response.data.filter(row => row && typeof row === 'object');
+            const eventIdOf = row => String(row?.EventId ?? row?.eventId ?? row?.id ?? '').trim();
+            const battleIdOf = row => {
+                const value = row?.BattleId ?? row?.battleId ?? row?.battle?.id ?? row?.Battle?.Id;
+                return /^\d+$/.test(String(value ?? '')) ? String(value) : '';
+            };
+            const eventTimeOf = row => row?.TimeStamp ?? row?.Timestamp ?? row?.timestamp ?? row?.timeStamp ?? null;
+            const eventAgeSeconds = row => {
+                const raw = eventTimeOf(row);
+                if (raw === null || raw === undefined || raw === '') return null;
+                let timeMs = NaN;
+                const rawText = String(raw).trim();
+                if (/^\d{13}$/.test(rawText)) timeMs = Number(rawText);
+                else if (/^\d{10}$/.test(rawText)) timeMs = Number(rawText) * 1000;
+                else timeMs = Date.parse(rawText);
+                return Number.isFinite(timeMs) ? Math.max(0, Math.floor((Date.now() - timeMs) / 1000)) : null;
+            };
+            const eventRows = rows.filter(row => eventIdOf(row) !== '');
+            const eventIds = eventRows.map(eventIdOf);
+            const battleIdCount = rows.filter(row => battleIdOf(row) !== '').length;
+            const newestRow = eventRows[0] || rows[0] || null;
+            const newestAge = newestRow ? eventAgeSeconds(newestRow) : null;
+            const newestAgeText = newestAge === null ? 'unknown' : newestAge + 's';
+
+            if (!state.baselineComplete) {
+                // Initial results are a baseline only: never treat them as new fight triggers.
+                for (const id of eventIds.slice().reverse()) state.seenIds.add(id);
+                while (state.seenIds.size > 500) state.seenIds.delete(state.seenIds.values().next().value);
+                state.baselineComplete = true;
+                const result = { ok: true, baseline: true, newEvents: [], battleIds: [], eventCount: rows.length };
+                console.log('🧪 [Events Probe] BASELINE Guild ' + guildName + ': rows=' + rows.length +
+                    ', EventIds=' + eventIds.length + ', eventsWithBattleId=' + battleIdCount + '/' + rows.length +
+                    ', newestEventAge=' + newestAgeText + '; observe-only.');
+                state.lastResult = result;
+                return result;
+            }
+
+            const newEvents = eventRows.filter(row => !state.seenIds.has(eventIdOf(row)));
+            for (const row of newEvents.slice().reverse()) state.seenIds.add(eventIdOf(row));
+            while (state.seenIds.size > 500) state.seenIds.delete(state.seenIds.values().next().value);
+
+            const battleIds = [...new Set(newEvents.map(battleIdOf).filter(Boolean))];
+            const result = { ok: true, baseline: false, newEvents, battleIds, eventCount: rows.length };
+            if (newEvents.length) {
+                const sampleIds = newEvents.slice(0, 5).map(eventIdOf).join(',');
+                const ages = newEvents.map(eventAgeSeconds).filter(value => value !== null);
+                const newestNewAge = ages.length ? Math.min(...ages) + 's' : 'unknown';
+                console.log('🧪 [Events Probe] NEW Guild ' + guildName + ': count=' + newEvents.length +
+                    ', EventIds=' + sampleIds + (newEvents.length > 5 ? ',...' : '') +
+                    ', newestEventAge=' + newestNewAge +
+                    ', BattleIds=' + (battleIds.length ? battleIds.join(',') : 'not present in event payload') +
+                    '; observe-only (no report triggered).');
+            } else {
+                console.log('🧪 [Events Probe] Guild ' + guildName + ': sample=' + rows.length +
+                    ', new=0, eventsWithBattleId=' + battleIdCount + '/' + rows.length +
+                    ', newestEventAge=' + newestAgeText + '; observe-only.');
+            }
+            state.lastResult = result;
+            return result;
+        } catch (error) {
+            const status = error?.response?.status || error?.statusCode || null;
+            const detail = status
+                ? 'HTTP ' + status
+                : String(error?.code || error?.message || 'request failed').replace(/https?:\/\/\S+/gi, '[URL]').slice(0, 120);
+            const result = { ok: false, baseline: !state.baselineComplete, newEvents: [], battleIds: [] };
+            console.warn('⚠️ [Events Probe] failed for Guild ' + guildName + ': ' + detail + ' (normal Auto-Battle path remains active).');
+            state.lastResult = result;
+            return result;
+        } finally {
+            state.inFlight = null;
+        }
+    })();
+
+    return await state.inFlight;
+}
+
 async function primeAutoBattleHistoryForGuild(configs = autoBattleConfigs) {
     // IMPORTANT: the recent-battles page contains historical fights. When a
     // tracker is created for the first time (or after an upgrade with no saved
@@ -2610,7 +2734,20 @@ async function checkAutoBattlesForGuild() {
     autoBattleCheckRunning = true;
     try {
         for (const config of autoBattleConfigs) {
+            const eventProbePromise = probeAutoBattleEvents(config);
             const recentMatches = await fetchGuildRecentBattles(config);
+            // Compare new Event Battle IDs with this cycle's existing battle list asynchronously;
+            // Events remain a measurement-only source and never trigger or suppress reports.
+            eventProbePromise.then(probe => {
+                if (!probe?.ok || probe.baseline || !probe.battleIds?.length) return;
+                const battleSet = new Set((Array.isArray(recentMatches) ? recentMatches : []).map(String));
+                const present = probe.battleIds.filter(id => battleSet.has(String(id)));
+                const absent = probe.battleIds.filter(id => !battleSet.has(String(id)));
+                console.log('🧪 [Events vs Battle API] Guild ' + String(config.targetGuild || config.targetGuildId) +
+                    ': Event BattleIds=' + probe.battleIds.length + ', presentInCurrentBattleList=' +
+                    present.length + ', notInCurrentBattleList=' + absent.length +
+                    (absent.length ? ' [' + absent.join(',') + ']' : '') + '; measurement only.');
+            }).catch(error => console.warn('⚠️ [Events vs Battle API] comparison failed: ' + String(error?.message || error)));
             if (recentMatches === null || !recentMatches.length) continue;
 
             const newMatchIds = recentMatches.filter(id => !processedBattles.has(String(id)));
