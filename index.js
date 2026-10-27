@@ -2650,8 +2650,26 @@ async function probeAutoBattleEvents(config) {
             const newestAge = newestRow ? eventAgeSeconds(newestRow) : null;
             const newestAgeText = newestAge === null ? 'ไม่ทราบ' : newestAge + ' วินาที';
 
-            // Keep first observed Events timestamps for later correlation with the Battle list.
-            for (const row of eventRows) {
+            if (!state.baselineComplete) {
+                // Initial results are a baseline only: never treat them as new fight triggers.
+                for (const id of eventIds.slice().reverse()) state.seenIds.add(id);
+                while (state.seenIds.size > 500) state.seenIds.delete(state.seenIds.values().next().value);
+                state.baselineComplete = true;
+                const result = { ok: true, baseline: true, newEvents: [], battleIds: [], eventObservations: [], eventCount: rows.length, requestMs, observedAt: responseReceivedAt };
+                console.log('🧪 [Events Probe] ตั้งต้นข้อมูล | กิลด์=' + guildName + ' | จำนวนรายการ=' + rows.length +
+                    ' | จำนวน Event ID=' + eventIds.length + ' | เหตุการณ์ที่มี Battle ID=' + battleIdCount + '/' + rows.length +
+                    ' | อายุเหตุการณ์ล่าสุด=' + newestAgeText + ' | เวลาตอบ API=' + requestMs + 'ms | โหมดสังเกตการณ์เท่านั้น');
+                state.lastResult = result;
+                return result;
+            }
+
+            const newEvents = eventRows.filter(row => !state.seenIds.has(eventIdOf(row)));
+            for (const row of newEvents.slice().reverse()) state.seenIds.add(eventIdOf(row));
+            while (state.seenIds.size > 500) state.seenIds.delete(state.seenIds.values().next().value);
+
+            // Only record first-seen times for genuinely new Events after baseline.
+            // Historical rows from startup cannot prove either source was faster.
+            for (const row of newEvents) {
                 const battleId = battleIdOf(row);
                 if (!battleId || state.firstSeenBattleIds.has(battleId)) continue;
                 const eventTimeMs = eventTimeMsOf(row);
@@ -2666,23 +2684,6 @@ async function probeAutoBattleEvents(config) {
             }
             while (state.firstSeenBattleIds.size > 500) state.firstSeenBattleIds.delete(state.firstSeenBattleIds.keys().next().value);
             const eventObservations = [...state.firstSeenBattleIds.values()];
-
-            if (!state.baselineComplete) {
-                // Initial results are a baseline only: never treat them as new fight triggers.
-                for (const id of eventIds.slice().reverse()) state.seenIds.add(id);
-                while (state.seenIds.size > 500) state.seenIds.delete(state.seenIds.values().next().value);
-                state.baselineComplete = true;
-                const result = { ok: true, baseline: true, newEvents: [], battleIds: [], eventObservations, eventCount: rows.length, requestMs, observedAt: responseReceivedAt };
-                console.log('🧪 [Events Probe] ตั้งต้นข้อมูล | กิลด์=' + guildName + ' | จำนวนรายการ=' + rows.length +
-                    ' | จำนวน Event ID=' + eventIds.length + ' | เหตุการณ์ที่มี Battle ID=' + battleIdCount + '/' + rows.length +
-                    ' | อายุเหตุการณ์ล่าสุด=' + newestAgeText + ' | เวลาตอบ API=' + requestMs + 'ms | โหมดสังเกตการณ์เท่านั้น');
-                state.lastResult = result;
-                return result;
-            }
-
-            const newEvents = eventRows.filter(row => !state.seenIds.has(eventIdOf(row)));
-            for (const row of newEvents.slice().reverse()) state.seenIds.add(eventIdOf(row));
-            while (state.seenIds.size > 500) state.seenIds.delete(state.seenIds.values().next().value);
 
             const battleIds = [...new Set(newEvents.map(battleIdOf).filter(Boolean))];
             const result = { ok: true, baseline: false, newEvents, battleIds, eventObservations, eventCount: rows.length, requestMs, observedAt: responseReceivedAt };
@@ -2794,8 +2795,7 @@ async function checkAutoBattlesForGuild() {
                 }
                 while (battleListSeenAtById.size > 2000) battleListSeenAtById.delete(battleListSeenAtById.keys().next().value);
             }
-            // Compare first-observed timestamps only when Events supplies a Battle ID.
-            // Differences under 2s are considered the same polling window, not proof of a faster source.
+            // Compare only post-baseline Event observations; initial historical lists are not evidence of source speed.
             eventProbePromise.then(probe => {
                 if (!probe?.ok || probe.baseline) return;
                 const battleSet = new Set((Array.isArray(recentMatches) ? recentMatches : []).map(String));
@@ -2815,12 +2815,12 @@ async function checkAutoBattlesForGuild() {
                     const absMs = Math.abs(deltaMs);
                     let verdict;
                     if (absMs < 2000) verdict = 'พบในรอบตรวจใกล้เคียงกัน ยังสรุปไม่ได้ว่าแหล่งใดเร็วกว่า';
-                    else if (deltaMs > 0) verdict = 'Events พบก่อน ' + Math.round(deltaMs / 1000) + 's';
-                    else verdict = 'รายการ Battle พบก่อน ' + Math.round(absMs / 1000) + 's';
-                    console.log('🧪 [Source Timing Compare] Guild=' + String(config.targetGuild || config.targetGuildId) +
+                    else if (deltaMs > 0) verdict = 'Events พบก่อน ' + Math.round(deltaMs / 1000) + ' วินาที';
+                    else verdict = 'รายการ Battle พบก่อน ' + Math.round(absMs / 1000) + ' วินาที';
+                    console.log('🧪 [Source Timing Compare] กิลด์=' + String(config.targetGuild || config.targetGuildId) +
                         ' | Match ID=' + battleId +
                         ' | Event ID=' + String(observation.eventId || 'ไม่ทราบ') +
-                        ' | อายุ Event เมื่อตรวจพบครั้งแรก=' + (observation.eventAgeAtFirstSeenSec == null ? 'unknown' : observation.eventAgeAtFirstSeenSec + 's') +
+                        ' | อายุ Event เมื่อตรวจพบครั้งแรก=' + (observation.eventAgeAtFirstSeenSec == null ? 'ไม่ทราบ' : observation.eventAgeAtFirstSeenSec + ' วินาที') +
                         ' | เวลาที่พบ Event=' + new Date(Number(observation.eventFirstSeenAt)).toISOString() +
                         ' | เวลาที่พบรายการ Battle=' + new Date(battleSeenAt).toISOString() +
                         ' | ผลเปรียบเทียบ=' + verdict + '.');
@@ -2828,18 +2828,22 @@ async function checkAutoBattlesForGuild() {
                 if (probe.newEvents?.length) {
                     const newEventBattleIds = [...new Set(probe.newEvents.map(row => String(row?.BattleId ?? row?.battleId ?? row?.battle?.id ?? row?.Battle?.Id ?? '')).filter(id => /^\d+$/.test(id)))];
                     if (!newEventBattleIds.length) {
-                        console.log('🧪 [Source Timing Compare] Guild=' + String(config.targetGuild || config.targetGuildId) +
-                            ': Event ใหม่ไม่มี Battle ID จึงยังเปรียบเทียบไฟต์เดียวกันโดยตรงไม่ได้ ให้ดูอายุ Event ตอนตรวจพบและดีเลย์ Auto-Battle แยกกัน');
+                        console.log('🧪 [Source Timing Compare] กิลด์=' + String(config.targetGuild || config.targetGuildId) +
+                            ' | Event ใหม่ไม่มี Battle ID จึงยังเปรียบเทียบไฟต์เดียวกันโดยตรงไม่ได้ ให้ดูอายุ Event ตอนตรวจพบและดีเลย์ Auto-Battle แยกกัน');
                     } else {
                         const notYetInBattleList = newEventBattleIds.filter(id => !battleSet.has(id));
                         if (notYetInBattleList.length) {
-                            console.log('🧪 [Source Timing Compare] Guild=' + String(config.targetGuild || config.targetGuildId) +
-                                ': Event BattleId(s) not in the current Battle list yet=[' + notYetInBattleList.join(',') +
-                                ']; check later polls for availability.');
+                            console.log('🧪 [Source Timing Compare] กิลด์=' + String(config.targetGuild || config.targetGuildId) +
+                                ' | พบ Event ที่มี Battle ID แต่ยังไม่อยู่ในรายการ Battle ปัจจุบัน=[' + notYetInBattleList.join(',') +
+                                '] | จะตรวจซ้ำในรอบถัดไป');
                         }
                     }
                 }
-            }).catch(error => console.warn('⚠️ [Source Timing Compare] comparison failed: ' + String(error?.message || error)));
+                if (probe.newEvents?.length && eventObservations.length && comparable === 0) {
+                    console.log('🧪 [Source Timing Compare] กิลด์=' + String(config.targetGuild || config.targetGuildId) +
+                        ' | ยังจับคู่ Battle ID จาก Events ใหม่กับรายการ Battle ไม่ได้ | รอผลจากรอบถัดไปเพื่อเปรียบเทียบ');
+                }
+            }).catch(error => console.warn('⚠️ [Source Timing Compare] เปรียบเทียบเวลาไม่สำเร็จ: ' + String(error?.message || error)));
             if (recentMatches === null || !recentMatches.length) continue;
 
             const newMatchIds = recentMatches.filter(id => !processedBattles.has(String(id)));
