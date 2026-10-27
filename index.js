@@ -2619,7 +2619,7 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
 
     const officialIds = await fetchOfficial();
     if (Array.isArray(officialIds)) {
-        const mergedIds = [...new Set([...atlasIds, ...officialIds].map(String).filter(id => /^\\d+$/.test(id)))];
+        const mergedIds = [...new Set([...atlasIds, ...officialIds].map(String).filter(id => /^\d+$/.test(id)))];
         if (atlasIds.length && officialIds.length) {
             setSource('AtlasChill + Official API (เสริมรายการไฟต์)');
             console.log('✅ [Auto-Battle Coverage] AtlasChill=' + atlasIds.length +
