@@ -2496,7 +2496,7 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
                 feedState.retryAt = 0;
                 console.log('✅ [Official Battle Feed / AtlasChill-style] ได้ ' +
                     response.data.length + ' รายการ | เวลาตอบ=' + (Date.now() - requestStartedAt) + 'ms' +
-                    ' | cache=15s | รอบ Auto-Battle=60s');
+                    ' | cache=15s | รอบ Auto-Battle=15s');
                 return feedState.data;
             } catch (error) {
                 const status = Number(error?.response?.status || error?.statusCode || 0);
@@ -5318,8 +5318,8 @@ client.once('ready', async () => {
     }, 5000);
 
     function getAutoBattleIntervalMs() {
-        const intervalMs = 60 * 1000;
-        console.log('⏱️ รอบตรวจ Auto-Battle ถัดไปใน 60 วินาที');
+        const intervalMs = 15 * 1000;
+        console.log('⏱️ รอบตรวจ Auto-Battle ถัดไปใน 15 วินาที');
         return intervalMs;
     }
 
@@ -5738,7 +5738,7 @@ client.on('interactionCreate', async interaction => {
             // Acknowledge the Discord interaction before any synchronous file
             // or persistence work. This prevents the command from remaining on
             // "กำลังคิด…" even when the configuration has already been added.
-            await interaction.editReply({ content: `✅ ตั้งค่า **Auto-Battle Tracker** สำเร็จเรียบร้อย!\n- 🌐 เซิร์ฟเวอร์: **EAST (ตายตัว)**\n- 📢 ห้องแจ้งเตือน: <#${channel.id}>\n- 🛡️ กิลด์ที่ติดตาม: **${guildName}**${targetGuildId ? ` (ID: ${targetGuildId})` : ''}\n- 💰 Fame ขั้นต่ำ: **${formatFame(minFrames)}**\n\n📌 *บันทึกการตั้งค่าแล้ว ระบบกำลังเตรียมรายการ Battle เบื้องหลัง และจะตรวจสอบไฟต์ใหม่ทุกๆ 5 นาทีครับ*` });
+            await interaction.editReply({ content: `✅ ตั้งค่า **Auto-Battle Tracker** สำเร็จเรียบร้อย!\n- 🌐 เซิร์ฟเวอร์: **EAST (ตายตัว)**\n- 📢 ห้องแจ้งเตือน: <#${channel.id}>\n- 🛡️ กิลด์ที่ติดตาม: **${guildName}**${targetGuildId ? ` (ID: ${targetGuildId})` : ''}\n- 💰 Fame ขั้นต่ำ: **${formatFame(minFrames)}**\n\n📌 *บันทึกการตั้งค่าแล้ว ระบบกำลังเตรียมรายการ Battle เบื้องหลัง และจะตรวจสอบไฟต์ใหม่ทุกๆ 15 วินาทีครับ*` });
 
             // Persist after Discord has acknowledged the command. The in-memory
             // config is already active for the running scheduler.
