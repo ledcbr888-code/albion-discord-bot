@@ -2466,6 +2466,38 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
     const sourceByScope = fetchGuildRecentBattles._lastSourceByScope ||
         (fetchGuildRecentBattles._lastSourceByScope = new Map());
     const setSource = source => sourceByScope.set(scopeKey, source);
+    const pendingIds = fetchGuildRecentBattles._pendingMatchIds ||
+        (fetchGuildRecentBattles._pendingMatchIds = new Map());
+    const queueCandidates = (ids, source) => {
+        setSource(source);
+        const normalized = [...new Set((Array.isArray(ids) ? ids : [])
+            .map(id => String(id || '').trim())
+            .filter(id => /^\d+$/.test(id)))];
+        if (baselineOnly) return normalized;
+        const next = new Map();
+        for (const id of normalized) {
+            if (!processedBattles.has(id)) next.set(id, pendingIds.get(id) || { firstSeenAt: Date.now() });
+        }
+        // Keep unresolved IDs in the queue even if they have aged off AtlasChill's
+        // visible list, so a temporary detail failure cannot silently drop a fight.
+        for (const [id, metadata] of pendingIds.entries()) {
+            if (!processedBattles.has(id) && !next.has(id)) next.set(id, metadata);
+        }
+        let dropped = 0;
+        while (next.size > 1000) {
+            let oldestId = null, oldestAt = Infinity;
+            for (const [id, metadata] of next.entries()) {
+                const firstSeenAt = Number(metadata?.firstSeenAt) || 0;
+                if (firstSeenAt < oldestAt) { oldestAt = firstSeenAt; oldestId = id; }
+            }
+            if (oldestId === null) break;
+            next.delete(oldestId);
+            dropped++;
+        }
+        fetchGuildRecentBattles._pendingMatchIds = next;
+        if (dropped) console.warn('⚠️ [Auto-Battle Queue] คิวเกิน 1,000 Match ID; ตัดรายการเก่าที่สุดออก ' + dropped + ' รายการ');
+        return [...next.keys()];
+    };
     console.log('🔄 Auto-Battle source: AtlasChill PRIMARY | Official Albion API fallback | Server=Asia' +
         (baselineOnly ? ' | โหมดตั้งต้นประวัติ' : ''));
 
@@ -2529,14 +2561,12 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
 
     // Without a Guild ID, AtlasChill is the only safe discovery route available.
     if (!targetGuildId) {
-        setSource(atlasIds.length ? 'AtlasChill' : 'AtlasChill (ไม่พบไฟต์ที่ตรงกิลด์)');
-        return atlasIds;
+        const source = atlasIds.length ? 'AtlasChill' : 'AtlasChill (ไม่พบไฟต์ที่ตรงกิลด์)';
+        return queueCandidates(atlasIds, source);
     }
 
-    // Official GameInfo is the only fallback. Cache results by guild for 20s,
-    // cache failures briefly, and deduplicate simultaneous requests.
-    // Official GameInfo is the secondary discovery source. Cache per guild,
-    // share simultaneous requests, and inspect a second page only when page 1 is full.
+    // Official GameInfo is the secondary source: its cached, guild-filtered IDs
+    // supplement AtlasChill so older visible entries are less likely to be missed.
     const officialCache = fetchGuildRecentBattles._officialListCache ||
         (fetchGuildRecentBattles._officialListCache = new Map());
     const officialInFlight = fetchGuildRecentBattles._officialListInFlight ||
@@ -2647,15 +2677,17 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
         } else {
             setSource('AtlasChill + Official API (ไม่พบไฟต์ที่ตรงกิลด์)');
         }
-        return mergedIds;
+        return queueCandidates(mergedIds, sourceByScope.get(scopeKey) || 'AtlasChill + Official API');
     }
     if (atlasIds.length) {
-        setSource('AtlasChill (Official API สำรองไม่พร้อมใช้งาน)');
+        const source = 'AtlasChill (Official API สำรองไม่พร้อมใช้งาน)';
+        setSource(source);
         console.warn('⚠️ [Auto-Battle Coverage] Official API สำรองใช้ไม่ได้ จึงใช้ Match ID จาก AtlasChill ต่อไป');
-        return atlasIds;
+        return queueCandidates(atlasIds, source);
     }
-    setSource('AtlasChill + Official API (ค้นหาไม่สำเร็จ)');
-    return [];
+    const source = 'AtlasChill + Official API (ค้นหาไม่สำเร็จ)';
+    setSource(source);
+    return queueCandidates([], source);
 }
 
 async function primeAutoBattleHistoryForGuild(configs = autoBattleConfigs) {
@@ -2766,6 +2798,7 @@ async function checkAutoBattlesForGuild() {
             const prefetchBudget = checkAutoBattles._detailLookupBudget ||
                 (checkAutoBattles._detailLookupBudget = { used: 0, limit: 25, startedAt: Date.now() });
             const prefetchedBattleDetails = new Map();
+            const prefetchedBattleFetchMs = new Map();
             const prefetchIds = newMatchIds.slice(0, Math.min(25, newMatchIds.length));
             let prefetchCursor = 0;
             const prefetchWorker = async () => {
@@ -2785,8 +2818,10 @@ async function checkAutoBattlesForGuild() {
                         return;
                     }
                     if (needsRequest) prefetchBudget.used++;
+                    const detailStartedAt = Date.now();
                     const detail = await fetchOfficialBattle(matchId, { autoBattle: true });
                     prefetchedBattleDetails.set(matchId, detail);
+                    prefetchedBattleFetchMs.set(matchId, Date.now() - detailStartedAt);
                 }
             };
             await Promise.all(Array.from(
@@ -2818,7 +2853,9 @@ async function checkAutoBattlesForGuild() {
                     const officialBattle = hasPrefetchedDetail
                         ? prefetchedBattleDetails.get(detailKey)
                         : await fetchOfficialBattle(latestMatchId, { autoBattle: true });
-                    battleDetailFetchMs = Date.now() - battleProcessingStartedAt;
+                    battleDetailFetchMs = hasPrefetchedDetail
+                        ? (prefetchedBattleFetchMs.get(detailKey) ?? Date.now() - battleProcessingStartedAt)
+                        : Date.now() - battleProcessingStartedAt;
                 if (!officialBattle) {
                     scheduleAutoBattleDetailRetry(latestMatchId, 'Official GameInfo ทั้ง Asia/Global ยังไม่มีรายละเอียดหรือ API ตอบไม่สำเร็จ');
                     console.warn('⚠️ ยังดึงข้อมูล Battle ' + latestMatchId + ' ไม่สำเร็จ; ยังไม่ทำเครื่องหมายว่าเสร็จ | detailFetch=' + battleDetailFetchMs + 'ms | firstSeenAt=' + new Date(battleListFirstSeenAt).toISOString());
