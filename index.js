@@ -2807,10 +2807,10 @@ async function checkAutoBattlesForGuild() {
                     if (!/^\d+$/.test(battleId)) continue;
                     const battleSeenAt = battleListSeenAtById.get(battleId);
                     if (!battleSeenAt) continue;
+                    comparable++;
                     const compareKey = String(config.targetGuildId || config.targetGuild || '') + ':' + battleId;
                     if (compared.has(compareKey)) continue;
                     compared.add(compareKey);
-                    comparable++;
                     const deltaMs = battleSeenAt - Number(observation.eventFirstSeenAt || 0);
                     const absMs = Math.abs(deltaMs);
                     let verdict;
@@ -2827,16 +2827,17 @@ async function checkAutoBattlesForGuild() {
                 }
                 if (probe.newEvents?.length) {
                     const newEventBattleIds = [...new Set(probe.newEvents.map(row => String(row?.BattleId ?? row?.battleId ?? row?.battle?.id ?? row?.Battle?.Id ?? '')).filter(id => /^\d+$/.test(id)))];
-                    const notYetInBattleList = newEventBattleIds.filter(id => !battleSet.has(id));
-                    if (notYetInBattleList.length) {
+                    if (!newEventBattleIds.length) {
                         console.log('🧪 [Source Timing Compare] Guild=' + String(config.targetGuild || config.targetGuildId) +
-                            ': Event BattleId(s) not in the current Battle list yet=[' + notYetInBattleList.join(',') +
-                            ']; check later polls for availability.');
+                            ': new Events contain no BattleId; exact same-fight comparison is unavailable for these events. Use eventAgeAtDiscovery and Auto-Battle Latency logs as separate timing measures.');
+                    } else {
+                        const notYetInBattleList = newEventBattleIds.filter(id => !battleSet.has(id));
+                        if (notYetInBattleList.length) {
+                            console.log('🧪 [Source Timing Compare] Guild=' + String(config.targetGuild || config.targetGuildId) +
+                                ': Event BattleId(s) not in the current Battle list yet=[' + notYetInBattleList.join(',') +
+                                ']; check later polls for availability.');
+                        }
                     }
-                }
-                if (eventObservations.length && comparable === 0) {
-                    console.log('🧪 [Source Timing Compare] Guild=' + String(config.targetGuild || config.targetGuildId) +
-                        ': no Event BattleId has been matched to an observed Battle-list ID yet; per-event age logs still measure detection age.');
                 }
             }).catch(error => console.warn('⚠️ [Source Timing Compare] comparison failed: ' + String(error?.message || error)));
             if (recentMatches === null || !recentMatches.length) continue;
