@@ -2420,7 +2420,7 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
     if (isCircuitOpen) {
         console.log(`🔌 Circuit OPEN - ข้าม AlbionBB อีก ${Math.ceil((circuit.openUntil - Date.now()) / 1000)}s | ใช้แหล่งอื่นแทน`);
     }
-    console.log(`🔄 Auto-Battle source: Official API PRIMARY | AlbionBB ${isCircuitOpen ? 'PAUSED (Circuit OPEN)' : 'fallback only if Official request fails'} | UTC ${hour}h | 403 streak ${circuit.failures}/3`);
+    console.log('🔄 Auto-Battle source: AlbionBB API PRIMARY | Official API ' + (isCircuitOpen ? 'fallback (AlbionBB Circuit OPEN)' : 'fallback if AlbionBB API fails') + ' | UTC ' + hour + 'h | 403 streak ' + circuit.failures + '/3');
 
     const officialCache = fetchGuildRecentBattles._officialCache || (fetchGuildRecentBattles._officialCache = new Map());
     const verify = async (ids, trustedGuildScope = false) => {
@@ -2465,25 +2465,45 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
         }
     };
     const fetchBB = async () => {
-        if (Date.now() < circuit.openUntil) return []; // Never access AlbionBB while its circuit is open.
-        const url = `https://east.albionbb.com/guilds/${encodeURIComponent(targetGuildId)}/battles`;
+        // Direct JSON API; do not request the Cloudflare-protected guild HTML page.
+        if (Date.now() < circuit.openUntil) return null;
+        if (!targetGuild) return null;
+        const apiUrl = 'https://api.albionbb.com/asia/battles';
         try {
-            const html = String(await cloudscraper.get({ uri: url, timeout: 20000 }) || '');
-            if (/(<title>\s*just a moment|challenges\.cloudflare\.com|enable javascript and cookies|cf-chl-)/i.test(html)) {
-                const challengeError = new Error('Cloudflare Challenge page returned');
-                challengeError.statusCode = 403;
-                challengeError.cloudflareChallenge = true;
-                throw challengeError;
+            const response = await axios.get(apiUrl, {
+                timeout: 15000,
+                headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
+                params: { search: targetGuild, minPlayers: 1, page: 0 }
+            });
+            const rows = Array.isArray(response.data)
+                ? response.data
+                : (Array.isArray(response.data?.battles) ? response.data.battles : null);
+            if (!rows) {
+                lastError = new Error('Unexpected AlbionBB API response format');
+                console.warn('⚠️ AlbionBB API returned an unexpected response format.');
+                return null;
             }
-            const unique = extractBattleIdsFromHtml(html);
-            const good = await verify(unique, Boolean(targetGuildId));
-            console.log(baselineOnly && targetGuildId
-                ? `✅ [AlbionBB] baseline IDs collected ${good.length}/${unique.length} | Guild ${targetGuild || targetGuildId}`
-                : `✅ [AlbionBB] verified ${good.length}/${unique.length} | Guild ${targetGuild || targetGuildId}`);
-            // A successful non-Challenge response breaks the consecutive-403 streak.
+
+            // The API search may be partial; require an exact guild-name match before accepting IDs.
+            const matchingRows = rows.filter(row => {
+                const guildRows = Array.isArray(row?.guilds)
+                    ? row.guilds
+                    : (row?.guilds && typeof row.guilds === 'object' ? Object.values(row.guilds) : []);
+                const names = guildRows
+                    .map(g => typeof g === 'string' ? g : (g?.name || g?.guildName || g?.guild))
+                    .filter(Boolean);
+                return isExactGuildMatch(targetGuild, names);
+            });
+            const unique = [...new Set(
+                matchingRows
+                    .map(row => row?.albionId ?? row?.id ?? row?.battleId)
+                    .filter(id => /^\d+$/.test(String(id)))
+                    .map(String)
+            )];
+            console.log('✅ [AlbionBB API] ' + unique.length + ' exact-match IDs (' + rows.length + ' rows searched) | Guild ' + targetGuild);
+            // A successful JSON response resets the consecutive-403 streak.
             circuit.failures = 0;
-            if (good.length) return good;
-            return [];
+            return unique;
         } catch(e) {
             lastError = e;
             const errorText = String(e?.message || e || 'request failed');
@@ -2493,36 +2513,41 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
             const isChallenge = Boolean(e?.cloudflareChallenge) || /just a moment|challenges\.cloudflare\.com|enable javascript and cookies|cf-chl-/i.test(errorText);
             if (is403) {
                 circuit.failures++;
-                console.warn(`⚠️ AlbionBB 403 streak ${circuit.failures}/3 | Guild ${targetGuild || targetGuildId}${isChallenge ? ' | Cloudflare Challenge' : ''}`);
+                console.warn('⚠️ AlbionBB API 403 streak ' + circuit.failures + '/3 | Guild ' + targetGuild + (isChallenge ? ' | Cloudflare Challenge' : ''));
                 if (circuit.failures >= 3) {
                     circuit.openUntil = Date.now() + 30 * 60 * 1000;
-                    console.error('🔌 AlbionBB Circuit OPEN for 30 minutes after 3 consecutive HTTP 403 responses.');
+                    console.error('🔌 AlbionBB API Circuit OPEN for 30 minutes after 3 consecutive HTTP 403 responses.');
                 }
             } else {
                 // Only consecutive 403 responses count toward opening this circuit.
                 circuit.failures = 0;
             }
             const safeError = isChallenge
-                ? `HTTP ${status || 403} (Cloudflare Challenge; response body suppressed)`
+                ? 'HTTP ' + (status || 403) + ' (Cloudflare Challenge; response body suppressed)'
                 : status
-                    ? `HTTP ${status}`
+                    ? 'HTTP ' + status
                     : String(e?.code || errorText).replace(/https?:\/\/\S+/gi, '[URL]').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').slice(0, 160);
-            console.warn(`⚠️ AlbionBB failed for ${targetGuild || targetGuildId}: ${safeError}`);
+            console.warn('⚠️ AlbionBB API failed for ' + targetGuild + ': ' + safeError);
+            return null;
         }
-        return [];
     };
 
+    if (targetGuild) {
+        // AlbionBB's direct API is the primary recent-battle source.
+        const albionBBIds = await fetchBB();
+        if (Array.isArray(albionBBIds)) {
+            if (albionBBIds.length) return albionBBIds;
+            console.log('ℹ️ AlbionBB API returned 0 matching IDs for ' + targetGuild + '.');
+            return [];
+        }
+    }
     if (targetGuildId) {
-        // Official API is primary. A valid empty response is not a reason to probe AlbionBB;
-        // use AlbionBB only when the Official request itself fails.
+        // Official API remains the fallback when the AlbionBB API request fails or is circuit-paused.
         const officialIds = await fetchOfficial();
         if (Array.isArray(officialIds)) {
             if (officialIds.length) return officialIds;
-            console.log(`ℹ️ Official API returned 0 IDs for ${targetGuild || targetGuildId}; skipping AlbionBB to avoid an unnecessary Challenge request.`);
+            console.log('ℹ️ Official API returned 0 IDs for ' + (targetGuild || targetGuildId) + '.');
             if (!targetGuild) return [];
-        } else {
-            const fallbackIds = await fetchBB();
-            if (fallbackIds.length) return fallbackIds;
         }
     }
     if (!targetGuild) return [];
