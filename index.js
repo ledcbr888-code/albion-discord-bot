@@ -2581,7 +2581,7 @@ async function probeAutoBattleEvents(config) {
     const states = probeAutoBattleEvents._states || (probeAutoBattleEvents._states = new Map());
     let state = states.get(guildId);
     if (!state) {
-        state = { seenIds: new Set(), baselineComplete: false, lastRequestAt: 0, lastResult: null, inFlight: null };
+        state = { seenIds: new Set(), baselineComplete: false, lastRequestAt: 0, lastResult: null, inFlight: null, firstSeenBattleIds: new Map() };
         states.set(guildId, state);
     }
 
@@ -2590,7 +2590,8 @@ async function probeAutoBattleEvents(config) {
         return state.inFlight ? await state.inFlight : state.lastResult;
     }
 
-    state.lastRequestAt = now;
+    const requestStartedAt = Date.now();
+    state.lastRequestAt = requestStartedAt;
     if (!probeAutoBattleEvents._announced) {
         probeAutoBattleEvents._announced = true;
         console.log('🧪 Auto-Battle Kill Events probe ENABLED in observe-only mode; it will not send Discord reports. Set AUTO_BATTLE_EVENTS_PROBE=false to disable.');
@@ -2606,10 +2607,12 @@ async function probeAutoBattleEvents(config) {
                     params: { limit: 50, offset: 0, guildId: guildId }
                 }
             );
+            const responseReceivedAt = Date.now();
+            const requestMs = responseReceivedAt - requestStartedAt;
 
             if (!Array.isArray(response.data)) {
-                const result = { ok: false, baseline: !state.baselineComplete, newEvents: [], battleIds: [] };
-                console.warn('⚠️ [Events Probe] Unexpected response format for Guild ' + guildName + '.');
+                const result = { ok: false, baseline: !state.baselineComplete, newEvents: [], battleIds: [], eventObservations: [], requestMs, observedAt: responseReceivedAt };
+                console.warn('⚠️ [Events Probe] Unexpected response format for Guild ' + guildName + ' | request=' + requestMs + 'ms.');
                 state.lastResult = result;
                 return result;
             }
@@ -2621,16 +2624,25 @@ async function probeAutoBattleEvents(config) {
                 return /^\d+$/.test(String(value ?? '')) ? String(value) : '';
             };
             const eventTimeOf = row => row?.TimeStamp ?? row?.Timestamp ?? row?.timestamp ?? row?.timeStamp ?? null;
-            const eventAgeSeconds = row => {
+            const eventTimeMsOf = row => {
                 const raw = eventTimeOf(row);
                 if (raw === null || raw === undefined || raw === '') return null;
-                let timeMs = NaN;
                 const rawText = String(raw).trim();
-                if (/^\d{13}$/.test(rawText)) timeMs = Number(rawText);
-                else if (/^\d{10}$/.test(rawText)) timeMs = Number(rawText) * 1000;
-                else timeMs = Date.parse(rawText);
-                return Number.isFinite(timeMs) ? Math.max(0, Math.floor((Date.now() - timeMs) / 1000)) : null;
+                if (/^\d{13}$/.test(rawText)) return Number(rawText);
+                if (/^\d{10}$/.test(rawText)) return Number(rawText) * 1000;
+                const parsedTime = Date.parse(rawText);
+                return Number.isFinite(parsedTime) ? parsedTime : null;
             };
+            const eventAgeSeconds = (row, at = responseReceivedAt) => {
+                const timeMs = eventTimeMsOf(row);
+                return timeMs !== null ? Math.max(0, Math.floor((at - timeMs) / 1000)) : null;
+            };
+            const eventTimeIso = row => {
+                const timeMs = eventTimeMsOf(row);
+                return timeMs !== null ? new Date(timeMs).toISOString() : 'unknown';
+            };
+            const guildOf = value => String(value?.GuildName ?? value?.guildName ?? value?.Guild?.Name ?? value?.guild?.name ?? '').trim();
+            const nameOf = value => String(value?.Name ?? value?.name ?? '').trim();
             const eventRows = rows.filter(row => eventIdOf(row) !== '');
             const eventIds = eventRows.map(eventIdOf);
             const battleIdCount = rows.filter(row => battleIdOf(row) !== '').length;
@@ -2638,15 +2650,32 @@ async function probeAutoBattleEvents(config) {
             const newestAge = newestRow ? eventAgeSeconds(newestRow) : null;
             const newestAgeText = newestAge === null ? 'unknown' : newestAge + 's';
 
+            // Keep first observed Events timestamps for later correlation with the Battle list.
+            for (const row of eventRows) {
+                const battleId = battleIdOf(row);
+                if (!battleId || state.firstSeenBattleIds.has(battleId)) continue;
+                const eventTimeMs = eventTimeMsOf(row);
+                state.firstSeenBattleIds.set(battleId, {
+                    battleId,
+                    eventId: eventIdOf(row),
+                    eventTime: eventTimeIso(row),
+                    eventTimeMs,
+                    eventFirstSeenAt: responseReceivedAt,
+                    eventAgeAtFirstSeenSec: eventAgeSeconds(row, responseReceivedAt)
+                });
+            }
+            while (state.firstSeenBattleIds.size > 500) state.firstSeenBattleIds.delete(state.firstSeenBattleIds.keys().next().value);
+            const eventObservations = [...state.firstSeenBattleIds.values()];
+
             if (!state.baselineComplete) {
                 // Initial results are a baseline only: never treat them as new fight triggers.
                 for (const id of eventIds.slice().reverse()) state.seenIds.add(id);
                 while (state.seenIds.size > 500) state.seenIds.delete(state.seenIds.values().next().value);
                 state.baselineComplete = true;
-                const result = { ok: true, baseline: true, newEvents: [], battleIds: [], eventCount: rows.length };
+                const result = { ok: true, baseline: true, newEvents: [], battleIds: [], eventObservations, eventCount: rows.length, requestMs, observedAt: responseReceivedAt };
                 console.log('🧪 [Events Probe] BASELINE Guild ' + guildName + ': rows=' + rows.length +
                     ', EventIds=' + eventIds.length + ', eventsWithBattleId=' + battleIdCount + '/' + rows.length +
-                    ', newestEventAge=' + newestAgeText + '; observe-only.');
+                    ', newestEventAge=' + newestAgeText + ', request=' + requestMs + 'ms; observe-only.');
                 state.lastResult = result;
                 return result;
             }
@@ -2656,30 +2685,51 @@ async function probeAutoBattleEvents(config) {
             while (state.seenIds.size > 500) state.seenIds.delete(state.seenIds.values().next().value);
 
             const battleIds = [...new Set(newEvents.map(battleIdOf).filter(Boolean))];
-            const result = { ok: true, baseline: false, newEvents, battleIds, eventCount: rows.length };
+            const result = { ok: true, baseline: false, newEvents, battleIds, eventObservations, eventCount: rows.length, requestMs, observedAt: responseReceivedAt };
             if (newEvents.length) {
-                const sampleIds = newEvents.slice(0, 5).map(eventIdOf).join(',');
-                const ages = newEvents.map(eventAgeSeconds).filter(value => value !== null);
-                const newestNewAge = ages.length ? Math.min(...ages) + 's' : 'unknown';
                 console.log('🧪 [Events Probe] NEW Guild ' + guildName + ': count=' + newEvents.length +
-                    ', EventIds=' + sampleIds + (newEvents.length > 5 ? ',...' : '') +
-                    ', newestEventAge=' + newestNewAge +
-                    ', BattleIds=' + (battleIds.length ? battleIds.join(',') : 'not present in event payload') +
-                    '; observe-only (no report triggered).');
+                    ', rows=' + rows.length + ', eventsWithBattleId=' + battleIdCount + '/' + rows.length +
+                    ', request=' + requestMs + 'ms; observe-only.');
+                for (const row of newEvents.slice(0, 10)) {
+                    const eventId = eventIdOf(row);
+                    const battleId = battleIdOf(row) || 'not-provided';
+                    const eventAge = eventAgeSeconds(row);
+                    const killer = row?.Killer ?? row?.killer ?? {};
+                    const victim = row?.Victim ?? row?.victim ?? {};
+                    const eventAgeText = eventAge === null ? 'unknown' : eventAge + 's';
+                    const extraVictimGuild = guildOf(victim) ? ' [' + guildOf(victim) + ']' : '';
+                    const extraKillerGuild = guildOf(killer) ? ' [' + guildOf(killer) + ']' : '';
+                    console.log('🧪 [Events Latency] Guild=' + guildName +
+                        ' EventId=' + eventId +
+                        ' eventAgeAtDiscovery=' + eventAgeText +
+                        ' eventTime=' + eventTimeIso(row) +
+                        ' apiRequest=' + requestMs + 'ms' +
+                        ' BattleId=' + battleId +
+                        ' Killer=' + (nameOf(killer) || 'unknown') + extraKillerGuild +
+                        ' Victim=' + (nameOf(victim) || 'unknown') + extraVictimGuild);
+                }
+                if (newEvents.length > 10) {
+                    console.log('🧪 [Events Latency] Guild=' + guildName + ': ' + (newEvents.length - 10) + ' additional new event(s) omitted from per-event detail log to limit log volume.');
+                }
+                const newestNewAge = newEvents.map(row => eventAgeSeconds(row)).filter(value => value !== null).sort((a,b) => a-b)[0];
+                console.log('🧪 [Events Probe] Guild ' + guildName + ': newestNewEventAge=' +
+                    (newestNewAge === undefined ? 'unknown' : newestNewAge + 's') +
+                    ' (age at discovery includes source delay + polling interval; it is not pure API latency).');
             } else {
                 console.log('🧪 [Events Probe] Guild ' + guildName + ': sample=' + rows.length +
                     ', new=0, eventsWithBattleId=' + battleIdCount + '/' + rows.length +
-                    ', newestEventAge=' + newestAgeText + '; observe-only.');
+                    ', newestEventAge=' + newestAgeText + ', request=' + requestMs + 'ms; observe-only.');
             }
             state.lastResult = result;
             return result;
         } catch (error) {
+            const requestMs = Date.now() - requestStartedAt;
             const status = error?.response?.status || error?.statusCode || null;
             const detail = status
                 ? 'HTTP ' + status
                 : String(error?.code || error?.message || 'request failed').replace(/https?:\/\/\S+/gi, '[URL]').slice(0, 120);
-            const result = { ok: false, baseline: !state.baselineComplete, newEvents: [], battleIds: [] };
-            console.warn('⚠️ [Events Probe] failed for Guild ' + guildName + ': ' + detail + ' (normal Auto-Battle path remains active).');
+            const result = { ok: false, baseline: !state.baselineComplete, newEvents: [], battleIds: [], eventObservations: [], requestMs, observedAt: Date.now() };
+            console.warn('⚠️ [Events Probe] failed for Guild ' + guildName + ': ' + detail + ' | request=' + requestMs + 'ms (normal Auto-Battle path remains active).');
             state.lastResult = result;
             return result;
         } finally {
@@ -2689,7 +2739,6 @@ async function probeAutoBattleEvents(config) {
 
     return await state.inFlight;
 }
-
 async function primeAutoBattleHistoryForGuild(configs = autoBattleConfigs) {
     // IMPORTANT: the recent-battles page contains historical fights. When a
     // tracker is created for the first time (or after an upgrade with no saved
@@ -2736,18 +2785,60 @@ async function checkAutoBattlesForGuild() {
         for (const config of autoBattleConfigs) {
             const eventProbePromise = probeAutoBattleEvents(config);
             const recentMatches = await fetchGuildRecentBattles(config);
-            // Compare new Event Battle IDs with this cycle's existing battle list asynchronously;
-            // Events remain a measurement-only source and never trigger or suppress reports.
+            const battleListObservedAt = Date.now();
+            const battleListSeenAtById = checkAutoBattlesForGuild._battleListSeenAtById || (checkAutoBattlesForGuild._battleListSeenAtById = new Map());
+            if (Array.isArray(recentMatches)) {
+                for (const id of recentMatches) {
+                    const key = String(id);
+                    if (!battleListSeenAtById.has(key)) battleListSeenAtById.set(key, battleListObservedAt);
+                }
+                while (battleListSeenAtById.size > 2000) battleListSeenAtById.delete(battleListSeenAtById.keys().next().value);
+            }
+            // Compare first-observed timestamps only when Events supplies a Battle ID.
+            // Differences under 2s are considered the same polling window, not proof of a faster source.
             eventProbePromise.then(probe => {
-                if (!probe?.ok || probe.baseline || !probe.battleIds?.length) return;
+                if (!probe?.ok || probe.baseline) return;
                 const battleSet = new Set((Array.isArray(recentMatches) ? recentMatches : []).map(String));
-                const present = probe.battleIds.filter(id => battleSet.has(String(id)));
-                const absent = probe.battleIds.filter(id => !battleSet.has(String(id)));
-                console.log('🧪 [Events vs Battle API] Guild ' + String(config.targetGuild || config.targetGuildId) +
-                    ': Event BattleIds=' + probe.battleIds.length + ', presentInCurrentBattleList=' +
-                    present.length + ', notInCurrentBattleList=' + absent.length +
-                    (absent.length ? ' [' + absent.join(',') + ']' : '') + '; measurement only.');
-            }).catch(error => console.warn('⚠️ [Events vs Battle API] comparison failed: ' + String(error?.message || error)));
+                const eventObservations = Array.isArray(probe.eventObservations) ? probe.eventObservations : [];
+                const compared = checkAutoBattlesForGuild._eventsComparedBattleIds || (checkAutoBattlesForGuild._eventsComparedBattleIds = new Set());
+                let comparable = 0;
+                for (const observation of eventObservations) {
+                    const battleId = String(observation?.battleId || '');
+                    if (!/^\d+$/.test(battleId)) continue;
+                    const battleSeenAt = battleListSeenAtById.get(battleId);
+                    if (!battleSeenAt) continue;
+                    const compareKey = String(config.targetGuildId || config.targetGuild || '') + ':' + battleId;
+                    if (compared.has(compareKey)) continue;
+                    compared.add(compareKey);
+                    comparable++;
+                    const deltaMs = battleSeenAt - Number(observation.eventFirstSeenAt || 0);
+                    const absMs = Math.abs(deltaMs);
+                    let verdict;
+                    if (absMs < 2000) verdict = 'same polling window; no reliable speed winner';
+                    else if (deltaMs > 0) verdict = 'Events observed first by ' + Math.round(deltaMs / 1000) + 's';
+                    else verdict = 'Battle list observed first by ' + Math.round(absMs / 1000) + 's';
+                    console.log('🧪 [Source Timing Compare] Guild=' + String(config.targetGuild || config.targetGuildId) +
+                        ' MatchID=' + battleId +
+                        ' EventId=' + String(observation.eventId || 'unknown') +
+                        ' eventAgeAtFirstSeen=' + (observation.eventAgeAtFirstSeenSec == null ? 'unknown' : observation.eventAgeAtFirstSeenSec + 's') +
+                        ' EventsFirstSeenAt=' + new Date(Number(observation.eventFirstSeenAt)).toISOString() +
+                        ' BattleListFirstSeenAt=' + new Date(battleSeenAt).toISOString() +
+                        ' result=' + verdict + '.');
+                }
+                if (probe.newEvents?.length) {
+                    const newEventBattleIds = [...new Set(probe.newEvents.map(row => String(row?.BattleId ?? row?.battleId ?? row?.battle?.id ?? row?.Battle?.Id ?? '')).filter(id => /^\d+$/.test(id)))];
+                    const notYetInBattleList = newEventBattleIds.filter(id => !battleSet.has(id));
+                    if (notYetInBattleList.length) {
+                        console.log('🧪 [Source Timing Compare] Guild=' + String(config.targetGuild || config.targetGuildId) +
+                            ': Event BattleId(s) not in the current Battle list yet=[' + notYetInBattleList.join(',') +
+                            ']; check later polls for availability.');
+                    }
+                }
+                if (eventObservations.length && comparable === 0) {
+                    console.log('🧪 [Source Timing Compare] Guild=' + String(config.targetGuild || config.targetGuildId) +
+                        ': no Event BattleId has been matched to an observed Battle-list ID yet; per-event age logs still measure detection age.');
+                }
+            }).catch(error => console.warn('⚠️ [Source Timing Compare] comparison failed: ' + String(error?.message || error)));
             if (recentMatches === null || !recentMatches.length) continue;
 
             const newMatchIds = recentMatches.filter(id => !processedBattles.has(String(id)));
@@ -2756,10 +2847,14 @@ async function checkAutoBattlesForGuild() {
             // Process every unseen battle returned by the search page so a burst
             // of fights between 5-minute polls is not silently skipped.
             for (const latestMatchId of newMatchIds.slice(0, 10)) {
+                const battleProcessingStartedAt = Date.now();
+                const battleListFirstSeenAt = battleListSeenAtById.get(String(latestMatchId)) || battleListObservedAt;
+                let battleDetailFetchMs = null;
                 try {
                     const officialBattle = await fetchOfficialBattle(latestMatchId);
+                    battleDetailFetchMs = Date.now() - battleProcessingStartedAt;
                 if (!officialBattle) {
-                    console.warn(`⚠️ ยังดึงข้อมูล Battle ${latestMatchId} ไม่สำเร็จจากแหล่งข้อมูลที่เข้าถึงได้; จะลองใหม่รอบถัดไป (ไม่ได้ยืนยันว่า Match ID ไม่มีอยู่)`);
+                    console.warn('⚠️ ยังดึงข้อมูล Battle ' + latestMatchId + ' ไม่สำเร็จ; จะลองใหม่รอบถัดไป (ไม่ได้ยืนยันว่า Match ID ไม่มีอยู่) | detailFetch=' + battleDetailFetchMs + 'ms | firstSeenAt=' + new Date(battleListFirstSeenAt).toISOString());
                     continue;
                 }
 
@@ -2779,6 +2874,15 @@ async function checkAutoBattlesForGuild() {
                         if (Number.isFinite(parsedTime)) battleTimeMs = parsedTime;
                     }
                 }
+                const battleAgeAtFirstDetectionSec = Number.isFinite(battleTimeMs) && battleTimeMs > 0
+                    ? Math.max(0, Math.floor((battleListFirstSeenAt - battleTimeMs) / 1000))
+                    : null;
+                console.log('⏱️ [Auto-Battle Latency] Guild=' + String(config.targetGuild || config.targetGuildId) +
+                    ' MatchID=' + latestMatchId +
+                    ' firstSeenAt=' + new Date(battleListFirstSeenAt).toISOString() +
+                    ' battleStart=' + (Number.isFinite(battleTimeMs) && battleTimeMs > 0 ? new Date(battleTimeMs).toISOString() : 'unknown') +
+                    ' battleAgeAtFirstDetection=' + (battleAgeAtFirstDetectionSec === null ? 'unknown' : Math.floor(battleAgeAtFirstDetectionSec / 60) + 'm ' + (battleAgeAtFirstDetectionSec % 60) + 's') +
+                    ' detailFetch=' + (battleDetailFetchMs === null ? 'unknown' : battleDetailFetchMs + 'ms') + '.');
                 const maxAutoBattleAgeMs = 24 * 60 * 60 * 1000;
                 if (Number.isFinite(battleTimeMs) && battleTimeMs > 0 &&
                     Date.now() - battleTimeMs > maxAutoBattleAgeMs) {
@@ -2865,9 +2969,21 @@ async function checkAutoBattlesForGuild() {
                             }
                         }
                     } catch {}
-                    console.log(`✅ Auto-Battle report send succeeded for Match ID ${latestMatchId} in channel ${config.channelId}.${delayText}`);
+                    console.log('✅ Auto-Battle report send succeeded for Match ID ' + latestMatchId +
+                        ' in channel ' + config.channelId + '.' + delayText +
+                        ' | firstSeenToReport=' + Math.max(0, Date.now() - battleListFirstSeenAt) + 'ms' +
+                        ' | detailFetch=' + (battleDetailFetchMs === null ? 'unknown' : battleDetailFetchMs + 'ms') + '.');
                 } else {
-                    console.log(`ℹ️ Match ID ${latestMatchId} checked below threshold; marking handled.`);
+                    const decisionAt = Date.now();
+                    const ageAtDecisionSec = Number.isFinite(battleTimeMs) && battleTimeMs > 0
+                        ? Math.max(0, Math.floor((decisionAt - battleTimeMs) / 1000))
+                        : null;
+                    console.log('ℹ️ [Auto-Battle Latency] MatchID=' + latestMatchId +
+                        ' outcome=BELOW_THRESHOLD' +
+                        ' fame=' + formatFame(result.totalFame) +
+                        ' threshold=' + formatFame(checkValue) +
+                        ' ageAtDecision=' + (ageAtDecisionSec === null ? 'unknown' : Math.floor(ageAtDecisionSec / 60) + 'm ' + (ageAtDecisionSec % 60) + 's') +
+                        ' processingSinceFirstSeen=' + Math.max(0, decisionAt - battleListFirstSeenAt) + 'ms; marking handled.');
                 }
                 processedBattles.add(String(latestMatchId));
                 saveData();                } catch (e) {
