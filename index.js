@@ -877,32 +877,35 @@ async function fetchOfficialBattleUncached(matchId, options = {}) {
     if (officialApiRateLimitedUntil > Date.now()) {
         console.log('⏭️ Official battle API cooldown active for ' + Math.ceil((officialApiRateLimitedUntil - Date.now()) / 1000) + 's' + (autoBattle ? '; Auto-Battle จะลองใหม่ในรอบถัดไปสำหรับ ' : '; trying public fallbacks for ') + matchId + '.');
     } else {
-        for (let attempt = 1; attempt <= (autoBattle ? 1 : 2); attempt++) {
-            const requestUrls = autoBattle ? urls.slice(0, 1) : urls;
-            for (const url of requestUrls) {
+        const maxAttempts = autoBattle ? 1 : 2;
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+            const requestUrls = urls;
+            for (let endpointIndex = 0; endpointIndex < requestUrls.length; endpointIndex++) {
+                const url = requestUrls[endpointIndex];
                 try {
                     const response = await axios.get(url, {
-                        timeout: autoBattle ? 10000 : 20000,
+                        timeout: autoBattle ? 7000 : 20000,
                         headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' }
                     });
                     if (response.data && typeof response.data === 'object' &&
                         (response.data.id || response.data.players || response.data.guilds)) return response.data;
-                    console.warn(`⚠️ Official battle API returned an unexpected payload for ${matchId} from ${url}`);
+                    console.warn('⚠️ Official battle API returned an unexpected payload for ' + matchId + ' from ' + (url.includes('gameinfo-sgp') ? 'Asia' : 'global') + '.');
                 } catch (err) {
                     const status = err.response?.status;
                     if (status === 429) {
                         sawRateLimit = true;
                         const waitMs = Math.max(retryAfterMs(err), 60000);
                         officialApiRateLimitedUntil = Math.max(officialApiRateLimitedUntil, Date.now() + waitMs);
-                        console.warn('⏳ Official battle API rate-limited ' + matchId + ' (' + (url.includes('gameinfo-sgp') ? 'Asia' : 'global') + '); pausing official requests for ' + Math.ceil(waitMs / 1000) + 's' + (autoBattle ? '; Auto-Battle จะลองใหม่ในรอบถัดไป.' : ' and switching to fallbacks.'));
+                        console.warn('⏳ Official battle API rate-limited ' + matchId + ' (' + (url.includes('gameinfo-sgp') ? 'Asia' : 'global') + '); pausing official requests for ' + Math.ceil(waitMs / 1000) + 's' + (autoBattle ? '; Auto-Battle จะลองใหม่หลัง cooldown.' : ' and switching to fallbacks.'));
                         break;
                     } else {
-                        console.warn(`⚠️ Official battle API attempt ${attempt}/2 failed for ${matchId} (${url.includes('gameinfo-sgp') ? 'Asia' : 'global'}): ${status || err.message}`);
+                        console.warn('⚠️ Official battle API endpoint ' + (endpointIndex + 1) + '/' + requestUrls.length +
+                            ' failed for ' + matchId + ' (' + (url.includes('gameinfo-sgp') ? 'Asia' : 'global') + '): ' + (status || err.message) + '.');
                     }
                 }
             }
             if (sawRateLimit) break;
-            if (!autoBattle && attempt < 2) await sleep(1800);
+            if (!autoBattle && attempt < maxAttempts) await sleep(1800);
         }
     }
 
@@ -2446,8 +2449,8 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
     }
 }
 
-// Auto-Battle Kill Events probe (observe-only).
-// It never triggers Discord reports; disable with AUTO_BATTLE_EVENTS_PROBE=false.
+// Auto-Battle Kill Events are an alternate Match ID discovery source.
+// Every candidate still requires Official GameInfo battle details and the Fame threshold before reporting.
 async function probeAutoBattleEvents(config) {
     const toggle = String(process.env.AUTO_BATTLE_EVENTS_PROBE ?? 'true').trim().toLowerCase();
     if (!['1', 'true', 'yes', 'on'].includes(toggle)) return null;
@@ -2473,7 +2476,7 @@ async function probeAutoBattleEvents(config) {
     state.lastRequestAt = requestStartedAt;
     if (!probeAutoBattleEvents._announced) {
         probeAutoBattleEvents._announced = true;
-        console.log('🧪 เปิดโหมดทดสอบ Kill Events ของ Auto-Battle แล้ว: ใช้สังเกตการณ์เท่านั้น ไม่ส่งรายงาน Discord จาก Events | ปิดได้ด้วย AUTO_BATTLE_EVENTS_PROBE=false');
+        console.log('🧪 เปิด Kill Events สำหรับค้นหา Match ID ของ Auto-Battle แล้ว: ต้องยืนยันด้วย Official Battle Detail และตรวจเกณฑ์ Fame ก่อนส่งรายงาน | ปิดได้ด้วย AUTO_BATTLE_EVENTS_PROBE=false');
     }
 
     state.inFlight = (async () => {
@@ -2537,7 +2540,7 @@ async function probeAutoBattleEvents(config) {
                 const result = { ok: true, baseline: true, newEvents: [], battleIds: [], eventObservations: [], eventCount: rows.length, requestMs, observedAt: responseReceivedAt };
                 console.log('🧪 [Events Probe] ตั้งต้นข้อมูล | กิลด์=' + guildName + ' | จำนวนรายการ=' + rows.length +
                     ' | จำนวน Event ID=' + eventIds.length + ' | เหตุการณ์ที่มี Battle ID=' + battleIdCount + '/' + rows.length +
-                    ' | อายุเหตุการณ์ล่าสุด=' + newestAgeText + ' | เวลาตอบ API=' + requestMs + 'ms | โหมดสังเกตการณ์เท่านั้น');
+                    ' | อายุเหตุการณ์ล่าสุด=' + newestAgeText + ' | เวลาตอบ API=' + requestMs + 'ms | baseline: ไม่ประมวลผล Event เก่าก่อนเริ่มบอท');
                 state.lastResult = result;
                 return result;
             }
@@ -2569,7 +2572,7 @@ async function probeAutoBattleEvents(config) {
             if (newEvents.length) {
                 console.log('🧪 [Events Probe] พบเหตุการณ์ใหม่ | กิลด์=' + guildName + ' | จำนวนเหตุการณ์ใหม่=' + newEvents.length +
                     ' | จำนวนรายการ=' + rows.length + ' | เหตุการณ์ที่มี Battle ID=' + battleIdCount + '/' + rows.length +
-                    ' | เวลาตอบ API=' + requestMs + 'ms | โหมดสังเกตการณ์เท่านั้น');
+                    ' | เวลาตอบ API=' + requestMs + 'ms | ใช้ค้นหา Match ID; รายงานต้องผ่าน Official Battle Detail');
                 for (const row of newEvents.slice(0, 10)) {
                     const eventId = eventIdOf(row);
                     const battleId = battleIdOf(row) || 'ไม่มีข้อมูล';
@@ -2598,7 +2601,7 @@ async function probeAutoBattleEvents(config) {
             } else {
                 console.log('🧪 [Events Probe] กิลด์=' + guildName + ' | รายการตัวอย่าง=' + rows.length +
                     ' | เหตุการณ์ใหม่=0 | เหตุการณ์ที่มี Battle ID=' + battleIdCount + '/' + rows.length +
-                    ' | อายุเหตุการณ์ล่าสุด=' + newestAgeText + ' | เวลาตอบ API=' + requestMs + 'ms | โหมดสังเกตการณ์เท่านั้น');
+                    ' | อายุเหตุการณ์ล่าสุด=' + newestAgeText + ' | เวลาตอบ API=' + requestMs + 'ms | ใช้ค้นหา Match ID; รายงานต้องผ่าน Official Battle Detail + เกณฑ์ Fame');
             }
             state.lastResult = result;
             return result;
@@ -2656,6 +2659,23 @@ async function checkAutoBattles() {
     }
 }
 
+function scheduleAutoBattleDetailRetry(matchId, reason) {
+    const retryStates = checkAutoBattlesForGuild._detailRetryStates ||
+        (checkAutoBattlesForGuild._detailRetryStates = new Map());
+    const key = String(matchId);
+    const previous = retryStates.get(key) || { attempts: 0, hourlyRetry: false };
+    const attempts = Math.min(8, (Number(previous.attempts) || 0) + 1);
+    const delays = [60000, 120000, 300000, 600000, 900000, 900000, 900000];
+    const hourlyRetry = previous.hourlyRetry === true || attempts >= 8;
+    const waitMs = hourlyRetry ? 60 * 60 * 1000 : delays[Math.min(attempts - 1, delays.length - 1)];
+    retryStates.delete(key);
+    retryStates.set(key, { attempts, nextRetryAt: Date.now() + waitMs, hourlyRetry });
+    while (retryStates.size > 1000) retryStates.delete(retryStates.keys().next().value);
+    console.warn('⚠️ [Auto-Battle Retry] Match ID=' + key + ' | ' + String(reason || 'ยังดึงรายละเอียดไม่ได้') +
+        ' | ครั้งที่ ' + attempts + '/8' +
+        (hourlyRetry ? ' | ครบ 8 ครั้งแล้ว จะลองใหม่ทุก 60 นาที' : ' | ลองใหม่ใน ' + Math.ceil(waitMs / 60000) + ' นาที') + '.');
+}
+
 async function checkAutoBattlesForGuild() {
     if (!autoBattleConfigs.length) return;
     if (autoBattleCheckRunning) return;
@@ -2663,6 +2683,25 @@ async function checkAutoBattlesForGuild() {
     autoBattleCheckRunning = true;
     try {
         for (const config of autoBattleConfigs) {
+            const trackerScope = getGuildConfig(config.guildId, false);
+            const autoTrackedGuilds = Array.isArray(trackerScope?.guilds)
+                ? trackerScope.guilds.map(g => typeof g === 'string' ? g : g?.name).filter(Boolean)
+                : [];
+            const autoTrackedPlayers = Array.isArray(trackerScope?.players)
+                ? trackerScope.players
+                : [];
+            const missingTrackingScopeKey = String(config.guildId || '') + ':' + String(config.targetGuildId || config.targetGuild || '');
+            const missingScopeWarnings = checkAutoBattlesForGuild._missingTrackingScopeWarnings ||
+                (checkAutoBattlesForGuild._missingTrackingScopeWarnings = new Set());
+            if (!autoTrackedPlayers.length && !autoTrackedGuilds.length) {
+                if (!missingScopeWarnings.has(missingTrackingScopeKey)) {
+                    console.warn('⚠️ [Auto-Battle] ยังไม่มี /add player หรือ /add guild สำหรับเซิร์ฟเวอร์นี้; งดประมวลผล Match ID เพื่อไม่ให้ตีความ Fame=0 ผิด | กิลด์ต้นทาง=' + String(config.targetGuild || config.targetGuildId));
+                    missingScopeWarnings.add(missingTrackingScopeKey);
+                }
+                continue;
+            }
+            missingScopeWarnings.delete(missingTrackingScopeKey);
+
             const eventProbePromise = probeAutoBattleEvents(config)
                 .then(probe => ({ probe, observedAt: Date.now() }))
                 .catch(error => ({ probe: null, observedAt: Date.now(), error }));
@@ -2768,8 +2807,12 @@ async function checkAutoBattlesForGuild() {
             for (const [id, metadata] of pendingEventIds.entries()) {
                 addCandidate(id, metadata?.source || 'Kill Events API', metadata?.firstSeenAt || Date.now());
             }
+            const detailRetryStates = checkAutoBattlesForGuild._detailRetryStates ||
+                (checkAutoBattlesForGuild._detailRetryStates = new Map());
+            const retryCheckAt = Date.now();
             const newMatchIds = [...candidateMeta.keys()]
                 .filter(id => !processedBattles.has(String(id)))
+                .filter(id => (detailRetryStates.get(String(id))?.nextRetryAt || 0) <= retryCheckAt)
                 .sort((a, b) => candidateMeta.get(String(a)).firstSeenAt - candidateMeta.get(String(b)).firstSeenAt);
             if (!newMatchIds.length) continue;
 
@@ -2784,9 +2827,11 @@ async function checkAutoBattlesForGuild() {
                     const officialBattle = await fetchOfficialBattle(latestMatchId, { autoBattle: true });
                     battleDetailFetchMs = Date.now() - battleProcessingStartedAt;
                 if (!officialBattle) {
-                    console.warn('⚠️ ยังดึงข้อมูล Battle ' + latestMatchId + ' ไม่สำเร็จ; จะลองใหม่รอบถัดไป (ไม่ได้ยืนยันว่า Match ID ไม่มีอยู่) | detailFetch=' + battleDetailFetchMs + 'ms | firstSeenAt=' + new Date(battleListFirstSeenAt).toISOString());
+                    scheduleAutoBattleDetailRetry(latestMatchId, 'Official GameInfo ยังไม่มีรายละเอียดหรือ API ตอบไม่สำเร็จ (ลอง Asia และ global แล้ว)');
+                    console.warn('⚠️ ยังดึงข้อมูล Battle ' + latestMatchId + ' ไม่สำเร็จ; ยังไม่ทำเครื่องหมายว่าเสร็จ | detailFetch=' + battleDetailFetchMs + 'ms | firstSeenAt=' + new Date(battleListFirstSeenAt).toISOString());
                     continue;
                 }
+                detailRetryStates.delete(String(latestMatchId));
 
                 // Auto-Battle must report recent fights only. Some source pages can
                 // still return battles from several days ago after restarts or outages.
@@ -2818,6 +2863,7 @@ async function checkAutoBattlesForGuild() {
                     Date.now() - battleTimeMs > maxAutoBattleAgeMs) {
                     processedBattles.add(String(latestMatchId));
                     pendingEventIds.delete(String(latestMatchId));
+                    detailRetryStates.delete(String(latestMatchId));
                     saveData();
                     const ageHours = Math.floor((Date.now() - battleTimeMs) / (60 * 60 * 1000));
                     console.log(`⏭️ Skip stale Auto-Battle Match ID ${latestMatchId} for ${config.targetGuild}: battle is ${ageHours}h old (limit 24h); marked as handled.`);
@@ -2827,6 +2873,12 @@ async function checkAutoBattlesForGuild() {
                 const officialGuildNames = officialBattle.guilds
                     ? Object.values(officialBattle.guilds).map(g => g?.name).filter(Boolean)
                     : [];
+
+                if (config.targetGuild && !officialGuildNames.length) {
+                    scheduleAutoBattleDetailRetry(latestMatchId, 'Official Battle Detail ไม่มีรายชื่อ Guild; อาจเป็นข้อมูลยังไม่ครบ');
+                    console.warn('⚠️ [Auto-Battle] Match ID=' + latestMatchId + ' ไม่มีข้อมูล Guild จาก Official API; ยังไม่ mark handled และจะลองใหม่ตาม backoff');
+                    continue;
+                }
 
                 if (config.targetGuild && !isExactGuildMatch(config.targetGuild, officialGuildNames)) {
                     console.log(
@@ -2839,15 +2891,6 @@ async function checkAutoBattlesForGuild() {
                     continue;
                 }
 
-                const trackedConfig = getGuildConfig(config.guildId, false);
-                const trackedGuilds = Array.isArray(trackedConfig?.guilds)
-                    ? trackedConfig.guilds
-                        .map(g => typeof g === 'string' ? g : g?.name)
-                        .filter(Boolean)
-                    : [];
-                const trackedPlayers = Array.isArray(trackedConfig?.players)
-                    ? trackedConfig.players
-                    : [];
 
                 const result = await buildBattleReportPayload(
                     latestMatchId,
@@ -2856,11 +2899,12 @@ async function checkAutoBattlesForGuild() {
                         autoBattle: true,
                         guildId: config.guildId,
                         apiData: officialBattle,
-                        trackedPlayers,
-                        trackedGuilds
+                        trackedPlayers: autoTrackedPlayers,
+                        trackedGuilds: autoTrackedGuilds
                     }
                 );
                 const checkValue = config.minFrames;
+                const officialPlayerCountForLog = getApiPlayers(officialBattle).length;
                 // min_frames is the minimum total Fame from tracked players/
                 // tracked guild members. Kills and Deaths are report statistics.
                 if (result.totalFame >= checkValue) {
@@ -2888,20 +2932,19 @@ async function checkAutoBattlesForGuild() {
                         await channel.send({ content: alertText + '\n' + (result.payload.content || '') });
                     }
                     let delayText = '';
-                    try {
-                        const bt = officialBattle?.startTime || officialBattle?.timestamp || officialBattle?.start || apiData?.startTime || null;
-                        if (bt) {
-                            const battleMs = new Date(bt).getTime();
-                            if (!isNaN(battleMs)) {
-                                const diffSec = Math.max(0, Math.floor((Date.now() - battleMs)/1000));
-                                const mins = Math.floor(diffSec/60);
-                                const secs = diffSec%60;
-                                delayText = ` | ⏱️ ดีเลย์ ${mins}นาที ${secs}วิ (ไฟต์เกิด ${new Date(battleMs).toISOString()})`;
-                                if (mins >= 10) delayText += ' ⚠️ ช้า';
-                            }
-                        }
-                    } catch {}
-                    console.log('✅ ส่งรายงาน Auto-Battle สำเร็จ | Match ID=' + latestMatchId +
+                    if (Number.isFinite(battleTimeMs) && battleTimeMs > 0) {
+                        const sentAtMs = Date.now();
+                        const diffSec = Math.max(0, Math.floor((sentAtMs - battleTimeMs) / 1000));
+                        const mins = Math.floor(diffSec / 60);
+                        const secs = diffSec % 60;
+                        delayText = ' | ⏱️ ดีเลย์รวมตั้งแต่เริ่มไฟต์จนส่งรายงาน=' + mins + 'นาที ' + secs + 'วิ' +
+                            ' (เวลาเริ่มไฟต์=' + new Date(battleTimeMs).toISOString() + ')';
+                        if (mins >= 10) delayText += ' ⚠️ ช้า';
+                    } else {
+                        delayText = ' | ⏱️ ดีเลย์รวมตั้งแต่เริ่มไฟต์จนส่งรายงาน=ไม่ทราบ (Official API ไม่มีเวลาเริ่มไฟต์)';
+                    }
+
+                                        console.log('✅ ส่งรายงาน Auto-Battle สำเร็จ | Match ID=' + latestMatchId +
                         ' | ห้อง=' + config.channelId + '.' + delayText +
                         ' | แหล่งที่พบก่อน=' + detectionSource +
                         ' | เวลาจากพบ Match ID จนส่งรายงาน=' + Math.max(0, Date.now() - battleListFirstSeenAt) + 'ms' +
@@ -2915,13 +2958,18 @@ async function checkAutoBattlesForGuild() {
                         ' | ผลลัพธ์=เฟมต่ำกว่าเกณฑ์' +
                         ' | Fame=' + formatFame(result.totalFame) +
                         ' | เกณฑ์=' + formatFame(checkValue) +
+                        ' | ผู้เล่นใน Official Detail=' + officialPlayerCountForLog +
+                        ' | ผู้เล่นที่ติดตาม=' + autoTrackedPlayers.length +
+                        ' | กิลด์ที่ติดตาม=' + autoTrackedGuilds.length +
+                        ' | แถวตรงเงื่อนไข=' + (Array.isArray(result.playerReportData) ? result.playerReportData.length : 0) +
                         ' | อายุไฟต์ตอนตัดสินใจ=' + (ageAtDecisionSec === null ? 'unknown' : Math.floor(ageAtDecisionSec / 60) + 'm ' + (ageAtDecisionSec % 60) + 's') +
-                        ' | เวลาประมวลผลหลังพบครั้งแรก=' + Math.max(0, decisionAt - battleListFirstSeenAt) + 'ms; marking handled.');
+                        ' | เวลาประมวลผลหลังพบครั้งแรก=' + Math.max(0, decisionAt - battleListFirstSeenAt) + 'ms; marking handled after validated detail.');
                 }
                 processedBattles.add(String(latestMatchId));
                 pendingEventIds.delete(String(latestMatchId));
                 saveData();                } catch (e) {
-                    console.error(`❌ Auto-Battle Error on Match ID ${latestMatchId} for guild ${config.targetGuild}:`, e.message);
+                    scheduleAutoBattleDetailRetry(latestMatchId, 'ประมวลผลข้อมูล Battle ไม่สำเร็จ: ' + String(e?.message || e));
+                    console.error('❌ Auto-Battle Error on Match ID ' + latestMatchId + ' for guild ' + config.targetGuild + ':', e.message);
                 }
             }
 
