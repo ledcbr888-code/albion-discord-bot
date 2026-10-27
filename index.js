@@ -2407,18 +2407,20 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
     if (!targetGuildId && !targetGuild) return null;
     let lastError = null;
 
-    // --- Circuit Breaker ---
+    // --- Circuit Breaker: applies only to AlbionBB, not Official API ---
     const circuit = fetchGuildRecentBattles._circuit || (fetchGuildRecentBattles._circuit = { failures: 0, openUntil: 0 });
-    if (Date.now() < circuit.openUntil) {
-        console.log(`🔌 Circuit OPEN - ข้าม AlbionBB อีก ${Math.ceil((circuit.openUntil - Date.now())/1000)}s | ใช้ Official แทน`);
+    const now = Date.now();
+    if (circuit.openUntil > 0 && now >= circuit.openUntil) {
+        circuit.openUntil = 0;
+        circuit.failures = 0;
+        console.log('🔌 Circuit cooldown ended; AlbionBB is eligible only as a fallback if Official API fails.');
     }
-    const isCircuitOpen = Date.now() < circuit.openUntil;
-
-    // --- โหมดสลับอัตโนมัติตามเวลา ---
-    let hour = new Date().getUTCHours();
-    let isOffPeak = (hour >= 17 || hour < 4); // 00:00-11:00 ไทย
-    if (isCircuitOpen) isOffPeak = true; // ถ้าโดนเบรกเกอร์ตัด บังคับใช้ Official
-    console.log(`🔄 Auto-Battle mode: ${isOffPeak ? 'OFF-PEAK Officialหลัก' : 'PEAK/NORMAL AlbionBBหลัก'} | UTC ${hour}h | Fail ${circuit.failures}/3`);
+    const isCircuitOpen = now < circuit.openUntil;
+    const hour = new Date().getUTCHours();
+    if (isCircuitOpen) {
+        console.log(`🔌 Circuit OPEN - ข้าม AlbionBB อีก ${Math.ceil((circuit.openUntil - Date.now()) / 1000)}s | ใช้แหล่งอื่นแทน`);
+    }
+    console.log(`🔄 Auto-Battle source: Official API PRIMARY | AlbionBB ${isCircuitOpen ? 'PAUSED (Circuit OPEN)' : 'fallback only if Official request fails'} | UTC ${hour}h | 403 streak ${circuit.failures}/3`);
 
     const officialCache = fetchGuildRecentBattles._officialCache || (fetchGuildRecentBattles._officialCache = new Map());
     const verify = async (ids, trustedGuildScope = false) => {
@@ -2445,62 +2447,97 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
         const apiUrl = 'https://gameinfo-sgp.albiononline.com/api/gameinfo/battles';
         try {
             const response = await axios.get(apiUrl, { timeout: 20000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' }, params: { range: 'week', offset: 0, limit: 50, sort: 'recent', guildId: targetGuildId } });
-            const rows = Array.isArray(response.data) ? response.data : [];
+            if (!Array.isArray(response.data)) {
+                lastError = new Error('Unexpected Official API response format');
+                console.warn(`⚠️ Official API returned an unexpected response for ${targetGuild || targetGuildId}.`);
+                return null;
+            }
+            const rows = response.data;
             const unique = [...new Set(rows.map(r=>r?.id??r?.albionId??r?.battleId).filter(id=>/^\d+$/.test(String(id))).map(String))];
-            if (unique.length) { console.log(`✅ [Official] ${unique.length} IDs`); return unique; }
-        } catch(e){ lastError=e; console.warn(`⚠️ Official failed: ${e.response?.status||e.message}`); }
-        return [];
+            console.log(`✅ [Official] ${unique.length} IDs | Guild ${targetGuild || targetGuildId} (${targetGuildId})`);
+            return unique;
+        } catch(e) {
+            lastError = e;
+            const status = e?.response?.status || e?.statusCode;
+            const detail = status ? `HTTP ${status}` : String(e?.code || e?.message || 'request failed').replace(/https?:\/\/\S+/gi, '[URL]').slice(0, 140);
+            console.warn(`⚠️ Official failed for ${targetGuild || targetGuildId}: ${detail}`);
+            return null;
+        }
     };
     const fetchBB = async () => {
-        if (isCircuitOpen) return []; // ถ้าโดนตัดไฟ ข้ามเลย
-        const url=`https://east.albionbb.com/guilds/${encodeURIComponent(targetGuildId)}/battles`;
+        if (Date.now() < circuit.openUntil) return []; // Never access AlbionBB while its circuit is open.
+        const url = `https://east.albionbb.com/guilds/${encodeURIComponent(targetGuildId)}/battles`;
         try {
-            const html = String(await cloudscraper.get({uri:url, timeout:20000})||'');
+            const html = String(await cloudscraper.get({ uri: url, timeout: 20000 }) || '');
+            if (/(<title>\s*just a moment|challenges\.cloudflare\.com|enable javascript and cookies|cf-chl-)/i.test(html)) {
+                const challengeError = new Error('Cloudflare Challenge page returned');
+                challengeError.statusCode = 403;
+                challengeError.cloudflareChallenge = true;
+                throw challengeError;
+            }
             const unique = extractBattleIdsFromHtml(html);
             const good = await verify(unique, Boolean(targetGuildId));
             console.log(baselineOnly && targetGuildId
-                ? `✅ [AlbionBB] baseline IDs collected ${good.length}/${unique.length}`
-                : `✅ [AlbionBB] verified ${good.length}/${unique.length}`);
-            // สำเร็จ รีเซ็ต
+                ? `✅ [AlbionBB] baseline IDs collected ${good.length}/${unique.length} | Guild ${targetGuild || targetGuildId}`
+                : `✅ [AlbionBB] verified ${good.length}/${unique.length} | Guild ${targetGuild || targetGuildId}`);
+            // A successful non-Challenge response breaks the consecutive-403 streak.
             circuit.failures = 0;
             if (good.length) return good;
             return [];
-        } catch(e){ 
-            lastError=e; 
-            // ถ้า 403 นับเป็น fail
-            if (String(e.message).includes('403') || e.response?.status===403 || String(e).includes('403')) {
+        } catch(e) {
+            lastError = e;
+            const errorText = String(e?.message || e || 'request failed');
+            const statusMatch = errorText.match(/\b(401|403|429|503)\b/);
+            const status = Number(e?.statusCode || e?.response?.status || statusMatch?.[1] || 0);
+            const is403 = status === 403 || /\b403\b/i.test(errorText);
+            const isChallenge = Boolean(e?.cloudflareChallenge) || /just a moment|challenges\.cloudflare\.com|enable javascript and cookies|cf-chl-/i.test(errorText);
+            if (is403) {
                 circuit.failures++;
-                console.warn(`⚠️ AlbionBB 403 ครั้งที่ ${circuit.failures}/3`);
+                console.warn(`⚠️ AlbionBB 403 streak ${circuit.failures}/3 | Guild ${targetGuild || targetGuildId}${isChallenge ? ' | Cloudflare Challenge' : ''}`);
                 if (circuit.failures >= 3) {
-                    circuit.openUntil = Date.now() + 30*60*1000; // พัก 30 นาที
-                    console.error(`🔌 Circuit OPEN 30 นาที! โดน 403 ติดกัน 3 ครั้ง`);
+                    circuit.openUntil = Date.now() + 30 * 60 * 1000;
+                    console.error('🔌 AlbionBB Circuit OPEN for 30 minutes after 3 consecutive HTTP 403 responses.');
                 }
+            } else {
+                // Only consecutive 403 responses count toward opening this circuit.
+                circuit.failures = 0;
             }
-            console.warn(`⚠️ AlbionBB failed: ${e.message}`); 
+            const safeError = isChallenge
+                ? `HTTP ${status || 403} (Cloudflare Challenge; response body suppressed)`
+                : status
+                    ? `HTTP ${status}`
+                    : String(e?.code || errorText).replace(/https?:\/\/\S+/gi, '[URL]').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').slice(0, 160);
+            console.warn(`⚠️ AlbionBB failed for ${targetGuild || targetGuildId}: ${safeError}`);
         }
         return [];
     };
 
     if (targetGuildId) {
-        // Startup/config baselines should use the one-request, Guild-ID-filtered
-        // Official API first to avoid dozens of per-battle verification calls.
-        if (baselineOnly || isOffPeak) {
-            const a = await fetchOfficial(); if (a.length) return a;
-            const b = await fetchBB(); if (b.length) return b;
+        // Official API is primary. A valid empty response is not a reason to probe AlbionBB;
+        // use AlbionBB only when the Official request itself fails.
+        const officialIds = await fetchOfficial();
+        if (Array.isArray(officialIds)) {
+            if (officialIds.length) return officialIds;
+            console.log(`ℹ️ Official API returned 0 IDs for ${targetGuild || targetGuildId}; skipping AlbionBB to avoid an unnecessary Challenge request.`);
+            if (!targetGuild) return [];
         } else {
-            const b = await fetchBB(); if (b.length) return b;
-            const a = await fetchOfficial(); if (a.length) return a;
+            const fallbackIds = await fetchBB();
+            if (fallbackIds.length) return fallbackIds;
         }
     }
-    if (!targetGuild) return null;
+    if (!targetGuild) return [];
     const urls=[ 'https://albionbattles.com/east?search='+encodeURIComponent(targetGuild)+'&minPlayers=1', 'https://albionbattles.com/east?q='+encodeURIComponent(targetGuild)+'&minPlayers=1', 'https://albionbattles.com/east' ];
     for (const url of urls) try {
-        if (isCircuitOpen) break; // ถ้าโดนตัดไฟ ไม่ต้องค้นชื่อด้วย
+        // This is a separate fallback provider; the AlbionBB circuit does not apply here.
         const html = String(await cloudscraper.get({uri:url, timeout:20000})||'');
         const unique = extractBattleIdsFromHtml(html), good=await verify(unique);
         if(good.length){ console.log(`✅ AlbionBattles ${good.length}/${unique.length} for ${targetGuild}.`); circuit.failures=0; return good; }
     } catch(e){ lastError=e; }
-    console.warn(`❌ No battles for ${targetGuild}: ${lastError?.message||'none'}`);
+    const finalErrorText = String(lastError?.message || lastError || 'none');
+    const finalErrorSummary = /just a moment|challenges\.cloudflare\.com|enable javascript and cookies|cf-chl-/i.test(finalErrorText)
+        ? 'Cloudflare Challenge details suppressed'
+        : finalErrorText.replace(/https?:\/\/\S+/gi, '[URL]').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').slice(0, 160);
+    console.warn(`❌ No battles for ${targetGuild}: ${finalErrorSummary}`);
     return [];
 }
 
