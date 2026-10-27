@@ -644,10 +644,12 @@ async function fetchAlbionBBWeaponMap(matchId) {
     return new Map();
 }
 
-async function fetchOfficialBattleWeaponMap(matchId) {
-    const baseUrls = getApiUrls(matchId).map(url => url.replace(/\/battles\//i, '/events/battle/'));
+async function fetchOfficialBattleWeaponMap(matchId, options = {}) {
+    const autoBattle = options?.autoBattle === true;
+    const allBaseUrls = getApiUrls(matchId).map(url => url.replace(/\/battles\//i, '/events/battle/'));
+    const baseUrls = autoBattle ? allBaseUrls.reverse().slice(0, 1) : allBaseUrls;
     const map = new Map();
-    const maxPages = 12;
+    const maxPages = autoBattle ? 2 : 12;
 
     for (const baseUrl of baseUrls) {
         try {
@@ -655,7 +657,7 @@ async function fetchOfficialBattleWeaponMap(matchId) {
                 const offset = page * 51;
                 const url = `${baseUrl}?limit=51&offset=${offset}`;
                 const response = await axios.get(url, {
-                    timeout: 20000,
+                    timeout: autoBattle ? 3500 : 20000,
                     headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' }
                 });
 
@@ -866,19 +868,21 @@ async function fetchAlbionBBPageFallback(matchId) {
     return null;
 }
 
-async function fetchOfficialBattleUncached(matchId) {
+async function fetchOfficialBattleUncached(matchId, options = {}) {
+    const autoBattle = options?.autoBattle === true;
     // A 429 is generally shared across regional endpoints. Pause official requests
     // globally rather than retrying every region for every candidate battle.
     const urls = getApiUrls(matchId).reverse();
     let sawRateLimit = false;
     if (officialApiRateLimitedUntil > Date.now()) {
-        console.log(`⏭️ Official battle API cooldown active for ${Math.ceil((officialApiRateLimitedUntil - Date.now()) / 1000)}s; trying public fallbacks for ${matchId}.`);
+        console.log('⏭️ Official battle API cooldown active for ' + Math.ceil((officialApiRateLimitedUntil - Date.now()) / 1000) + 's' + (autoBattle ? '; Auto-Battle จะลองใหม่ในรอบถัดไปสำหรับ ' : '; trying public fallbacks for ') + matchId + '.');
     } else {
-        for (let attempt = 1; attempt <= 2; attempt++) {
-            for (const url of urls) {
+        for (let attempt = 1; attempt <= (autoBattle ? 1 : 2); attempt++) {
+            const requestUrls = autoBattle ? urls.slice(0, 1) : urls;
+            for (const url of requestUrls) {
                 try {
                     const response = await axios.get(url, {
-                        timeout: 20000,
+                        timeout: autoBattle ? 10000 : 20000,
                         headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' }
                     });
                     if (response.data && typeof response.data === 'object' &&
@@ -890,7 +894,7 @@ async function fetchOfficialBattleUncached(matchId) {
                         sawRateLimit = true;
                         const waitMs = Math.max(retryAfterMs(err), 60000);
                         officialApiRateLimitedUntil = Math.max(officialApiRateLimitedUntil, Date.now() + waitMs);
-                        console.warn(`⏳ Official battle API rate-limited ${matchId} (${url.includes('gameinfo-sgp') ? 'Asia' : 'global'}); pausing official requests for ${Math.ceil(waitMs / 1000)}s and switching to fallbacks.`);
+                        console.warn('⏳ Official battle API rate-limited ' + matchId + ' (' + (url.includes('gameinfo-sgp') ? 'Asia' : 'global') + '); pausing official requests for ' + Math.ceil(waitMs / 1000) + 's' + (autoBattle ? '; Auto-Battle จะลองใหม่ในรอบถัดไป.' : ' and switching to fallbacks.'));
                         break;
                     } else {
                         console.warn(`⚠️ Official battle API attempt ${attempt}/2 failed for ${matchId} (${url.includes('gameinfo-sgp') ? 'Asia' : 'global'}): ${status || err.message}`);
@@ -898,8 +902,13 @@ async function fetchOfficialBattleUncached(matchId) {
                 }
             }
             if (sawRateLimit) break;
-            if (attempt < 2) await sleep(1800);
+            if (!autoBattle && attempt < 2) await sleep(1800);
         }
+    }
+
+    if (autoBattle) {
+        console.warn('⚠️ [Auto-Battle] Official GameInfo ยังไม่มีรายละเอียด Match ID=' + matchId + ' หรือ API ตอบไม่สำเร็จ; จะลองใหม่รอบถัดไป โดยไม่เรียก AlbionBB fallback.');
+        return null;
     }
 
     // AlbionBB's public HTML page can expose the same structured battle payload
@@ -916,27 +925,28 @@ async function fetchOfficialBattleUncached(matchId) {
     return null;
 }
 
-async function fetchOfficialBattle(matchId) {
+async function fetchOfficialBattle(matchId, options = {}) {
     const key = String(matchId);
-    if (battleFetchInFlight.has(key)) return battleFetchInFlight.get(key);
-    const blockedUntil = battleFetchFailureUntil.get(key) || 0;
+    const cacheKey = (options?.autoBattle === true ? 'autoBattle:' : 'shared:') + key;
+    if (battleFetchInFlight.has(cacheKey)) return battleFetchInFlight.get(cacheKey);
+    const blockedUntil = battleFetchFailureUntil.get(cacheKey) || 0;
     if (blockedUntil > Date.now()) {
-        console.log(`⏭️ Reusing recent failed lookup for Match ID ${key}; will retry after cooldown.`);
+        console.log('⏭️ Reusing recent failed lookup for Match ID ' + key + '; will retry after cooldown.');
         return null;
     }
-    const task = fetchOfficialBattleUncached(key)
+    const task = fetchOfficialBattleUncached(key, options)
         .then(data => {
-            if (data) battleFetchFailureUntil.delete(key);
-            else battleFetchFailureUntil.set(key, Date.now() + 45000);
+            if (data) battleFetchFailureUntil.delete(cacheKey);
+            else battleFetchFailureUntil.set(cacheKey, Date.now() + 45000);
             return data;
         })
         .catch(err => {
-            battleFetchFailureUntil.set(key, Date.now() + 45000);
-            console.warn(`❌ Battle lookup crashed for ${key}: ${err.message}`);
+            battleFetchFailureUntil.set(cacheKey, Date.now() + 45000);
+            console.warn('❌ Battle lookup crashed for ' + key + ': ' + err.message);
             return null;
         })
-        .finally(() => battleFetchInFlight.delete(key));
-    battleFetchInFlight.set(key, task);
+        .finally(() => battleFetchInFlight.delete(cacheKey));
+    battleFetchInFlight.set(cacheKey, task);
     return task;
 }
 
@@ -1800,7 +1810,7 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
     let rawPlayers = getApiPlayers(apiData);
 
     try {
-        const officialWeaponMap = await fetchOfficialBattleWeaponMap(matchId);
+        const officialWeaponMap = await fetchOfficialBattleWeaponMap(matchId, { autoBattle: options.autoBattle === true });
         rawPlayers = rawPlayers.map(p => {
             if (p.weapon) return p;
             const info = officialWeaponMap.get(p.name.trim().toLowerCase());
@@ -1809,13 +1819,15 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
 
         // Only call the third-party AlbionBB endpoint when the official API
         // did not provide weapon icons for every player.
-        if (rawPlayers.some(p => !p.weapon)) {
+        if (rawPlayers.some(p => !p.weapon) && options.autoBattle !== true) {
             const albionBBWeaponMap = await fetchAlbionBBWeaponMap(matchId);
             rawPlayers = rawPlayers.map(p => {
                 if (p.weapon) return p;
                 const info = albionBBWeaponMap.get(p.name.trim().toLowerCase());
                 return info ? { ...p, weapon: info.id, weaponQuality: info.quality } : p;
             });
+        } else if (rawPlayers.some(p => !p.weapon) && options.autoBattle === true) {
+            console.log('ℹ️ [Auto-Battle] ไม่เรียก AlbionBB เพื่อเติมข้อมูลอาวุธ; ใช้ข้อมูล Official ที่มีและเดินหน้าสร้างรายงาน');
         }
     } catch (err) {
         console.error('⚠️ Weapon enrichment error:', err.message);
@@ -2398,174 +2410,41 @@ function extractBattleIdsFromHtml(html) {
 }
 
 async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
-    const baselineOnly = options?.baselineOnly === true;
     const config = guildOrConfig && typeof guildOrConfig === 'object' ? guildOrConfig : {};
     const rawTarget = typeof guildOrConfig === 'string' ? guildOrConfig : (config.targetGuild || '');
     const parsed = parseGuildReference(config.targetGuildId || rawTarget);
     const targetGuildId = String(config.targetGuildId || parsed.id || '').trim();
     const targetGuild = String(config.targetGuild || parsed.name || '').trim();
-    if (!targetGuildId && !targetGuild) return null;
-    let lastError = null;
-
-    // --- Circuit Breaker: applies only to AlbionBB, not Official API ---
-    const circuit = fetchGuildRecentBattles._circuit || (fetchGuildRecentBattles._circuit = { failures: 0, openUntil: 0 });
-    const now = Date.now();
-    if (circuit.openUntil > 0 && now >= circuit.openUntil) {
-        circuit.openUntil = 0;
-        circuit.failures = 0;
-        console.log('🔌 Circuit cooldown ended; AlbionBB is eligible only as a fallback if Official API fails.');
+    if (!targetGuildId) {
+        console.warn('⚠️ [Official Battle API] ไม่มี Guild ID สำหรับค้นหาไฟต์ | กิลด์=' + (targetGuild || 'ไม่ทราบ'));
+        return null;
     }
-    const isCircuitOpen = now < circuit.openUntil;
-    const hour = new Date().getUTCHours();
-    if (isCircuitOpen) {
-        console.log(`🔌 Circuit OPEN - ข้าม AlbionBB อีก ${Math.ceil((circuit.openUntil - Date.now()) / 1000)}s | ใช้แหล่งอื่นแทน`);
-    }
-    console.log('🔄 แหล่งข้อมูล Auto-Battle: AlbionBB API เป็นหลัก | Official API ' + (isCircuitOpen ? 'ใช้แทน (พัก AlbionBB อยู่)' : 'ใช้สำรองเมื่อ AlbionBB API ล้มเหลว') + ' | เวลา UTC ' + hour + ' น. | 403 ติดต่อกัน ' + circuit.failures + '/3');
 
-    const officialCache = fetchGuildRecentBattles._officialCache || (fetchGuildRecentBattles._officialCache = new Map());
-    const verify = async (ids, trustedGuildScope = false) => {
-        const uniqueIds = [...new Set(ids.map(String))];
-        // For one-time startup/config baselining, a guild-ID-filtered source is enough:
-        // avoid fetching every battle individually just to suppress historical alerts.
-        if (baselineOnly && trustedGuildScope) return uniqueIds;
-        const matched=[];
-        for (const id of uniqueIds) {
-            if (officialApiRateLimitedUntil > Date.now()) break;
-            let cached=officialCache.get(String(id));
-            if (!cached || cached.expiresAt <= Date.now()) {
-                cached={data:await fetchOfficialBattle(id).catch(()=>null), expiresAt:Date.now()+180000};
-                officialCache.set(String(id),cached);
-                if (officialCache.size>250) officialCache.delete(officialCache.keys().next().value);
-            }
-            const names=cached.data?.guilds ? Object.values(cached.data.guilds).map(g=>g?.name).filter(Boolean) : [];
-            if (!targetGuild || isExactGuildMatch(targetGuild,names)) matched.push(String(id));
-        }
-        return matched;
-    };
-
-    const fetchOfficial = async () => {
-        const apiUrl = 'https://gameinfo-sgp.albiononline.com/api/gameinfo/battles';
-        try {
-            const response = await axios.get(apiUrl, { timeout: 20000, headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' }, params: { range: 'week', offset: 0, limit: 50, sort: 'recent', guildId: targetGuildId } });
-            if (!Array.isArray(response.data)) {
-                lastError = new Error('Unexpected Official API response format');
-                console.warn(`⚠️ Official API returned an unexpected response for ${targetGuild || targetGuildId}.`);
-                return null;
-            }
-            const rows = response.data;
-            const unique = [...new Set(rows.map(r=>r?.id??r?.albionId??r?.battleId).filter(id=>/^\d+$/.test(String(id))).map(String))];
-            console.log(`✅ [Official API] พบ ${unique.length} Match ID | กิลด์ ${targetGuild || targetGuildId} (${targetGuildId})`);
-            return unique;
-        } catch(e) {
-            lastError = e;
-            const status = e?.response?.status || e?.statusCode;
-            const detail = status ? `HTTP ${status}` : String(e?.code || e?.message || 'request failed').replace(/https?:\/\/\S+/gi, '[URL]').slice(0, 140);
-            console.warn(`⚠️ Official failed for ${targetGuild || targetGuildId}: ${detail}`);
+    const apiUrl = 'https://gameinfo-sgp.albiononline.com/api/gameinfo/battles';
+    const startedAt = Date.now();
+    try {
+        const response = await axios.get(apiUrl, {
+            timeout: 10000,
+            headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
+            params: { range: 'week', offset: 0, limit: 50, sort: 'recent', guildId: targetGuildId }
+        });
+        if (!Array.isArray(response.data)) {
+            console.warn('⚠️ [Official Battle API] รูปแบบข้อมูลไม่ถูกต้อง | กิลด์=' + targetGuild + ' | เวลาตอบ=' + (Date.now() - startedAt) + 'ms');
             return null;
         }
-    };
-    const fetchBB = async () => {
-        // Direct JSON API; do not request the Cloudflare-protected guild HTML page.
-        if (Date.now() < circuit.openUntil) return null;
-        if (!targetGuild) return null;
-        const apiUrl = 'https://api.albionbb.com/asia/battles';
-        try {
-            const response = await axios.get(apiUrl, {
-                timeout: 15000,
-                headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
-                params: { search: targetGuild, minPlayers: 1, page: 0 }
-            });
-            const rows = Array.isArray(response.data)
-                ? response.data
-                : (Array.isArray(response.data?.battles) ? response.data.battles : null);
-            if (!rows) {
-                lastError = new Error('Unexpected AlbionBB API response format');
-                console.warn('⚠️ AlbionBB API returned an unexpected response format.');
-                return null;
-            }
-
-            // The API search may be partial; require an exact guild-name match before accepting IDs.
-            const matchingRows = rows.filter(row => {
-                const guildRows = Array.isArray(row?.guilds)
-                    ? row.guilds
-                    : (row?.guilds && typeof row.guilds === 'object' ? Object.values(row.guilds) : []);
-                const names = guildRows
-                    .map(g => typeof g === 'string' ? g : (g?.name || g?.guildName || g?.guild))
-                    .filter(Boolean);
-                return isExactGuildMatch(targetGuild, names);
-            });
-            const unique = [...new Set(
-                matchingRows
-                    .map(row => row?.albionId ?? row?.id ?? row?.battleId)
-                    .filter(id => /^\d+$/.test(String(id)))
-                    .map(String)
-            )];
-            console.log('✅ [AlbionBB API] ' + unique.length + ' exact-match IDs (' + rows.length + ' rows searched) | Guild ' + targetGuild);
-            // A successful JSON response resets the consecutive-403 streak.
-            circuit.failures = 0;
-            return unique;
-        } catch(e) {
-            lastError = e;
-            const errorText = String(e?.message || e || 'request failed');
-            const statusMatch = errorText.match(/\b(401|403|429|503)\b/);
-            const status = Number(e?.statusCode || e?.response?.status || statusMatch?.[1] || 0);
-            const is403 = status === 403 || /\b403\b/i.test(errorText);
-            const isChallenge = Boolean(e?.cloudflareChallenge) || /just a moment|challenges\.cloudflare\.com|enable javascript and cookies|cf-chl-/i.test(errorText);
-            if (is403) {
-                circuit.failures++;
-                console.warn('⚠️ AlbionBB API 403 streak ' + circuit.failures + '/3 | Guild ' + targetGuild + (isChallenge ? ' | Cloudflare Challenge' : ''));
-                if (circuit.failures >= 3) {
-                    circuit.openUntil = Date.now() + 30 * 60 * 1000;
-                    console.error('🔌 AlbionBB API Circuit OPEN for 30 minutes after 3 consecutive HTTP 403 responses.');
-                }
-            } else {
-                // Only consecutive 403 responses count toward opening this circuit.
-                circuit.failures = 0;
-            }
-            const safeError = isChallenge
-                ? 'HTTP ' + (status || 403) + ' (Cloudflare Challenge; response body suppressed)'
-                : status
-                    ? 'HTTP ' + status
-                    : String(e?.code || errorText).replace(/https?:\/\/\S+/gi, '[URL]').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').slice(0, 160);
-            console.warn('⚠️ AlbionBB API เรียกไม่สำเร็จ | กิลด์=' + targetGuild + ' | สาเหตุ=' + safeError);
-            return null;
-        }
-    };
-
-    if (targetGuild) {
-        // AlbionBB's direct API is the primary recent-battle source.
-        const albionBBIds = await fetchBB();
-        if (Array.isArray(albionBBIds)) {
-            if (albionBBIds.length) return albionBBIds;
-            console.log('ℹ️ AlbionBB API returned 0 matching IDs for ' + targetGuild + '.');
-            return [];
-        }
+        const unique = [...new Set(response.data
+            .map(row => row?.id ?? row?.albionId ?? row?.battleId)
+            .filter(id => /^\d+$/.test(String(id)))
+            .map(String))];
+        console.log('✅ [Official Battle API] พบ ' + unique.length + ' Match ID | กิลด์ ' + (targetGuild || targetGuildId) + ' (' + targetGuildId + ') | เวลาตอบ=' + (Date.now() - startedAt) + 'ms');
+        return unique;
+    } catch (error) {
+        const status = error?.response?.status || error?.statusCode;
+        const detail = status ? 'HTTP ' + status : String(error?.code || error?.message || 'request failed').replace(/https?:\/\/\S+/gi, '[URL]').slice(0, 140);
+        console.warn('⚠️ [Official Battle API] ค้นหา Match ID ไม่สำเร็จ | กิลด์=' + targetGuild + ' | สาเหตุ=' + detail + ' | เวลาที่ใช้=' + (Date.now() - startedAt) + 'ms');
+        return null;
     }
-    if (targetGuildId) {
-        // Official API remains the fallback when the AlbionBB API request fails or is circuit-paused.
-        const officialIds = await fetchOfficial();
-        if (Array.isArray(officialIds)) {
-            if (officialIds.length) return officialIds;
-            console.log('ℹ️ Official API returned 0 IDs for ' + (targetGuild || targetGuildId) + '.');
-            if (!targetGuild) return [];
-        }
-    }
-    if (!targetGuild) return [];
-    const urls=[ 'https://albionbattles.com/east?search='+encodeURIComponent(targetGuild)+'&minPlayers=1', 'https://albionbattles.com/east?q='+encodeURIComponent(targetGuild)+'&minPlayers=1', 'https://albionbattles.com/east' ];
-    for (const url of urls) try {
-        // This is a separate fallback provider; the AlbionBB circuit does not apply here.
-        const html = String(await cloudscraper.get({uri:url, timeout:20000})||'');
-        const unique = extractBattleIdsFromHtml(html), good=await verify(unique);
-        if(good.length){ console.log(`✅ AlbionBattles ${good.length}/${unique.length} for ${targetGuild}.`); circuit.failures=0; return good; }
-    } catch(e){ lastError=e; }
-    const finalErrorText = String(lastError?.message || lastError || 'none');
-    const finalErrorSummary = /just a moment|challenges\.cloudflare\.com|enable javascript and cookies|cf-chl-/i.test(finalErrorText)
-        ? 'Cloudflare Challenge details suppressed'
-        : finalErrorText.replace(/https?:\/\/\S+/gi, '[URL]').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').slice(0, 160);
-    console.warn(`❌ No battles for ${targetGuild}: ${finalErrorSummary}`);
-    return [];
 }
-
 
 // Auto-Battle Kill Events probe (observe-only).
 // It never triggers Discord reports; disable with AUTO_BATTLE_EVENTS_PROBE=false.
@@ -2784,9 +2663,16 @@ async function checkAutoBattlesForGuild() {
     autoBattleCheckRunning = true;
     try {
         for (const config of autoBattleConfigs) {
-            const eventProbePromise = probeAutoBattleEvents(config);
-            const recentMatches = await fetchGuildRecentBattles(config);
-            const battleListObservedAt = Date.now();
+            const eventProbePromise = probeAutoBattleEvents(config)
+                .then(probe => ({ probe, observedAt: Date.now() }))
+                .catch(error => ({ probe: null, observedAt: Date.now(), error }));
+            const battleListPromise = fetchGuildRecentBattles(config)
+                .then(ids => ({ ids, observedAt: Date.now() }))
+                .catch(error => ({ ids: null, observedAt: Date.now(), error }));
+            const [eventResult, battleResult] = await Promise.all([eventProbePromise, battleListPromise]);
+            const eventProbe = eventResult?.probe || null;
+            const recentMatches = Array.isArray(battleResult?.ids) ? battleResult.ids : null;
+            const battleListObservedAt = Number(battleResult?.observedAt) || Date.now();
             const battleListSeenAtById = checkAutoBattlesForGuild._battleListSeenAtById || (checkAutoBattlesForGuild._battleListSeenAtById = new Map());
             if (Array.isArray(recentMatches)) {
                 for (const id of recentMatches) {
@@ -2795,11 +2681,35 @@ async function checkAutoBattlesForGuild() {
                 }
                 while (battleListSeenAtById.size > 2000) battleListSeenAtById.delete(battleListSeenAtById.keys().next().value);
             }
-            // Compare only post-baseline Event observations; initial historical lists are not evidence of source speed.
-            eventProbePromise.then(probe => {
-                if (!probe?.ok || probe.baseline) return;
+
+            const pendingByScope = checkAutoBattlesForGuild._pendingEventMatchIds || (checkAutoBattlesForGuild._pendingEventMatchIds = new Map());
+            const pendingScopeKey = String(config.guildId || '') + ':' + String(config.targetGuildId || config.targetGuild || '');
+            const pendingEventIds = pendingByScope.get(pendingScopeKey) || new Map();
+            pendingByScope.set(pendingScopeKey, pendingEventIds);
+            if (eventProbe?.ok && !eventProbe.baseline && Array.isArray(eventProbe.battleIds)) {
+                const observationsByBattleId = new Map();
+                for (const observation of (Array.isArray(eventProbe.eventObservations) ? eventProbe.eventObservations : [])) {
+                    const id = String(observation?.battleId || '');
+                    if (/^\d+$/.test(id) && !observationsByBattleId.has(id)) observationsByBattleId.set(id, observation);
+                }
+                for (const idValue of eventProbe.battleIds) {
+                    const id = String(idValue || '');
+                    if (!/^\d+$/.test(id) || processedBattles.has(id) || pendingEventIds.has(id)) continue;
+                    const observation = observationsByBattleId.get(id);
+                    pendingEventIds.set(id, {
+                        firstSeenAt: Number(observation?.eventFirstSeenAt || eventProbe.observedAt || eventResult?.observedAt) || Date.now(),
+                        source: 'Kill Events API',
+                        eventId: String(observation?.eventId || '')
+                    });
+                }
+            }
+            for (const id of pendingEventIds.keys()) if (processedBattles.has(String(id))) pendingEventIds.delete(String(id));
+            while (pendingEventIds.size > 500) pendingEventIds.delete(pendingEventIds.keys().next().value);
+
+            // Compare the sources by first-seen time after both concurrent responses are available.
+            if (eventProbe?.ok && !eventProbe.baseline) {
                 const battleSet = new Set((Array.isArray(recentMatches) ? recentMatches : []).map(String));
-                const eventObservations = Array.isArray(probe.eventObservations) ? probe.eventObservations : [];
+                const eventObservations = Array.isArray(eventProbe.eventObservations) ? eventProbe.eventObservations : [];
                 const compared = checkAutoBattlesForGuild._eventsComparedBattleIds || (checkAutoBattlesForGuild._eventsComparedBattleIds = new Set());
                 let comparable = 0;
                 for (const observation of eventObservations) {
@@ -2825,38 +2735,53 @@ async function checkAutoBattlesForGuild() {
                         ' | เวลาที่พบรายการ Battle=' + new Date(battleSeenAt).toISOString() +
                         ' | ผลเปรียบเทียบ=' + verdict + '.');
                 }
-                if (probe.newEvents?.length) {
-                    const newEventBattleIds = [...new Set(probe.newEvents.map(row => String(row?.BattleId ?? row?.battleId ?? row?.battle?.id ?? row?.Battle?.Id ?? '')).filter(id => /^\d+$/.test(id)))];
+                if (eventProbe.newEvents?.length) {
+                    const newEventBattleIds = [...new Set(eventProbe.newEvents.map(row => String(row?.BattleId ?? row?.battleId ?? row?.battle?.id ?? row?.Battle?.Id ?? '')).filter(id => /^\d+$/.test(id)))];
                     if (!newEventBattleIds.length) {
-                        console.log('🧪 [Source Timing Compare] กิลด์=' + String(config.targetGuild || config.targetGuildId) +
-                            ' | Event ใหม่ไม่มี Battle ID จึงยังเปรียบเทียบไฟต์เดียวกันโดยตรงไม่ได้ ให้ดูอายุ Event ตอนตรวจพบและดีเลย์ Auto-Battle แยกกัน');
+                        console.log('🧪 [Source Timing Compare] กิลด์=' + String(config.targetGuild || config.targetGuildId) + ' | Event ใหม่ไม่มี Battle ID จึงยังเปรียบเทียบไฟต์เดียวกันโดยตรงไม่ได้');
                     } else {
                         const notYetInBattleList = newEventBattleIds.filter(id => !battleSet.has(id));
                         if (notYetInBattleList.length) {
                             console.log('🧪 [Source Timing Compare] กิลด์=' + String(config.targetGuild || config.targetGuildId) +
-                                ' | พบ Event ที่มี Battle ID แต่ยังไม่อยู่ในรายการ Battle ปัจจุบัน=[' + notYetInBattleList.join(',') +
-                                '] | จะตรวจซ้ำในรอบถัดไป');
+                                ' | พบ Event ที่มี Battle ID แต่ยังไม่อยู่ในรายการ Battle ปัจจุบัน=[' + notYetInBattleList.join(',') + '] | เก็บไว้รอตรวจสอบ/ลองดึงรายละเอียดต่อ');
                         }
                     }
                 }
-                if (probe.newEvents?.length && eventObservations.length && comparable === 0) {
-                    console.log('🧪 [Source Timing Compare] กิลด์=' + String(config.targetGuild || config.targetGuildId) +
-                        ' | ยังจับคู่ Battle ID จาก Events ใหม่กับรายการ Battle ไม่ได้ | รอผลจากรอบถัดไปเพื่อเปรียบเทียบ');
+                if (eventProbe.newEvents?.length && eventObservations.length && comparable === 0) {
+                    console.log('🧪 [Source Timing Compare] กิลด์=' + String(config.targetGuild || config.targetGuildId) + ' | ยังจับคู่ Battle ID จาก Events ใหม่กับรายการ Battle ไม่ได้ | รอผลจากรอบถัดไปเพื่อเปรียบเทียบ');
                 }
-            }).catch(error => console.warn('⚠️ [Source Timing Compare] เปรียบเทียบเวลาไม่สำเร็จ: ' + String(error?.message || error)));
-            if (recentMatches === null || !recentMatches.length) continue;
+            }
 
-            const newMatchIds = recentMatches.filter(id => !processedBattles.has(String(id)));
+            if ((!Array.isArray(recentMatches) || !recentMatches.length) && !pendingEventIds.size) continue;
+            const candidateMeta = new Map();
+            const addCandidate = (idValue, source, firstSeenAt) => {
+                const id = String(idValue || '');
+                if (!/^\d+$/.test(id)) return;
+                const at = Number(firstSeenAt);
+                const safeAt = Number.isFinite(at) && at > 0 ? at : Date.now();
+                const old = candidateMeta.get(id);
+                if (!old || safeAt < old.firstSeenAt) candidateMeta.set(id, { firstSeenAt: safeAt, source });
+            };
+            for (const id of (Array.isArray(recentMatches) ? recentMatches : [])) {
+                addCandidate(id, 'Official GameInfo Battle API', battleListSeenAtById.get(String(id)) || battleListObservedAt);
+            }
+            for (const [id, metadata] of pendingEventIds.entries()) {
+                addCandidate(id, metadata?.source || 'Kill Events API', metadata?.firstSeenAt || Date.now());
+            }
+            const newMatchIds = [...candidateMeta.keys()]
+                .filter(id => !processedBattles.has(String(id)))
+                .sort((a, b) => candidateMeta.get(String(a)).firstSeenAt - candidateMeta.get(String(b)).firstSeenAt);
             if (!newMatchIds.length) continue;
 
-            // Process every unseen battle returned by the search page so a burst
-            // of fights between 5-minute polls is not silently skipped.
+            // Process distinct Match IDs from both sources; the shared set prevents a second report.
             for (const latestMatchId of newMatchIds.slice(0, 10)) {
+                const candidateMetaForId = candidateMeta.get(String(latestMatchId)) || { firstSeenAt: battleListObservedAt, source: 'Official GameInfo Battle API' };
+                const battleListFirstSeenAt = candidateMetaForId.firstSeenAt;
+                const detectionSource = candidateMetaForId.source;
                 const battleProcessingStartedAt = Date.now();
-                const battleListFirstSeenAt = battleListSeenAtById.get(String(latestMatchId)) || battleListObservedAt;
                 let battleDetailFetchMs = null;
                 try {
-                    const officialBattle = await fetchOfficialBattle(latestMatchId);
+                    const officialBattle = await fetchOfficialBattle(latestMatchId, { autoBattle: true });
                     battleDetailFetchMs = Date.now() - battleProcessingStartedAt;
                 if (!officialBattle) {
                     console.warn('⚠️ ยังดึงข้อมูล Battle ' + latestMatchId + ' ไม่สำเร็จ; จะลองใหม่รอบถัดไป (ไม่ได้ยืนยันว่า Match ID ไม่มีอยู่) | detailFetch=' + battleDetailFetchMs + 'ms | firstSeenAt=' + new Date(battleListFirstSeenAt).toISOString());
@@ -2892,6 +2817,7 @@ async function checkAutoBattlesForGuild() {
                 if (Number.isFinite(battleTimeMs) && battleTimeMs > 0 &&
                     Date.now() - battleTimeMs > maxAutoBattleAgeMs) {
                     processedBattles.add(String(latestMatchId));
+                    pendingEventIds.delete(String(latestMatchId));
                     saveData();
                     const ageHours = Math.floor((Date.now() - battleTimeMs) / (60 * 60 * 1000));
                     console.log(`⏭️ Skip stale Auto-Battle Match ID ${latestMatchId} for ${config.targetGuild}: battle is ${ageHours}h old (limit 24h); marked as handled.`);
@@ -2909,6 +2835,7 @@ async function checkAutoBattlesForGuild() {
                     );
                     // Do not globally mark an unrelated candidate as processed;
                     // this battle may later be discovered for another tracked guild.
+                    pendingEventIds.delete(String(latestMatchId));
                     continue;
                 }
 
@@ -2976,6 +2903,7 @@ async function checkAutoBattlesForGuild() {
                     } catch {}
                     console.log('✅ ส่งรายงาน Auto-Battle สำเร็จ | Match ID=' + latestMatchId +
                         ' | ห้อง=' + config.channelId + '.' + delayText +
+                        ' | แหล่งที่พบก่อน=' + detectionSource +
                         ' | เวลาจากพบ Match ID จนส่งรายงาน=' + Math.max(0, Date.now() - battleListFirstSeenAt) + 'ms' +
                         ' | detailFetch=' + (battleDetailFetchMs === null ? 'unknown' : battleDetailFetchMs + 'ms') + '.');
                 } else {
@@ -2991,6 +2919,7 @@ async function checkAutoBattlesForGuild() {
                         ' | เวลาประมวลผลหลังพบครั้งแรก=' + Math.max(0, decisionAt - battleListFirstSeenAt) + 'ms; marking handled.');
                 }
                 processedBattles.add(String(latestMatchId));
+                pendingEventIds.delete(String(latestMatchId));
                 saveData();                } catch (e) {
                     console.error(`❌ Auto-Battle Error on Match ID ${latestMatchId} for guild ${config.targetGuild}:`, e.message);
                 }
