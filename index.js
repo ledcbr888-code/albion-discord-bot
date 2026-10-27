@@ -2420,7 +2420,7 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
     if (isCircuitOpen) {
         console.log(`🔌 Circuit OPEN - ข้าม AlbionBB อีก ${Math.ceil((circuit.openUntil - Date.now()) / 1000)}s | ใช้แหล่งอื่นแทน`);
     }
-    console.log('🔄 Auto-Battle source: AlbionBB API PRIMARY | Official API ' + (isCircuitOpen ? 'fallback (AlbionBB Circuit OPEN)' : 'fallback if AlbionBB API fails') + ' | UTC ' + hour + 'h | 403 streak ' + circuit.failures + '/3');
+    console.log('🔄 แหล่งข้อมูล Auto-Battle: AlbionBB API เป็นหลัก | Official API ' + (isCircuitOpen ? 'ใช้แทน (พัก AlbionBB อยู่)' : 'ใช้สำรองเมื่อ AlbionBB API ล้มเหลว') + ' | เวลา UTC ' + hour + ' น. | 403 ติดต่อกัน ' + circuit.failures + '/3');
 
     const officialCache = fetchGuildRecentBattles._officialCache || (fetchGuildRecentBattles._officialCache = new Map());
     const verify = async (ids, trustedGuildScope = false) => {
@@ -2454,7 +2454,7 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
             }
             const rows = response.data;
             const unique = [...new Set(rows.map(r=>r?.id??r?.albionId??r?.battleId).filter(id=>/^\d+$/.test(String(id))).map(String))];
-            console.log(`✅ [Official] ${unique.length} IDs | Guild ${targetGuild || targetGuildId} (${targetGuildId})`);
+            console.log(`✅ [Official API] พบ ${unique.length} Match ID | กิลด์ ${targetGuild || targetGuildId} (${targetGuildId})`);
             return unique;
         } catch(e) {
             lastError = e;
@@ -2527,7 +2527,7 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
                 : status
                     ? 'HTTP ' + status
                     : String(e?.code || errorText).replace(/https?:\/\/\S+/gi, '[URL]').replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').slice(0, 160);
-            console.warn('⚠️ AlbionBB API failed for ' + targetGuild + ': ' + safeError);
+            console.warn('⚠️ AlbionBB API เรียกไม่สำเร็จ | กิลด์=' + targetGuild + ' | สาเหตุ=' + safeError);
             return null;
         }
     };
@@ -2594,7 +2594,7 @@ async function probeAutoBattleEvents(config) {
     state.lastRequestAt = requestStartedAt;
     if (!probeAutoBattleEvents._announced) {
         probeAutoBattleEvents._announced = true;
-        console.log('🧪 Auto-Battle Kill Events probe ENABLED in observe-only mode; it will not send Discord reports. Set AUTO_BATTLE_EVENTS_PROBE=false to disable.');
+        console.log('🧪 เปิดโหมดทดสอบ Kill Events ของ Auto-Battle แล้ว: ใช้สังเกตการณ์เท่านั้น ไม่ส่งรายงาน Discord จาก Events | ปิดได้ด้วย AUTO_BATTLE_EVENTS_PROBE=false');
     }
 
     state.inFlight = (async () => {
@@ -2612,7 +2612,7 @@ async function probeAutoBattleEvents(config) {
 
             if (!Array.isArray(response.data)) {
                 const result = { ok: false, baseline: !state.baselineComplete, newEvents: [], battleIds: [], eventObservations: [], requestMs, observedAt: responseReceivedAt };
-                console.warn('⚠️ [Events Probe] Unexpected response format for Guild ' + guildName + ' | request=' + requestMs + 'ms.');
+                console.warn('⚠️ [Events Probe] รูปแบบข้อมูลตอบกลับไม่ถูกต้อง | กิลด์=' + guildName + ' | เวลาตอบกลับ=' + requestMs + 'ms');
                 state.lastResult = result;
                 return result;
             }
@@ -2648,7 +2648,7 @@ async function probeAutoBattleEvents(config) {
             const battleIdCount = rows.filter(row => battleIdOf(row) !== '').length;
             const newestRow = eventRows[0] || rows[0] || null;
             const newestAge = newestRow ? eventAgeSeconds(newestRow) : null;
-            const newestAgeText = newestAge === null ? 'unknown' : newestAge + 's';
+            const newestAgeText = newestAge === null ? 'ไม่ทราบ' : newestAge + ' วินาที';
 
             // Keep first observed Events timestamps for later correlation with the Battle list.
             for (const row of eventRows) {
@@ -2673,9 +2673,9 @@ async function probeAutoBattleEvents(config) {
                 while (state.seenIds.size > 500) state.seenIds.delete(state.seenIds.values().next().value);
                 state.baselineComplete = true;
                 const result = { ok: true, baseline: true, newEvents: [], battleIds: [], eventObservations, eventCount: rows.length, requestMs, observedAt: responseReceivedAt };
-                console.log('🧪 [Events Probe] BASELINE Guild ' + guildName + ': rows=' + rows.length +
-                    ', EventIds=' + eventIds.length + ', eventsWithBattleId=' + battleIdCount + '/' + rows.length +
-                    ', newestEventAge=' + newestAgeText + ', request=' + requestMs + 'ms; observe-only.');
+                console.log('🧪 [Events Probe] ตั้งต้นข้อมูล | กิลด์=' + guildName + ' | จำนวนรายการ=' + rows.length +
+                    ' | จำนวน Event ID=' + eventIds.length + ' | เหตุการณ์ที่มี Battle ID=' + battleIdCount + '/' + rows.length +
+                    ' | อายุเหตุการณ์ล่าสุด=' + newestAgeText + ' | เวลาตอบ API=' + requestMs + 'ms | โหมดสังเกตการณ์เท่านั้น');
                 state.lastResult = result;
                 return result;
             }
@@ -2687,38 +2687,38 @@ async function probeAutoBattleEvents(config) {
             const battleIds = [...new Set(newEvents.map(battleIdOf).filter(Boolean))];
             const result = { ok: true, baseline: false, newEvents, battleIds, eventObservations, eventCount: rows.length, requestMs, observedAt: responseReceivedAt };
             if (newEvents.length) {
-                console.log('🧪 [Events Probe] NEW Guild ' + guildName + ': count=' + newEvents.length +
-                    ', rows=' + rows.length + ', eventsWithBattleId=' + battleIdCount + '/' + rows.length +
-                    ', request=' + requestMs + 'ms; observe-only.');
+                console.log('🧪 [Events Probe] พบเหตุการณ์ใหม่ | กิลด์=' + guildName + ' | จำนวนเหตุการณ์ใหม่=' + newEvents.length +
+                    ' | จำนวนรายการ=' + rows.length + ' | เหตุการณ์ที่มี Battle ID=' + battleIdCount + '/' + rows.length +
+                    ' | เวลาตอบ API=' + requestMs + 'ms | โหมดสังเกตการณ์เท่านั้น');
                 for (const row of newEvents.slice(0, 10)) {
                     const eventId = eventIdOf(row);
-                    const battleId = battleIdOf(row) || 'not-provided';
+                    const battleId = battleIdOf(row) || 'ไม่มีข้อมูล';
                     const eventAge = eventAgeSeconds(row);
                     const killer = row?.Killer ?? row?.killer ?? {};
                     const victim = row?.Victim ?? row?.victim ?? {};
-                    const eventAgeText = eventAge === null ? 'unknown' : eventAge + 's';
+                    const eventAgeText = eventAge === null ? 'ไม่ทราบ' : eventAge + ' วินาที';
                     const extraVictimGuild = guildOf(victim) ? ' [' + guildOf(victim) + ']' : '';
                     const extraKillerGuild = guildOf(killer) ? ' [' + guildOf(killer) + ']' : '';
-                    console.log('🧪 [Events Latency] Guild=' + guildName +
-                        ' EventId=' + eventId +
-                        ' eventAgeAtDiscovery=' + eventAgeText +
-                        ' eventTime=' + eventTimeIso(row) +
-                        ' apiRequest=' + requestMs + 'ms' +
-                        ' BattleId=' + battleId +
-                        ' Killer=' + (nameOf(killer) || 'unknown') + extraKillerGuild +
-                        ' Victim=' + (nameOf(victim) || 'unknown') + extraVictimGuild);
+                    console.log('🧪 [Events Latency] กิลด์=' + guildName +
+                        ' | Event ID=' + eventId +
+                        ' | อายุเหตุการณ์เมื่อตรวจพบ=' + eventAgeText +
+                        ' | เวลาเกิดเหตุ=' + eventTimeIso(row) +
+                        ' | เวลาตอบ API=' + requestMs + 'ms' +
+                        ' | Battle ID=' + battleId +
+                        ' | ผู้ฆ่า=' + (nameOf(killer) || 'ไม่ทราบ') + extraKillerGuild +
+                        ' | ผู้ถูกฆ่า=' + (nameOf(victim) || 'ไม่ทราบ') + extraVictimGuild);
                 }
                 if (newEvents.length > 10) {
-                    console.log('🧪 [Events Latency] Guild=' + guildName + ': ' + (newEvents.length - 10) + ' additional new event(s) omitted from per-event detail log to limit log volume.');
+                    console.log('🧪 [Events Latency] กิลด์=' + guildName + ': ซ่อนรายละเอียดเหตุการณ์ใหม่อีก ' + (newEvents.length - 10) + ' รายการ เพื่อลดปริมาณ Log');
                 }
                 const newestNewAge = newEvents.map(row => eventAgeSeconds(row)).filter(value => value !== null).sort((a,b) => a-b)[0];
-                console.log('🧪 [Events Probe] Guild ' + guildName + ': newestNewEventAge=' +
-                    (newestNewAge === undefined ? 'unknown' : newestNewAge + 's') +
-                    ' (age at discovery includes source delay + polling interval; it is not pure API latency).');
+                console.log('🧪 [Events Probe] กิลด์=' + guildName + ' | อายุเหตุการณ์ใหม่ที่น้อยที่สุดตอนตรวจพบ=' +
+                    (newestNewAge === undefined ? 'ไม่ทราบ' : newestNewAge + ' วินาที') +
+                    ' (รวมเวลาหน่วงจากต้นทางและรอบตรวจ ไม่ใช่เวลาตอบ API อย่างเดียว)');
             } else {
-                console.log('🧪 [Events Probe] Guild ' + guildName + ': sample=' + rows.length +
-                    ', new=0, eventsWithBattleId=' + battleIdCount + '/' + rows.length +
-                    ', newestEventAge=' + newestAgeText + ', request=' + requestMs + 'ms; observe-only.');
+                console.log('🧪 [Events Probe] กิลด์=' + guildName + ' | รายการตัวอย่าง=' + rows.length +
+                    ' | เหตุการณ์ใหม่=0 | เหตุการณ์ที่มี Battle ID=' + battleIdCount + '/' + rows.length +
+                    ' | อายุเหตุการณ์ล่าสุด=' + newestAgeText + ' | เวลาตอบ API=' + requestMs + 'ms | โหมดสังเกตการณ์เท่านั้น');
             }
             state.lastResult = result;
             return result;
@@ -2729,7 +2729,7 @@ async function probeAutoBattleEvents(config) {
                 ? 'HTTP ' + status
                 : String(error?.code || error?.message || 'request failed').replace(/https?:\/\/\S+/gi, '[URL]').slice(0, 120);
             const result = { ok: false, baseline: !state.baselineComplete, newEvents: [], battleIds: [], eventObservations: [], requestMs, observedAt: Date.now() };
-            console.warn('⚠️ [Events Probe] failed for Guild ' + guildName + ': ' + detail + ' | request=' + requestMs + 'ms (normal Auto-Battle path remains active).');
+            console.warn('⚠️ [Events Probe] เรียกข้อมูลไม่สำเร็จ | กิลด์=' + guildName + ' | สาเหตุ=' + detail + ' | เวลาที่ใช้=' + requestMs + 'ms (ระบบ Auto-Battle เดิมยังทำงานต่อ)');
             state.lastResult = result;
             return result;
         } finally {
@@ -2814,22 +2814,22 @@ async function checkAutoBattlesForGuild() {
                     const deltaMs = battleSeenAt - Number(observation.eventFirstSeenAt || 0);
                     const absMs = Math.abs(deltaMs);
                     let verdict;
-                    if (absMs < 2000) verdict = 'same polling window; no reliable speed winner';
-                    else if (deltaMs > 0) verdict = 'Events observed first by ' + Math.round(deltaMs / 1000) + 's';
-                    else verdict = 'Battle list observed first by ' + Math.round(absMs / 1000) + 's';
+                    if (absMs < 2000) verdict = 'พบในรอบตรวจใกล้เคียงกัน ยังสรุปไม่ได้ว่าแหล่งใดเร็วกว่า';
+                    else if (deltaMs > 0) verdict = 'Events พบก่อน ' + Math.round(deltaMs / 1000) + 's';
+                    else verdict = 'รายการ Battle พบก่อน ' + Math.round(absMs / 1000) + 's';
                     console.log('🧪 [Source Timing Compare] Guild=' + String(config.targetGuild || config.targetGuildId) +
-                        ' MatchID=' + battleId +
-                        ' EventId=' + String(observation.eventId || 'unknown') +
-                        ' eventAgeAtFirstSeen=' + (observation.eventAgeAtFirstSeenSec == null ? 'unknown' : observation.eventAgeAtFirstSeenSec + 's') +
-                        ' EventsFirstSeenAt=' + new Date(Number(observation.eventFirstSeenAt)).toISOString() +
-                        ' BattleListFirstSeenAt=' + new Date(battleSeenAt).toISOString() +
-                        ' result=' + verdict + '.');
+                        ' | Match ID=' + battleId +
+                        ' | Event ID=' + String(observation.eventId || 'ไม่ทราบ') +
+                        ' | อายุ Event เมื่อตรวจพบครั้งแรก=' + (observation.eventAgeAtFirstSeenSec == null ? 'unknown' : observation.eventAgeAtFirstSeenSec + 's') +
+                        ' | เวลาที่พบ Event=' + new Date(Number(observation.eventFirstSeenAt)).toISOString() +
+                        ' | เวลาที่พบรายการ Battle=' + new Date(battleSeenAt).toISOString() +
+                        ' | ผลเปรียบเทียบ=' + verdict + '.');
                 }
                 if (probe.newEvents?.length) {
                     const newEventBattleIds = [...new Set(probe.newEvents.map(row => String(row?.BattleId ?? row?.battleId ?? row?.battle?.id ?? row?.Battle?.Id ?? '')).filter(id => /^\d+$/.test(id)))];
                     if (!newEventBattleIds.length) {
                         console.log('🧪 [Source Timing Compare] Guild=' + String(config.targetGuild || config.targetGuildId) +
-                            ': new Events contain no BattleId; exact same-fight comparison is unavailable for these events. Use eventAgeAtDiscovery and Auto-Battle Latency logs as separate timing measures.');
+                            ': Event ใหม่ไม่มี Battle ID จึงยังเปรียบเทียบไฟต์เดียวกันโดยตรงไม่ได้ ให้ดูอายุ Event ตอนตรวจพบและดีเลย์ Auto-Battle แยกกัน');
                     } else {
                         const notYetInBattleList = newEventBattleIds.filter(id => !battleSet.has(id));
                         if (notYetInBattleList.length) {
@@ -2880,10 +2880,10 @@ async function checkAutoBattlesForGuild() {
                     : null;
                 console.log('⏱️ [Auto-Battle Latency] Guild=' + String(config.targetGuild || config.targetGuildId) +
                     ' MatchID=' + latestMatchId +
-                    ' firstSeenAt=' + new Date(battleListFirstSeenAt).toISOString() +
-                    ' battleStart=' + (Number.isFinite(battleTimeMs) && battleTimeMs > 0 ? new Date(battleTimeMs).toISOString() : 'unknown') +
-                    ' battleAgeAtFirstDetection=' + (battleAgeAtFirstDetectionSec === null ? 'unknown' : Math.floor(battleAgeAtFirstDetectionSec / 60) + 'm ' + (battleAgeAtFirstDetectionSec % 60) + 's') +
-                    ' detailFetch=' + (battleDetailFetchMs === null ? 'unknown' : battleDetailFetchMs + 'ms') + '.');
+                    ' | เวลาที่พบ Match ID=' + new Date(battleListFirstSeenAt).toISOString() +
+                    ' | เวลาเริ่มไฟต์=' + (Number.isFinite(battleTimeMs) && battleTimeMs > 0 ? new Date(battleTimeMs).toISOString() : 'unknown') +
+                    ' | อายุไฟต์ตอนตรวจพบ=' + (battleAgeAtFirstDetectionSec === null ? 'unknown' : Math.floor(battleAgeAtFirstDetectionSec / 60) + 'm ' + (battleAgeAtFirstDetectionSec % 60) + 's') +
+                    ' | เวลาดึงรายละเอียด Battle=' + (battleDetailFetchMs === null ? 'unknown' : battleDetailFetchMs + 'ms') + '.');
                 const maxAutoBattleAgeMs = 24 * 60 * 60 * 1000;
                 if (Number.isFinite(battleTimeMs) && battleTimeMs > 0 &&
                     Date.now() - battleTimeMs > maxAutoBattleAgeMs) {
@@ -2970,9 +2970,9 @@ async function checkAutoBattlesForGuild() {
                             }
                         }
                     } catch {}
-                    console.log('✅ Auto-Battle report send succeeded for Match ID ' + latestMatchId +
-                        ' in channel ' + config.channelId + '.' + delayText +
-                        ' | firstSeenToReport=' + Math.max(0, Date.now() - battleListFirstSeenAt) + 'ms' +
+                    console.log('✅ ส่งรายงาน Auto-Battle สำเร็จ | Match ID=' + latestMatchId +
+                        ' | ห้อง=' + config.channelId + '.' + delayText +
+                        ' | เวลาจากพบ Match ID จนส่งรายงาน=' + Math.max(0, Date.now() - battleListFirstSeenAt) + 'ms' +
                         ' | detailFetch=' + (battleDetailFetchMs === null ? 'unknown' : battleDetailFetchMs + 'ms') + '.');
                 } else {
                     const decisionAt = Date.now();
@@ -2980,11 +2980,11 @@ async function checkAutoBattlesForGuild() {
                         ? Math.max(0, Math.floor((decisionAt - battleTimeMs) / 1000))
                         : null;
                     console.log('ℹ️ [Auto-Battle Latency] MatchID=' + latestMatchId +
-                        ' outcome=BELOW_THRESHOLD' +
-                        ' fame=' + formatFame(result.totalFame) +
-                        ' threshold=' + formatFame(checkValue) +
-                        ' ageAtDecision=' + (ageAtDecisionSec === null ? 'unknown' : Math.floor(ageAtDecisionSec / 60) + 'm ' + (ageAtDecisionSec % 60) + 's') +
-                        ' processingSinceFirstSeen=' + Math.max(0, decisionAt - battleListFirstSeenAt) + 'ms; marking handled.');
+                        ' | ผลลัพธ์=เฟมต่ำกว่าเกณฑ์' +
+                        ' | Fame=' + formatFame(result.totalFame) +
+                        ' | เกณฑ์=' + formatFame(checkValue) +
+                        ' | อายุไฟต์ตอนตัดสินใจ=' + (ageAtDecisionSec === null ? 'unknown' : Math.floor(ageAtDecisionSec / 60) + 'm ' + (ageAtDecisionSec % 60) + 's') +
+                        ' | เวลาประมวลผลหลังพบครั้งแรก=' + Math.max(0, decisionAt - battleListFirstSeenAt) + 'ms; marking handled.');
                 }
                 processedBattles.add(String(latestMatchId));
                 saveData();                } catch (e) {
