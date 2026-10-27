@@ -879,7 +879,7 @@ async function fetchOfficialBattleUncached(matchId, options = {}) {
     } else {
         const maxAttempts = autoBattle ? 1 : 2;
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-            const requestUrls = urls;
+            const requestUrls = autoBattle ? urls.slice(0, 1) : urls;
             for (let endpointIndex = 0; endpointIndex < requestUrls.length; endpointIndex++) {
                 const url = requestUrls[endpointIndex];
                 try {
@@ -2782,7 +2782,7 @@ async function checkAutoBattlesForGuild() {
                         const notYetInBattleList = newEventBattleIds.filter(id => !battleSet.has(id));
                         if (notYetInBattleList.length) {
                             console.log('🧪 [Source Timing Compare] กิลด์=' + String(config.targetGuild || config.targetGuildId) +
-                                ' | พบ Event ที่มี Battle ID แต่ยังไม่อยู่ในรายการ Battle ปัจจุบัน=[' + notYetInBattleList.join(',') + '] | เก็บไว้รอตรวจสอบ/ลองดึงรายละเอียดต่อ');
+                                ' | พบ Event ที่มี Battle ID แต่ยังไม่อยู่ในรายการ Battle ปัจจุบัน=[' + notYetInBattleList.join(',') + '] | เก็บเวลาไว้เปรียบเทียบ; รอให้ Official Battle List ยืนยันก่อนดึงรายละเอียด');
                         }
                     }
                 }
@@ -2804,7 +2804,12 @@ async function checkAutoBattlesForGuild() {
             for (const id of (Array.isArray(recentMatches) ? recentMatches : [])) {
                 addCandidate(id, 'Official GameInfo Battle API', battleListSeenAtById.get(String(id)) || battleListObservedAt);
             }
+            const officialBattleIdSet = new Set((Array.isArray(recentMatches) ? recentMatches : []).map(String));
             for (const [id, metadata] of pendingEventIds.entries()) {
+                // Kill Events can expose a BattleId before (or without) a usable
+                // Official Battle Detail record. Keep its first-seen timestamp,
+                // but don't request details until the Asia Battle List confirms it.
+                if (!officialBattleIdSet.has(String(id))) continue;
                 addCandidate(id, metadata?.source || 'Kill Events API', metadata?.firstSeenAt || Date.now());
             }
             const detailRetryStates = checkAutoBattlesForGuild._detailRetryStates ||
@@ -2827,7 +2832,7 @@ async function checkAutoBattlesForGuild() {
                     const officialBattle = await fetchOfficialBattle(latestMatchId, { autoBattle: true });
                     battleDetailFetchMs = Date.now() - battleProcessingStartedAt;
                 if (!officialBattle) {
-                    scheduleAutoBattleDetailRetry(latestMatchId, 'Official GameInfo ยังไม่มีรายละเอียดหรือ API ตอบไม่สำเร็จ (ลอง Asia และ global แล้ว)');
+                    scheduleAutoBattleDetailRetry(latestMatchId, 'Official GameInfo Asia ยังไม่มีรายละเอียดหรือ API ตอบไม่สำเร็จ');
                     console.warn('⚠️ ยังดึงข้อมูล Battle ' + latestMatchId + ' ไม่สำเร็จ; ยังไม่ทำเครื่องหมายว่าเสร็จ | detailFetch=' + battleDetailFetchMs + 'ms | firstSeenAt=' + new Date(battleListFirstSeenAt).toISOString());
                     continue;
                 }
