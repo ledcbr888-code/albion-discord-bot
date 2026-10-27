@@ -2454,6 +2454,12 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
     const targetGuild = String(config.targetGuild || parsed.name || '').trim();
     if (!targetGuildId && !targetGuild) return null;
 
+    const scopeKey = String(targetGuildId || targetGuild).trim().toLowerCase();
+    const sourceByScope = fetchGuildRecentBattles._lastSourceByScope ||
+        (fetchGuildRecentBattles._lastSourceByScope = new Map());
+    const setSource = source => sourceByScope.set(scopeKey, source);
+    setSource('Official Battle Feed (AtlasChill-style)');
+
     // AtlasChill-style discovery: use the Official Asia battle feed directly,
     // not the AtlasChill HTML page. Share cache/in-flight work across trackers.
     const feedState = fetchGuildRecentBattles._globalFeedState ||
@@ -2557,6 +2563,7 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
     if (Array.isArray(globalRows)) {
         globalIds = validIds(globalRows.filter(matchesTrackedGuild).map(battleIdOf));
         if (globalIds.length) {
+            setSource('Official Battle Feed (AtlasChill-style)');
             console.log('✅ [AtlasChill-style Official Feed] พบ ' + globalIds.length +
                 ' Match ID ของ ' + (targetGuild || targetGuildId) +
                 ' จากรายการล่าสุด ' + globalRows.length + (baselineOnly ? ' | baseline' : ''));
@@ -2568,21 +2575,27 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
     // feed has no matching entry, a limited summary without guild names, or fails.
     if (!targetGuildId) {
         if (Array.isArray(globalRows)) {
+            setSource('Official Battle Feed (ไม่พบกิลด์ที่ตรงกัน)');
             console.warn('⚠️ [Official Battle Feed] ไม่พบ Match ID ที่ตรงกับ ' + targetGuild +
                 ' และไม่มี Guild ID สำหรับค้นหาแบบกรองกิลด์');
             return [];
         }
+        setSource('Official Battle Feed (ไม่พร้อมใช้งาน)');
         return null;
     }
 
+    setSource('Official Guild-Filtered API fallback');
     const fallbackCache = fetchGuildRecentBattles._guildFeedCache ||
         (fetchGuildRecentBattles._guildFeedCache = new Map());
     const cacheKey = targetGuildId;
     const now = Date.now();
     const existing = fallbackCache.get(cacheKey);
-    if (existing && existing.data !== null && existing.expiresAt > now) return existing.data;
+    if (existing && existing.expiresAt > now && !existing.inFlight) return existing.data;
     if (existing?.inFlight) return existing.inFlight;
-    if (officialApiRateLimitedUntil > now) return Array.isArray(globalRows) ? [] : null;
+    if (officialApiRateLimitedUntil > now) {
+        setSource('Official API (พักจาก HTTP 429)');
+        return Array.isArray(globalRows) ? [] : null;
+    }
 
     const entry = existing || { data: null, expiresAt: 0, inFlight: null };
     fallbackCache.set(cacheKey, entry);
@@ -2634,6 +2647,7 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
     while (fallbackCache.size > 100) fallbackCache.delete(fallbackCache.keys().next().value);
     const fallbackIds = await entry.inFlight;
     if (fallbackIds?.length) return fallbackIds;
+    setSource('Official API (ไม่พบไฟต์สำรองหรือคำขอล้มเหลว)');
     return Array.isArray(globalRows) ? [] : null;
 }
 
