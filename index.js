@@ -2947,10 +2947,11 @@ async function checkAutoBattlesForGuild() {
                     }
 
                     console.log('✅ ส่งรายงาน Auto-Battle สำเร็จ | Match ID=' + latestMatchId +
-                        ' | ห้อง=' + config.channelId + '.' + delayText +
+                        ' | ห้อง=' + config.channelId +
                         ' | แหล่งที่พบก่อน=' + detectionSource +
                         ' | เวลาจากพบ Match ID จนส่งรายงาน=' + Math.max(0, Date.now() - battleListFirstSeenAt) + 'ms' +
-                        ' | detailFetch=' + (battleDetailFetchMs === null ? 'unknown' : battleDetailFetchMs + 'ms') + '.');
+                        ' | detailFetch=' + (battleDetailFetchMs === null ? 'unknown' : battleDetailFetchMs + 'ms') +
+                        delayText + '.');
                 } else {
                     const decisionAt = Date.now();
                     const ageAtDecisionSec = Number.isFinite(battleTimeMs) && battleTimeMs > 0
