@@ -2435,7 +2435,7 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
     if (isCircuitOpen) {
         console.log(`🔌 Circuit OPEN - ข้าม AlbionBB อีก ${Math.ceil((circuit.openUntil - Date.now()) / 1000)}s | ใช้แหล่งอื่นแทน`);
     }
-    console.log('🔄 Auto-Battle source: AlbionBB API PRIMARY | Official API ' + (isCircuitOpen ? 'fallback (AlbionBB Circuit OPEN)' : 'fallback if AlbionBB API fails') + ' | UTC ' + hour + 'h | 403 streak ' + circuit.failures + '/3');
+    console.log('🔄 Auto-Battle source: Official API PRIMARY | AlbionBB fallback' + (isCircuitOpen ? ' (AlbionBB Circuit OPEN)' : '') + ' | UTC ' + hour + 'h | AlbionBB 403 streak ' + circuit.failures + '/3');
 
     const officialCache = fetchGuildRecentBattles._officialCache || (fetchGuildRecentBattles._officialCache = new Map());
     const verify = async (ids, trustedGuildScope = false) => {
@@ -2547,22 +2547,20 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
         }
     };
 
-    if (targetGuild) {
-        // AlbionBB's direct API is the primary recent-battle source.
-        const albionBBIds = await fetchBB();
-        if (Array.isArray(albionBBIds)) {
-            if (albionBBIds.length) return albionBBIds;
-            console.log('ℹ️ AlbionBB API returned 0 matching IDs for ' + targetGuild + '.');
-            return [];
-        }
-    }
     if (targetGuildId) {
-        // Official API remains the fallback when the AlbionBB API request fails or is circuit-paused.
+        // Official GameInfo is the primary source for recent-battle discovery.
         const officialIds = await fetchOfficial();
         if (Array.isArray(officialIds)) {
             if (officialIds.length) return officialIds;
-            console.log('ℹ️ Official API returned 0 IDs for ' + (targetGuild || targetGuildId) + '.');
-            if (!targetGuild) return [];
+            console.log('ℹ️ Official API returned 0 IDs for ' + (targetGuild || targetGuildId) + '; trying AlbionBB fallback.');
+        }
+    }
+    if (targetGuild) {
+        // AlbionBB is used only when Official has no usable IDs or its request failed.
+        const albionBBIds = await fetchBB();
+        if (Array.isArray(albionBBIds)) {
+            if (albionBBIds.length) return albionBBIds;
+            console.log('ℹ️ AlbionBB fallback returned 0 matching IDs for ' + targetGuild + '.');
         }
     }
     if (!targetGuild) return [];
