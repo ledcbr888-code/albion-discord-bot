@@ -2501,8 +2501,8 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
     console.log('🔄 Auto-Battle source: AtlasChill PRIMARY | Official Albion API fallback | Server=Asia' +
         (baselineOnly ? ' | โหมดตั้งต้นประวัติ' : ''));
 
-    // AtlasChill board is shared by all trackers. Cache its HTML for 15 seconds,
-    // and reuse an in-flight request instead of fetching once per tracked guild.
+    // AtlasChill board is shared by all trackers. Cache successful responses for
+    // 60 seconds, share in-flight requests, and respect 403/429 with a cooldown.
     const loadAtlasChillPage = async () => {
         const now = Date.now();
         const cache = fetchGuildRecentBattles._atlasPageCache;
@@ -2522,14 +2522,35 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
                 if (!html || !/(?:\bID\s*:?\s*\d+|\/battleboard\/\d+)/i.test(html)) {
                     throw new Error('หน้า AtlasChill ไม่มีรายการ Battle ID ที่อ่านได้');
                 }
-                const result = { html, error: null, expiresAt: Date.now() + 15000 };
+                const result = { html, error: null, expiresAt: Date.now() + 60000 };
                 fetchGuildRecentBattles._atlasPageCache = result;
                 return result;
             } catch (error) {
-                const status = error?.response?.status || error?.statusCode;
+                const status = Number(error?.response?.status || error?.statusCode || 0);
                 const detail = status ? 'HTTP ' + status : String(error?.code || error?.message || 'request failed')
                     .replace(/https?:\/\/\S+/gi, '[URL]').slice(0, 140);
-                const result = { html: null, error: detail, expiresAt: Date.now() + 15000 };
+                let cooldownMs = 60000;
+                if (status === 403) {
+                    // Respect access denials: no cloudscraper/proxy rotation or rapid retries.
+                    cooldownMs = 15 * 60 * 1000;
+                    console.warn('⛔ [AtlasChill] ได้รับ HTTP 403; พักการเรียกเว็บ 15 นาทีและใช้ Official API สำรอง');
+                } else if (status === 429) {
+                    const rawRetry = error?.response?.headers?.['retry-after'] ?? error?.response?.headers?.['Retry-After'];
+                    let retryMs = 0;
+                    if (rawRetry != null) {
+                        const seconds = Number(rawRetry);
+                        if (Number.isFinite(seconds) && seconds >= 0) retryMs = seconds * 1000;
+                        else {
+                            const dateMs = Date.parse(String(rawRetry));
+                            if (Number.isFinite(dateMs)) retryMs = Math.max(0, dateMs - Date.now());
+                        }
+                    }
+                    cooldownMs = Math.max(15 * 60 * 1000, retryMs);
+                    console.warn('⏳ [AtlasChill] ได้รับ HTTP 429; พักการเรียกเว็บ ' + Math.ceil(cooldownMs / 60000) + ' นาทีและใช้ Official API สำรอง');
+                } else {
+                    console.warn('⚠️ [AtlasChill] เรียกหน้า Battleboard ไม่สำเร็จ (' + detail + '); จะพักไว้ 60 วินาทีก่อนลองใหม่');
+                }
+                const result = { html: null, error: detail, status, expiresAt: Date.now() + cooldownMs };
                 fetchGuildRecentBattles._atlasPageCache = result;
                 return result;
             }
@@ -2549,7 +2570,7 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
         if (atlasIds.length) {
             setSource('AtlasChill');
             console.log('✅ [AtlasChill] พบ ' + atlasIds.length + ' Match ID ที่จับคู่กับกิลด์ ' + targetGuild +
-                ' | แคชหน้าเว็บ 15 วินาที');
+                ' | แคชหน้าเว็บ 60 วินาที');
         } else {
             console.warn('⚠️ [AtlasChill] โหลดหน้าได้แต่ไม่พบ Match ID ที่จับคู่กับกิลด์ ' + targetGuild + '; ตรวจ Official API สำรอง');
         }
@@ -5414,8 +5435,8 @@ client.once('ready', async () => {
     }, 5000);
 
     function getAutoBattleIntervalMs() {
-        const intervalMs = 20 * 1000;
-        console.log('⏱️ รอบตรวจ Auto-Battle ถัดไปใน 20 วินาที');
+        const intervalMs = 60 * 1000;
+        console.log('⏱️ รอบตรวจ Auto-Battle ถัดไปใน 60 วินาที');
         return intervalMs;
     }
 
