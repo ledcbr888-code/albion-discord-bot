@@ -2551,7 +2551,7 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
     let targetGuildId = parsedConfiguredGuild.id || parsedTarget.id || '';
     let targetGuild = String(config.targetGuild || parsedTarget.name || '').trim();
 
-    // A URL or ID is not a guild name; resolve its readable name before filtering AtlasChill.
+    // A URL or ID is not a guild name; resolve its readable name before using guild filters.
     if (parseGuildReference(targetGuild).id) targetGuild = '';
     if (!targetGuildId || !targetGuild) {
         const resolveInput = targetGuild || rawTarget || (rawConfiguredGuildId && !parsedConfiguredGuild.id ? rawConfiguredGuildId : targetGuildId);
@@ -2593,8 +2593,8 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
         for (const id of normalized) {
             if (!processedBattles.has(id)) next.set(id, pendingIds.get(id) || { firstSeenAt: Date.now() });
         }
-        // Keep unresolved IDs in the queue even if they have aged off AtlasChill's
-        // visible list, so a temporary detail failure cannot silently drop a fight.
+        // Keep unresolved IDs in the queue even if they are no longer in the latest
+        // visible API results, so a temporary detail failure cannot silently drop a fight.
         for (const [id, metadata] of pendingIds.entries()) {
             if (!processedBattles.has(id) && !next.has(id)) next.set(id, metadata);
         }
@@ -2613,99 +2613,17 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
         if (dropped) console.warn('⚠️ [Auto-Battle Queue] คิวเกิน 1,000 Match ID; ตัดรายการเก่าที่สุดออก ' + dropped + ' รายการ');
         return [...next.keys()];
     };
-    console.log('🔄 Auto-Battle source: Official Albion API PRIMARY | AtlasChill fallback | Server=Asia' +
+    console.log('🔄 Auto-Battle source: Official Albion GameInfo API ONLY | Server=Asia' +
         (baselineOnly ? ' | โหมดตั้งต้นประวัติ' : ''));
 
-    // AtlasChill is fallback-only. Cache responses, share in-flight requests,
-    // and respect 403/429 cooldowns without retrying or bypassing access controls.
-    const loadAtlasChillPage = async () => {
-        const now = Date.now();
-        const cache = fetchGuildRecentBattles._atlasPageCache;
-        if (cache && cache.expiresAt > now) return cache;
-        if (fetchGuildRecentBattles._atlasPageInFlight) return await fetchGuildRecentBattles._atlasPageInFlight;
-
-        const task = (async () => {
-            try {
-                const response = await axios.get('https://atlaschill.com/albion/en/battleboard?server=asia', {
-                    timeout: 10000,
-                    headers: {
-                        'User-Agent': 'Mozilla/5.0 (compatible; AlbionAutoBattle/1.0)',
-                        'Accept': 'text/html,application/xhtml+xml'
-                    }
-                });
-                const html = typeof response.data === 'string' ? response.data : String(response.data || '');
-                if (!html || !/(?:\bID\s*:?\s*\d+|\/battleboard\/\d+)/i.test(html)) {
-                    throw new Error('หน้า AtlasChill ไม่มีรายการ Battle ID ที่อ่านได้');
-                }
-                const result = { html, error: null, expiresAt: Date.now() + 60000 };
-                fetchGuildRecentBattles._atlasPageCache = result;
-                return result;
-            } catch (error) {
-                const status = Number(error?.response?.status || error?.statusCode || 0);
-                const detail = status ? 'HTTP ' + status : String(error?.code || error?.message || 'request failed')
-                    .replace(/https?:\/\/\S+/gi, '[URL]').slice(0, 140);
-                let cooldownMs = 60000;
-                if (status === 403) {
-                    // Respect access denials: no cloudscraper/proxy rotation or rapid retries.
-                    cooldownMs = 15 * 60 * 1000;
-                    console.warn('⛔ [AtlasChill] ได้รับ HTTP 403; พักการเรียกเว็บ 15 นาทีและใช้ Official API หลัก');
-                } else if (status === 429) {
-                    const rawRetry = error?.response?.headers?.['retry-after'] ?? error?.response?.headers?.['Retry-After'];
-                    let retryMs = 0;
-                    if (rawRetry != null) {
-                        const seconds = Number(rawRetry);
-                        if (Number.isFinite(seconds) && seconds >= 0) retryMs = seconds * 1000;
-                        else {
-                            const dateMs = Date.parse(String(rawRetry));
-                            if (Number.isFinite(dateMs)) retryMs = Math.max(0, dateMs - Date.now());
-                        }
-                    }
-                    cooldownMs = Math.max(15 * 60 * 1000, retryMs);
-                    console.warn('⏳ [AtlasChill] ได้รับ HTTP 429; พักการเรียกเว็บ ' + Math.ceil(cooldownMs / 60000) + ' นาทีและใช้ Official API สำรอง');
-                } else {
-                    console.warn('⚠️ [AtlasChill] เรียกหน้า Battleboard ไม่สำเร็จ (' + detail + '); จะพักไว้ 60 วินาทีก่อนลองใหม่');
-                }
-                const result = { html: null, error: detail, status, expiresAt: Date.now() + cooldownMs };
-                fetchGuildRecentBattles._atlasPageCache = result;
-                return result;
-            }
-        })();
-        fetchGuildRecentBattles._atlasPageInFlight = task;
-        try {
-            return await task;
-        } finally {
-            if (fetchGuildRecentBattles._atlasPageInFlight === task) fetchGuildRecentBattles._atlasPageInFlight = null;
-        }
-    };
-
-    const fetchAtlasCandidates = async () => {
-        const atlasPage = await loadAtlasChillPage();
-        let atlasIds = [];
-        if (atlasPage.html && targetGuild) {
-            atlasIds = extractBattleIdsFromHtml(atlasPage.html, targetGuild);
-            if (atlasIds.length) {
-                console.log('✅ [AtlasChill fallback] พบ ' + atlasIds.length + ' Match ID ที่จับคู่กับกิลด์ ' + targetGuild);
-            } else {
-                console.warn('⚠️ [AtlasChill fallback] โหลดหน้าได้แต่ไม่พบ Match ID ที่จับคู่กับกิลด์ ' + targetGuild);
-            }
-        } else if (!atlasPage.html) {
-            console.warn('⚠️ [AtlasChill fallback] ดึง Battleboard ไม่สำเร็จ (' + String(atlasPage.error || 'ไม่มี HTML') + ')');
-        } else {
-            console.warn('⚠️ [AtlasChill fallback] ไม่มีชื่อกิลด์สำหรับกรองรายการอย่างปลอดภัย');
-        }
-        return atlasIds;
-    };
-
-    // Without a validated Guild ID, Official GameInfo cannot safely filter the
-    // battles endpoint, so try AtlasChill by readable guild name only in this case.
     if (!targetGuildId) {
-        const atlasIds = await fetchAtlasCandidates();
-        const source = atlasIds.length ? 'AtlasChill (ไม่มี Guild ID สำหรับ Official API)' : 'ไม่พบไฟต์: ไม่มี Guild ID และ AtlasChill ไม่มีรายการ';
-        return queueCandidates(atlasIds, source);
+        const source = 'Official Albion API unavailable: Guild ID required';
+        setSource(source);
+        console.warn('⚠️ [Official API หลัก] ไม่สามารถค้นหาไฟต์ได้ เพราะไม่มี Guild ID ที่ผ่านการตรวจสอบ | กิลด์=' + (targetGuild || 'ไม่ทราบชื่อ'));
+        return queueCandidates([], source);
     }
 
-    // Official GameInfo is the PRIMARY source. AtlasChill is consulted only when
-    // the Official API request fails, not on every polling cycle.
+    // Official GameInfo is the sole source for Auto-Battle Match ID discovery.
     const officialCache = fetchGuildRecentBattles._officialListCache ||
         (fetchGuildRecentBattles._officialListCache = new Map());
     const officialInFlight = fetchGuildRecentBattles._officialListInFlight ||
@@ -2793,7 +2711,7 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
                 ids: null,
                 expiresAt: Math.max(Date.now() + 10000, officialApiRateLimitedUntil || 0)
             });
-            setSource('AtlasChill + Official API unavailable');
+            setSource('Official Albion API unavailable');
             console.warn('⚠️ [Official API หลัก] ค้นหาไฟต์ไม่สำเร็จ | กิลด์=' + (targetGuild || targetGuildId) +
                 ' | สาเหตุ=' + lastDetail);
             return null;
@@ -2815,17 +2733,9 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
         return queueCandidates(officialIds, source);
     }
 
-    // Only make an AtlasChill request if the official source is unavailable.
-    const atlasIds = await fetchAtlasCandidates();
-    if (atlasIds.length) {
-        const source = 'AtlasChill FALLBACK (Official API unavailable)';
-        setSource(source);
-        console.warn('⚠️ [Auto-Battle Fallback] Official API ใช้ไม่ได้ จึงใช้ Match ID จาก AtlasChill');
-        return queueCandidates(atlasIds, source);
-    }
-
-    const source = 'Official API unavailable + AtlasChill fallback empty';
+    const source = 'Official Albion API unavailable';
     setSource(source);
+    console.warn('⚠️ [Auto-Battle] Official Albion GameInfo API ใช้งานไม่ได้; รอบนี้จะไม่เรียกแหล่งข้อมูลอื่น และจะตรวจใหม่ในรอบถัดไป');
     return queueCandidates([], source);
 }
 
