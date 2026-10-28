@@ -781,6 +781,9 @@ const battleFetchInFlight = new Map();
 const battleFetchFailureUntil = new Map();
 // Auto-Battle-only failure metadata used to apply a longer backoff to Asia 404s.
 const autoBattleDetailFailure = new Map();
+// Cache/deduplicate the bounded Official /events/battle fallback used only for Events-only Auto-Battle hints.
+const autoBattleEventsFallbackCache = new Map();
+const autoBattleEventsFallbackInFlight = new Map();
 // GameInfo rate limits are shared across battle IDs, so back off globally.
 let officialApiRateLimitedUntil = 0;
 
@@ -978,6 +981,232 @@ async function fetchOfficialBattle(matchId, options = {}) {
     battleFetchInFlight.set(cacheKey, task);
     return task;
 }
+async function fetchOfficialBattleEventsFallback(matchId, options = {}) {
+    const key = String(matchId || '').trim();
+    const targetGuild = String(options?.targetGuild || '').trim();
+    if (!/^\\d+$/.test(key) || !targetGuild) return null;
+
+    const validateForTarget = data => {
+        if (!data) return null;
+        const guildNames = data.guilds
+            ? Object.values(data.guilds).map(guild => guild?.name).filter(Boolean)
+            : [];
+        return isExactGuildMatch(targetGuild, guildNames) ? data : null;
+    };
+
+    const now = Date.now();
+    const cached = autoBattleEventsFallbackCache.get(key);
+    if (cached && cached.expiresAt > now) return validateForTarget(cached.data);
+    if (cached) autoBattleEventsFallbackCache.delete(key);
+    if (autoBattleEventsFallbackInFlight.has(key)) {
+        return validateForTarget(await autoBattleEventsFallbackInFlight.get(key));
+    }
+    if (officialApiRateLimitedUntil > now) return null;
+
+    const task = (async () => {
+        const endpoint = 'https://gameinfo-sgp.albiononline.com/api/gameinfo/events/battle/' + encodeURIComponent(key);
+        const events = [];
+        const seenEventIds = new Set();
+        const maxPages = 4;
+        let complete = false;
+
+        for (let page = 0; page < maxPages; page++) {
+            if (officialApiRateLimitedUntil > Date.now()) return null;
+            const requestStartedAt = Date.now();
+            let pageEvents;
+            try {
+                const response = await axios.get(endpoint, {
+                    timeout: 5000,
+                    headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
+                    params: { limit: 51, offset: page * 51 }
+                });
+                const data = response.data;
+                pageEvents = Array.isArray(data) ? data :
+                    Array.isArray(data?.events) ? data.events :
+                    Array.isArray(data?.kills) ? data.kills : null;
+                if (!pageEvents) {
+                    console.warn('⚠️ [Auto-Battle Events Fallback] Match ID=' + key +
+                        ' | รูปแบบ /events/battle ไม่ถูกต้อง; ปฏิเสธข้อมูลสำรอง');
+                    autoBattleEventsFallbackCache.set(key, { data: null, expiresAt: Date.now() + 60000 });
+                    return null;
+                }
+                console.log('ℹ️ [Auto-Battle Events Fallback] Match ID=' + key +
+                    ' | Page=' + (page + 1) + '/' + maxPages +
+                    ' | Events=' + pageEvents.length +
+                    ' | API latency=' + (Date.now() - requestStartedAt) + 'ms');
+            } catch (error) {
+                const status = Number(error?.response?.status || error?.statusCode) || 0;
+                autoBattleDetailFailure.set('autoBattle:' + key, {
+                    status,
+                    endpoint: 'Asia Events',
+                    at: Date.now()
+                });
+                if (status === 429) {
+                    const waitMs = Math.max(retryAfterMs(error), 60000);
+                    officialApiRateLimitedUntil = Math.max(officialApiRateLimitedUntil, Date.now() + waitMs);
+                    console.warn('⏳ [Auto-Battle Events Fallback] HTTP 429 | พัก Official API ' +
+                        Math.ceil(waitMs / 1000) + ' วินาที | Match ID=' + key);
+                } else {
+                    console.warn('⚠️ [Auto-Battle Events Fallback] Match ID=' + key +
+                        ' | Endpoint=Asia Events | HTTP=' + (status || error?.message || 'unknown') +
+                        ' | ไม่สร้างรายงานจากข้อมูลที่ดึงไม่ครบ');
+                }
+                autoBattleEventsFallbackCache.set(key, { data: null, expiresAt: Date.now() + 60000 });
+                return null;
+            }
+
+            for (const event of pageEvents) {
+                const eventId = String(event?.EventId ?? event?.eventId ?? event?.id ?? '');
+                const eventKey = eventId || [
+                    event?.TimeStamp ?? event?.timestamp ?? '',
+                    event?.Killer?.Name ?? event?.killer?.name ?? '',
+                    event?.Victim?.Name ?? event?.victim?.name ?? ''
+                ].join('|');
+                if (seenEventIds.has(eventKey)) continue;
+                seenEventIds.add(eventKey);
+                events.push(event);
+            }
+
+            if (pageEvents.length < 51) {
+                complete = true;
+                break;
+            }
+        }
+
+        // If every allowed page is full, we cannot know whether the battle was truncated.
+        // Do not publish partial K/D/Fame totals as if they were complete.
+        if (!complete || !events.length) {
+            console.warn('⚠️ [Auto-Battle Events Fallback] Match ID=' + key +
+                ' | Events=' + events.length + ' | ข้อมูลว่างหรือเกินขีดจำกัด ' +
+                maxPages + ' หน้า; ไม่สร้างรายงานจากข้อมูลบางส่วน');
+            autoBattleEventsFallbackCache.set(key, { data: null, expiresAt: Date.now() + 60000 });
+            return null;
+        }
+
+        const players = new Map();
+        const guilds = new Map();
+        const touch = entity => {
+            if (!entity || typeof entity !== 'object') return null;
+            const name = String(entity.Name ?? entity.name ?? entity.playerName ?? entity.PlayerName ?? '').trim();
+            if (!name) return null;
+            const guildName = String(
+                entity.GuildName ?? entity.guildName ??
+                entity.Guild?.Name ?? entity.guild?.name ?? ''
+            ).trim();
+            const playerKey = name.toLowerCase();
+            if (!players.has(playerKey)) {
+                players.set(playerKey, {
+                    name,
+                    guildName,
+                    kills: 0,
+                    deaths: 0,
+                    killFame: 0,
+                    MainHand: entity.MainHand ?? entity.mainHand ??
+                        entity.Equipment?.MainHand ?? entity.equipment?.MainHand ?? null
+                });
+            }
+            const player = players.get(playerKey);
+            if (!player.guildName && guildName) player.guildName = guildName;
+            if (guildName && !guilds.has(guildName.toLowerCase())) {
+                guilds.set(guildName.toLowerCase(), {
+                    name: guildName, kills: 0, deaths: 0, killFame: 0, players: new Set()
+                });
+            }
+            const guild = guildName ? guilds.get(guildName.toLowerCase()) : null;
+            if (guild) guild.players.add(playerKey);
+            return { player, guild };
+        };
+
+        let invalidEventCount = 0;
+        let totalFame = 0;
+        const eventTimes = [];
+        for (const event of events) {
+            const killer = event?.Killer ?? event?.killer;
+            const victim = event?.Victim ?? event?.victim;
+            const fameRaw = event?.TotalVictimKillFame ?? event?.totalVictimKillFame ??
+                event?.KillFame ?? event?.killFame ??
+                victim?.KillFame ?? victim?.killFame;
+            const fame = Number(fameRaw);
+            if (!killer || !victim || !String(killer?.Name ?? killer?.name ?? '').trim() ||
+                !String(victim?.Name ?? victim?.name ?? '').trim() ||
+                fameRaw === null || fameRaw === undefined || !Number.isFinite(fame) || fame < 0) {
+                invalidEventCount++;
+                continue;
+            }
+
+            const k = touch(killer);
+            const v = touch(victim);
+            if (!k || !v) {
+                invalidEventCount++;
+                continue;
+            }
+            k.player.kills++;
+            if (k.guild) k.guild.kills++;
+            v.player.deaths++;
+            if (v.guild) v.guild.deaths++;
+            k.player.killFame += fame;
+            if (k.guild) k.guild.killFame += fame;
+            totalFame += fame;
+
+            const participants = [
+                ...(Array.isArray(event?.Participants) ? event.Participants : []),
+                ...(Array.isArray(event?.GroupMembers) ? event.GroupMembers : [])
+            ];
+            participants.forEach(touch);
+
+            const timeValue = event?.TimeStamp ?? event?.timestamp ?? event?.Time ?? event?.time ?? null;
+            const timeMs = timeValue == null ? NaN : Date.parse(String(timeValue));
+            if (Number.isFinite(timeMs) && timeMs > 0) eventTimes.push(timeMs);
+        }
+
+        if (invalidEventCount > 0 || !players.size || !guilds.size || !eventTimes.length) {
+            console.warn('⚠️ [Auto-Battle Events Fallback] Match ID=' + key +
+                ' | Events=' + events.length + ' | malformed=' + invalidEventCount +
+                ' | ไม่มีข้อมูลครบพอสำหรับรายงาน; ไม่ mark handled');
+            autoBattleEventsFallbackCache.set(key, { data: null, expiresAt: Date.now() + 60000 });
+            return null;
+        }
+
+        const guildNames = [...guilds.values()].map(guild => guild.name);
+        if (!isExactGuildMatch(targetGuild, guildNames)) {
+            // Keep the complete battle cached so another tracker for a different guild can validate it.
+            console.log('ℹ️ [Auto-Battle Events Fallback] Match ID=' + key +
+                ' | ข้อมูลครบ แต่ไม่พบกิลด์เป้าหมาย=' + targetGuild + '; ไม่ส่งให้ Tracker นี้');
+        }
+
+        const guildObj = Object.fromEntries([...guilds.values()].map((guild, index) => [String(index), {
+            name: guild.name,
+            kills: guild.kills,
+            deaths: guild.deaths,
+            killFame: guild.killFame,
+            playersCount: guild.players.size
+        }]));
+        const playerObj = Object.fromEntries([...players.values()].map((player, index) => [String(index), player]));
+        const data = {
+            id: key,
+            startTime: new Date(Math.min(...eventTimes)).toISOString(),
+            players: playerObj,
+            guilds: guildObj,
+            alliances: {},
+            totalKills: events.length,
+            totalFame,
+            derivedFromEvents: true
+        };
+        autoBattleEventsFallbackCache.set(key, { data, expiresAt: Date.now() + 3 * 60 * 1000 });
+        while (autoBattleEventsFallbackCache.size > 200) {
+            autoBattleEventsFallbackCache.delete(autoBattleEventsFallbackCache.keys().next().value);
+        }
+        return validateForTarget(data);
+    })();
+
+    autoBattleEventsFallbackInFlight.set(key, task);
+    try {
+        return await task;
+    } finally {
+        if (autoBattleEventsFallbackInFlight.get(key) === task) autoBattleEventsFallbackInFlight.delete(key);
+    }
+}
+
 function objectToPlayer(obj) {
     if (!obj || typeof obj !== 'object') return null;
     const name = obj.name ?? obj.Name ?? obj.playerName ?? obj.PlayerName;
@@ -2614,6 +2843,45 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
     const setSource = source => sourceByScope.set(queueScopeKey, source);
     const pendingByScope = fetchGuildRecentBattles._pendingMatchIds ||
         (fetchGuildRecentBattles._pendingMatchIds = new Map());
+    const pendingEventsByScope = fetchGuildRecentBattles._pendingEventMatchIds ||
+        (fetchGuildRecentBattles._pendingEventMatchIds = new Map());
+    const queueEventHints = (ids, confirmedBattleIds = null) => {
+        if (baselineOnly) return 0;
+        const normalized = [...new Set((Array.isArray(ids) ? ids : [])
+            .map(id => String(id || '').trim()).filter(id => /^\\d+$/.test(id)))];
+        const eventQueue = pendingEventsByScope.get(queueScopeKey) || new Map();
+        const confirmed = new Set(Array.isArray(confirmedBattleIds) ? confirmedBattleIds.map(String) : []);
+        const now = Date.now();
+        for (const id of confirmed) eventQueue.delete(id);
+        for (const id of normalized) {
+            if (processedBattles.has(id) || confirmed.has(id)) {
+                eventQueue.delete(id);
+                continue;
+            }
+            const previous = eventQueue.get(id);
+            eventQueue.set(id, {
+                firstSeenAt: Number(previous?.firstSeenAt) || now,
+                source: 'Official GameInfo Events (event-only hint)',
+                eventOnly: true
+            });
+        }
+        for (const [id, metadata] of eventQueue.entries()) {
+            if (processedBattles.has(id) || now - (Number(metadata?.firstSeenAt) || now) > 24 * 60 * 60 * 1000) {
+                eventQueue.delete(id);
+            }
+        }
+        while (eventQueue.size > 500) {
+            let oldestId = null, oldestAt = Infinity;
+            for (const [id, metadata] of eventQueue.entries()) {
+                const firstSeenAt = Number(metadata?.firstSeenAt) || 0;
+                if (firstSeenAt < oldestAt) { oldestAt = firstSeenAt; oldestId = id; }
+            }
+            if (oldestId === null) break;
+            eventQueue.delete(oldestId);
+        }
+        pendingEventsByScope.set(queueScopeKey, eventQueue);
+        return normalized.filter(id => !processedBattles.has(id) && !confirmed.has(id)).length;
+    };
     const queueCandidates = (ids, source) => {
         setSource(source);
         const normalized = [...new Set((Array.isArray(ids) ? ids : [])
@@ -2888,8 +3156,8 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
         }
     };
 
-    // Events are provisional hints only. A BattleId becomes a report candidate only after
-    // it appears in the authoritative /battles list for this guild.
+    // Keep /battles as the primary discovery queue, while storing unmatched /events IDs
+    // separately for a bounded, validated /events/battle detail fallback.
     const eventPromise = fetchRecentEventBattleIds();
     const officialPromise = fetchOfficial({ silentSource: true }).catch(error => {
         console.warn('⚠️ [Official API หลัก] การค้นหา Battle List ล้มเหลว: ' + String(error?.message || error));
@@ -2897,45 +3165,36 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
     });
 
     const officialIds = await officialPromise;
+    const eventResult = await eventPromise;
+    if (eventResult?.valid && Array.isArray(eventResult.ids)) {
+        const provisionalCount = queueEventHints(eventResult.ids, Array.isArray(officialIds) ? officialIds : null);
+        const confirmedCount = Array.isArray(officialIds)
+            ? eventResult.ids.filter(id => officialIds.includes(String(id))).length
+            : 0;
+        console.log('ℹ️ [Auto-Battle Event Hints] Guild=' + (targetGuild || targetGuildId) +
+            ' | Events Battle IDs=' + eventResult.ids.length +
+            ' | ยืนยันใน Battle List=' + confirmedCount +
+            ' | Events-only ที่คงไว้ในคิวสำรอง=' + provisionalCount);
+    }
+
     if (Array.isArray(officialIds)) {
         const source = officialIds.length
             ? 'Official GameInfo Battle List'
             : 'Official GameInfo Battle List (ไม่พบไฟต์ที่ตรงกิลด์)';
         setSource(source);
-
-        // Do not block the polling cycle on /events. Compare its hints in the background,
-        // but never enqueue IDs that are absent from /battles.
-        void eventPromise.then(eventResult => {
-            if (!eventResult?.valid || !Array.isArray(eventResult.ids) || !eventResult.ids.length) return;
-            const battleListIds = new Set(officialIds.map(String));
-            const confirmed = eventResult.ids.filter(id => battleListIds.has(String(id))).length;
-            const provisionalOnly = eventResult.ids.length - confirmed;
-            console.log('ℹ️ [Auto-Battle Event Hints] Guild=' + (targetGuild || targetGuildId) +
-                ' | Events Battle IDs=' + eventResult.ids.length +
-                ' | ยืนยันใน Battle List=' + confirmed +
-                ' | รอ Battle List ยืนยัน=' + provisionalOnly +
-                ' | ไม่ส่ง Event-only IDs เข้าคิวรายงาน');
-        }).catch(error => {
-            console.warn('⚠️ [Auto-Battle Event Hints] ประมวลผล hint ไม่สำเร็จ: ' + String(error?.message || error));
-        });
-
         return queueCandidates(officialIds, source);
     }
 
-    // If /battles is unavailable, Events can be logged as a hint but cannot independently
-    // populate the report queue because its IDs may return 404 from /battles/{id}.
-    const eventResult = await eventPromise;
     if (eventResult?.valid && Array.isArray(eventResult.ids) && eventResult.ids.length) {
-        const source = 'Official Albion API unavailable; Events hints waiting for Battle List';
+        const source = 'Official Albion API unavailable; Events-only queue active';
         setSource(source);
-        console.warn('⚠️ [Auto-Battle] พบ Event Battle ID=' + eventResult.ids.length +
-            ' แต่ Battle List ใช้งานไม่ได้; ยังไม่ส่ง IDs เข้าคิวจนกว่า /battles จะยืนยัน');
+        console.warn('⚠️ [Auto-Battle] Battle List ใช้งานไม่ได้; เก็บ Event-only IDs ในคิวสำรองเพื่อทดลองดึง Events Battle แบบจำกัดและตรวจความครบถ้วน');
         return baselineOnly ? null : queueCandidates([], source);
     }
 
     const source = 'Official Albion API unavailable';
     setSource(source);
-    console.warn('⚠️ [Auto-Battle] Official Albion GameInfo API ใช้งานไม่ได้; รอบนี้จะไม่เรียกแหล่งข้อมูลอื่น และจะตรวจใหม่ในรอบถัดไป');
+    console.warn('⚠️ [Auto-Battle] Official Albion GameInfo API ใช้งานไม่ได้; รอบนี้จะตรวจใหม่ในรอบถัดไป');
     return baselineOnly ? null : queueCandidates([], source);
 }
 
@@ -3003,6 +3262,7 @@ async function primeAutoBattleHistoryForGuild(configs = autoBattleConfigs) {
 
 async function checkAutoBattles() {
     checkAutoBattles._detailLookupBudget = { used: 0, limit: 25, startedAt: Date.now() };
+    checkAutoBattles._eventFallbackBudget = { used: 0, limit: 2, startedAt: Date.now() };
     const guilds = getAllGuildConfigs();
     for (const { guildId } of guilds) {
         await guildContext.run({ guildId }, async () => {
@@ -3018,7 +3278,8 @@ function scheduleAutoBattleDetailRetry(matchId, reason) {
     const previous = retryStates.get(key) || { attempts: 0, hourlyRetry: false };
     const attempts = Math.min(8, (Number(previous.attempts) || 0) + 1);
     const failure = autoBattleDetailFailure.get('autoBattle:' + key);
-    const isAsia404 = Number(failure?.status) === 404 && failure?.endpoint === 'Asia';
+    const isAsia404 = Number(failure?.status) === 404 &&
+        (failure?.endpoint === 'Asia' || failure?.endpoint === 'Asia Events');
     const delays = isAsia404
         ? [180000, 300000, 600000, 900000, 900000, 900000, 900000]
         : [60000, 120000, 300000, 600000, 900000, 900000, 900000];
@@ -3067,11 +3328,12 @@ async function checkAutoBattlesForGuild() {
             }
 
             const recentMatches = await fetchGuildRecentBattles(config);
-            if (!Array.isArray(recentMatches) || !recentMatches.length) continue;
             const battleListObservedAt = Date.now();
             const candidateMeta = new Map();
             const pendingQueueScopeKey = getAutoBattleQueueScopeKey(config);
-            for (const idValue of recentMatches) {
+            const pendingEventQueue = fetchGuildRecentBattles._pendingEventMatchIds?.get(pendingQueueScopeKey) || new Map();
+            if ((!Array.isArray(recentMatches) || !recentMatches.length) && !pendingEventQueue.size) continue;
+            for (const idValue of (Array.isArray(recentMatches) ? recentMatches : [])) {
                 const id = String(idValue || '');
                 if (!/^\d+$/.test(id) || candidateMeta.has(id)) continue;
                 const queued = fetchGuildRecentBattles._pendingMatchIds?.get(pendingQueueScopeKey)?.get(id);
@@ -3079,7 +3341,17 @@ async function checkAutoBattlesForGuild() {
                     firstSeenAt: Number(queued?.firstSeenAt) || battleListObservedAt,
                     source: queued?.source ||
                         fetchGuildRecentBattles._lastSourceByScope?.get(pendingQueueScopeKey) ||
-                        'Official GameInfo Battle List'
+                        'Official GameInfo Battle List',
+                    eventOnly: false
+                });
+            }
+            for (const [idValue, queued] of pendingEventQueue.entries()) {
+                const id = String(idValue || '');
+                if (!/^\\d+$/.test(id) || candidateMeta.has(id) || processedBattles.has(id)) continue;
+                candidateMeta.set(id, {
+                    firstSeenAt: Number(queued?.firstSeenAt) || battleListObservedAt,
+                    source: queued?.source || 'Official GameInfo Events (event-only hint)',
+                    eventOnly: true
                 });
             }
             const detailRetryStates = checkAutoBattlesForGuild._detailRetryStates ||
@@ -3090,9 +3362,11 @@ async function checkAutoBattlesForGuild() {
                 .filter(id => (detailRetryStates.get(String(id))?.nextRetryAt || 0) <= retryCheckAt)
                 // Prioritize never-failed IDs ahead of older 404/retry candidates to avoid starvation.
                 .sort((a, b) => {
+                    const eventOnlyA = candidateMeta.get(String(a))?.eventOnly === true ? 1 : 0;
+                    const eventOnlyB = candidateMeta.get(String(b))?.eventOnly === true ? 1 : 0;
                     const attemptsA = Number(detailRetryStates.get(String(a))?.attempts) || 0;
                     const attemptsB = Number(detailRetryStates.get(String(b))?.attempts) || 0;
-                    return attemptsA - attemptsB ||
+                    return eventOnlyA - eventOnlyB || attemptsA - attemptsB ||
                         candidateMeta.get(String(a)).firstSeenAt - candidateMeta.get(String(b)).firstSeenAt;
                 });
             if (!newMatchIds.length) continue;
@@ -3110,6 +3384,13 @@ async function checkAutoBattlesForGuild() {
                     const index = prefetchCursor++;
                     if (index >= prefetchIds.length) return;
                     const matchId = String(prefetchIds[index]);
+                    if (candidateMeta.get(matchId)?.eventOnly === true) {
+                        // Event-only candidates are validated through /events/battle; don't spend
+                        // the primary Battle Detail request budget on IDs known to be absent from /battles.
+                        prefetchedBattleDetails.set(matchId, null);
+                        prefetchedBattleFetchMs.set(matchId, 0);
+                        continue;
+                    }
                     const cacheEntry = fetchOfficialBattle._autoBattleDetailCache?.get(matchId);
                     const hasCached = Boolean(cacheEntry && cacheEntry.expiresAt > Date.now());
                     const failedUntil = battleFetchFailureUntil.get('autoBattle:' + matchId) || 0;
@@ -3137,7 +3418,8 @@ async function checkAutoBattlesForGuild() {
             for (const latestMatchId of newMatchIds.slice(0, 1000)) {
                 const candidateMetaForId = candidateMeta.get(String(latestMatchId)) || { firstSeenAt: battleListObservedAt, source: 'Official GameInfo Battle API' };
                 const battleListFirstSeenAt = candidateMetaForId.firstSeenAt;
-                const detectionSource = candidateMetaForId.source;
+                let detectionSource = candidateMetaForId.source;
+                const isEventOnlyCandidate = candidateMetaForId.eventOnly === true;
                 const battleProcessingStartedAt = Date.now();
                 let battleDetailFetchMs = null;
                 try {
@@ -3146,7 +3428,7 @@ async function checkAutoBattlesForGuild() {
                     const hasCachedDetail = Boolean(detailCacheEntry && detailCacheEntry.expiresAt > Date.now());
                     const failureUntil = battleFetchFailureUntil.get('autoBattle:' + detailKey) || 0;
                     const hasInFlightDetail = battleFetchInFlight.has('autoBattle:' + detailKey);
-                    const willIssueDetailRequest = !hasCachedDetail && !hasInFlightDetail && failureUntil <= Date.now() && officialApiRateLimitedUntil <= Date.now();
+                    const willIssueDetailRequest = !isEventOnlyCandidate && !hasCachedDetail && !hasInFlightDetail && failureUntil <= Date.now() && officialApiRateLimitedUntil <= Date.now();
                     const detailBudget = checkAutoBattles._detailLookupBudget || (checkAutoBattles._detailLookupBudget = { used: 0, limit: 25, startedAt: Date.now() });
                     const hasPrefetchedDetail = prefetchedBattleDetails.has(detailKey);
                     if (willIssueDetailRequest && !hasPrefetchedDetail && detailBudget.used >= detailBudget.limit) {
@@ -3154,17 +3436,41 @@ async function checkAutoBattlesForGuild() {
                         break;
                     }
                     if (willIssueDetailRequest && !hasPrefetchedDetail) detailBudget.used++;
-                    const officialBattle = hasPrefetchedDetail
-                        ? prefetchedBattleDetails.get(detailKey)
-                        : await fetchOfficialBattle(latestMatchId, { autoBattle: true });
-                    battleDetailFetchMs = hasPrefetchedDetail
+                    let officialBattle = isEventOnlyCandidate
+                        ? null
+                        : (hasPrefetchedDetail
+                            ? prefetchedBattleDetails.get(detailKey)
+                            : await fetchOfficialBattle(latestMatchId, { autoBattle: true }));
+                    battleDetailFetchMs = isEventOnlyCandidate ? 0 : (hasPrefetchedDetail
                         ? (prefetchedBattleFetchMs.get(detailKey) ?? Date.now() - battleProcessingStartedAt)
-                        : Date.now() - battleProcessingStartedAt;
+                        : Date.now() - battleProcessingStartedAt);
+
+                    if (!officialBattle && isEventOnlyCandidate) {
+                        const eventBudget = checkAutoBattles._eventFallbackBudget ||
+                            (checkAutoBattles._eventFallbackBudget = { used: 0, limit: 2, startedAt: Date.now() });
+                        if (eventBudget.used >= eventBudget.limit) {
+                            console.log('⏸️ [Auto-Battle Events Fallback] ใช้โควตาทดสอบ Event-only ครบ ' +
+                                eventBudget.limit + ' Match ID ในรอบนี้แล้ว; คงรายการไว้ลองรอบถัดไป | Match ID=' + detailKey);
+                            continue;
+                        }
+                        eventBudget.used++;
+                        const eventsFallbackStartedAt = Date.now();
+                        officialBattle = await fetchOfficialBattleEventsFallback(detailKey, { targetGuild: config.targetGuild });
+                        battleDetailFetchMs = Date.now() - eventsFallbackStartedAt;
+                        if (officialBattle) {
+                            detectionSource += ' + Official /events/battle fallback';
+                            console.log('✅ [Auto-Battle Events Fallback] สร้างข้อมูล Battle จาก Kill Events ที่ครบถ้วน | Match ID=' +
+                                detailKey + ' | Players=' + Object.keys(officialBattle.players || {}).length +
+                                ' | Guilds=' + Object.keys(officialBattle.guilds || {}).length +
+                                ' | Events=' + officialBattle.totalKills);
+                        }
+                    }
+
                 if (!officialBattle) {
                     const failure = autoBattleDetailFailure.get('autoBattle:' + detailKey);
                     const failureSummary = Number(failure?.status) === 404
-                        ? 'Official GameInfo Asia HTTP 404; รายละเอียด Battle อาจยังไม่พร้อม'
-                        : 'Official GameInfo Asia ยังไม่มีรายละเอียดหรือ API ตอบไม่สำเร็จ';
+                        ? 'Official GameInfo Asia HTTP 404; รายละเอียด Battle/Events อาจยังไม่พร้อม'
+                        : 'Official GameInfo Asia ยังไม่มีรายละเอียด Battle หรือข้อมูล Events ไม่ครบ';
                     scheduleAutoBattleDetailRetry(latestMatchId, failureSummary + ' | Source=' + detectionSource);
                     console.warn('⚠️ ยังดึงข้อมูล Battle ' + latestMatchId + ' ไม่สำเร็จ; ยังไม่ทำเครื่องหมายว่าเสร็จ | Source=' + detectionSource + ' | detailFetch=' + battleDetailFetchMs + 'ms | firstSeenAt=' + new Date(battleListFirstSeenAt).toISOString());
                     continue;
