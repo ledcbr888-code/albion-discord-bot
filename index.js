@@ -2662,6 +2662,7 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
 
         const task = (async () => {
             if (officialApiRateLimitedUntil > Date.now()) return { valid: false, ids: [] };
+            const requestStartedAt = Date.now();
             try {
                 const response = await axios.get('https://gameinfo-sgp.albiononline.com/api/gameinfo/events', {
                     timeout: 8000,
@@ -2688,7 +2689,8 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
                     officialEventCache.delete(officialEventCache.keys().next().value);
                 }
                 console.log('ℹ️ [Official API Events] Server=Asia | Guild=' + (targetGuild || targetGuildId) +
-                    ' | Events=' + response.data.length + ' | พบ Battle ID=' + ids.length);
+                    ' | Events=' + response.data.length + ' | พบ Battle ID=' + ids.length +
+                    ' | API latency=' + (Date.now() - requestStartedAt) + 'ms');
                 return { valid: true, ids };
             } catch (error) {
                 const status = error?.response?.status || error?.statusCode;
@@ -2699,7 +2701,8 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
                 const detail = (status ? 'HTTP ' + status : String(error?.code || error?.message || 'request failed')) +
                     (responseDetail ? ' | API=' + responseDetail : '');
                 console.warn('⚠️ [Official API Events] Server=Asia | Guild=' + (targetGuild || targetGuildId) +
-                    ' | สาเหตุ=' + detail + ' | จะใช้ Battle List ตามปกติต่อ');
+                    ' | สาเหตุ=' + detail + ' | API latency=' + (Date.now() - requestStartedAt) +
+                    'ms | จะใช้ Battle List ตามปกติต่อ');
                 if (Number(status) === 429) {
                     const waitMs = Math.max(retryAfterMs(error), 60000);
                     officialApiRateLimitedUntil = Math.max(officialApiRateLimitedUntil, Date.now() + waitMs);
@@ -2751,6 +2754,7 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
                 let endpointHadError = false;
                 const endpointName = url.includes('gameinfo-sgp') ? 'Asia' : 'Global';
                 for (const offset of [0, 51]) {
+                    const requestStartedAt = Date.now();
                     try {
                         const response = await axios.get(url, {
                             timeout: 10000,
@@ -2772,7 +2776,8 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
                             if (/^\d+$/.test(String(id))) endpointIds.add(String(id));
                         }
                         console.log('ℹ️ [Official API หลัก] Endpoint=' + endpointName +
-                            ' | offset=' + offset + ' | ได้ ' + response.data.length + ' รายการ');
+                            ' | offset=' + offset + ' | ได้ ' + response.data.length + ' รายการ' +
+                            ' | API latency=' + (Date.now() - requestStartedAt) + 'ms');
                         if (response.data.length < 51) break;
                     } catch (error) {
                         endpointHadError = true;
@@ -2785,7 +2790,8 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
                             (responseDetail ? ' | API=' + responseDetail : '');
                         console.warn('⚠️ [Official API หลัก] Endpoint=' + endpointName +
                             ' | offset=' + offset + ' | กิลด์=' + (targetGuild || '-') +
-                            ' | Guild ID=' + targetGuildId + ' | สาเหตุ=' + lastDetail);
+                            ' | Guild ID=' + targetGuildId + ' | API latency=' +
+                            (Date.now() - requestStartedAt) + 'ms | สาเหตุ=' + lastDetail);
                         if (Number(status) === 429) {
                             const waitMs = Math.max(retryAfterMs(error), 60000);
                             officialApiRateLimitedUntil = Math.max(officialApiRateLimitedUntil, Date.now() + waitMs);
