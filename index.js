@@ -5876,9 +5876,9 @@ const commands = [
         .addSubcommand(s => s.setName('guilds').setDescription('แสดงรายชื่อกิลด์ที่ติดตาม'))
         .addSubcommand(s => s.setName('members').setDescription('แสดงรายชื่อผู้เล่นที่ติดตาม')),
     new SlashCommandBuilder().setName('add').setDescription('เพิ่มรายการติดตาม')
-        .addSubcommand(s => s.setName('guild').setDescription('เพิ่มกิลด์ที่ต้องการติดตามทั้งกิลด์')
+        .addSubcommand(s => s.setName('guild').setDescription('เพิ่มกิลด์เพื่อรวมสมาชิกในการคำนวณ Fame และสร้างรายงาน')
             .addStringOption(o => o.setName('name').setDescription('ชื่อกิลด์').setRequired(true)))
-        .addSubcommand(s => s.setName('player').setDescription('เพิ่มผู้เล่น').addStringOption(o => o.setName('name').setDescription('ชื่อผู้เล่น').setRequired(true))),
+        .addSubcommand(s => s.setName('player').setDescription('เพิ่มผู้เล่นรายบุคคลเพื่อรวม Fame และข้อมูลอาวุธในรายงาน').addStringOption(o => o.setName('name').setDescription('ชื่อผู้เล่น').setRequired(true))),
     new SlashCommandBuilder().setName('remove').setDescription('ลบรายการติดตาม')
         .addSubcommand(s => s.setName('guild').setDescription('ลบกิลด์').addStringOption(o => o.setName('name').setDescription('ชื่อกิลด์').setRequired(true)))
         .addSubcommand(s => s.setName('player').setDescription('ลบผู้เล่น').addStringOption(o => o.setName('name').setDescription('ชื่อผู้เล่น').setRequired(true))),
@@ -5888,7 +5888,7 @@ const commands = [
         .addSubcommand(s => s.setName('status').setDescription('ดูห้องที่ตั้งค่าตรวจลิงก์ Battle'))
         .addSubcommand(s => s.setName('remove').setDescription('ยกเลิกระบบตรวจลิงก์ Battle')),
     new SlashCommandBuilder().setName('autobattle').setDescription('จัดการระบบติดตามไฟต์อัตโนมัติ')
-        .addSubcommand(s => s.setName('set').setDescription('ตั้งค่าระบบติดตามไฟต์อัตโนมัติ')
+        .addSubcommand(s => s.setName('set').setDescription('ตั้งกิลด์ต้นทางค้นหาไฟต์ ห้องแจ้งเตือน และ Fame ขั้นต่ำ')
             .addChannelOption(o => o.setName('channel').setDescription('ห้องที่ต้องการให้แจ้งเตือน').addChannelTypes(ChannelType.GuildText).setRequired(true))
             .addStringOption(o => o.setName('guild').setDescription('ชื่อ Guild ที่ต้องการติดตาม').setRequired(true))
             .addStringOption(o => o.setName('min_frames').setDescription('Fame ขั้นต่ำ เช่น 50K (Fame รวมของรายการติดตาม)').setRequired(true))
