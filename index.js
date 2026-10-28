@@ -2397,9 +2397,97 @@ async function processBattleReport(input, targetContext, isMessage = false) {
 }
 function parseGuildReference(value) {
     const raw = String(value || '').trim();
-    const urlMatch = raw.match(/\/guilds\/([A-Za-z0-9_-]+)(?:\/|$)/i);
+    // Accept both Albion guild pages and the older /guilds/<ID> form.
+    const urlMatch = raw.match(/\/(?:guilds|killboard\/guild|guild)\/([A-Za-z0-9_-]+)(?:[/?#]|$)/i);
     const id = urlMatch?.[1] || (/^[A-Za-z0-9_-]{16,}$/.test(raw) ? raw : '');
     return { name: id ? '' : raw, id };
+}
+
+async function resolveOfficialGuildReference(value) {
+    const raw = String(value || '').trim();
+    const parsed = parseGuildReference(raw);
+    const lookupName = parsed.name || (!parsed.id ? raw : '');
+    if (!parsed.id && !lookupName) return { id: '', name: '' };
+
+    const normalizeName = name => String(name || '').trim().replace(/\s+/g, ' ').toLocaleLowerCase();
+    const cacheKey = parsed.id ? 'id:' + parsed.id : 'name:' + normalizeName(lookupName);
+    const cache = resolveOfficialGuildReference._cache || (resolveOfficialGuildReference._cache = new Map());
+    const inFlight = resolveOfficialGuildReference._inFlight || (resolveOfficialGuildReference._inFlight = new Map());
+    const cached = cache.get(cacheKey);
+    if (cached && cached.expiresAt > Date.now()) return { id: cached.id || '', name: cached.name || '' };
+    if (inFlight.has(cacheKey)) return await inFlight.get(cacheKey);
+
+    const task = (async () => {
+        const bases = [
+            'https://gameinfo-sgp.albiononline.com/api/gameinfo',
+            'https://gameinfo.albiononline.com/api/gameinfo'
+        ];
+        let lastDetail = 'ไม่พบชื่อกิลด์ที่ตรงกัน';
+        for (const base of bases) {
+            try {
+                const response = parsed.id
+                    ? await axios.get(base + '/guilds/' + encodeURIComponent(parsed.id), {
+                        timeout: 8000,
+                        headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' }
+                    })
+                    : await axios.get(base + '/search', {
+                        timeout: 8000,
+                        headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
+                        params: { q: lookupName }
+                    });
+                const data = response?.data || {};
+                if (parsed.id) {
+                    const id = String(data.Id || data.id || parsed.id).trim();
+                    const name = String(data.Name || data.name || '').trim();
+                    if (name) {
+                        console.log('🔎 [GuildResolver] ใช้ ID ' + id + ' สำหรับกิลด์ "' + name + '"');
+                        return { id, name };
+                    }
+                    lastDetail = 'API ตอบกลับแต่ไม่มีชื่อกิลด์';
+                    continue;
+                }
+
+                const guilds = Array.isArray(data.guilds) ? data.guilds :
+                    (Array.isArray(data.Guilds) ? data.Guilds : []);
+                const wanted = normalizeName(lookupName);
+                const exactMatches = guilds.filter(g => normalizeName(g?.Name ?? g?.name) === wanted);
+                if (exactMatches.length === 1) {
+                    const match = exactMatches[0];
+                    const id = String(match.Id ?? match.id ?? '').trim();
+                    const name = String(match.Name ?? match.name ?? lookupName).trim();
+                    if (/^[A-Za-z0-9_-]{16,}$/.test(id)) {
+                        console.log('🔎 [GuildResolver] ใช้ ID ' + id + ' สำหรับกิลด์ "' + name + '"');
+                        return { id, name };
+                    }
+                    lastDetail = 'ผลค้นหามีกิลด์แต่ไม่มี ID ที่ถูกต้อง';
+                } else if (exactMatches.length > 1) {
+                    console.warn('⚠️ [GuildResolver] พบชื่อกิลด์ "' + lookupName + '" ซ้ำหลายรายการ; ไม่เลือก ID แบบเดา');
+                    return { id: '', name: '' };
+                } else {
+                    lastDetail = 'ไม่พบชื่อกิลด์ตรงกันใน Search API';
+                }
+            } catch (error) {
+                const status = error?.response?.status || error?.statusCode;
+                lastDetail = status ? 'HTTP ' + status : String(error?.code || error?.message || 'request failed');
+            }
+        }
+        console.warn('⚠️ [GuildResolver] Resolve กิลด์ "' + (lookupName || parsed.id) + '" ไม่สำเร็จ (' + lastDetail + '); จะไม่ส่งชื่อย่อที่ไม่ใช่ ID ไปยัง Official Battles API');
+        return { id: parsed.id || '', name: '' };
+    })();
+
+    inFlight.set(cacheKey, task);
+    try {
+        const result = await task;
+        const ttl = result.id ? 6 * 60 * 60 * 1000 : 5 * 60 * 1000;
+        cache.set(cacheKey, { ...result, expiresAt: Date.now() + ttl });
+        if (result.id) {
+            cache.set('id:' + result.id, { ...result, expiresAt: Date.now() + ttl });
+            if (result.name) cache.set('name:' + normalizeName(result.name), { ...result, expiresAt: Date.now() + ttl });
+        }
+        return { id: result.id || '', name: result.name || '' };
+    } finally {
+        if (inFlight.get(cacheKey) === task) inFlight.delete(cacheKey);
+    }
 }
 
 function extractBattleIdsFromHtml(html, targetGuild = '') {
@@ -2457,10 +2545,37 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
     const baselineOnly = options?.baselineOnly === true;
     const config = guildOrConfig && typeof guildOrConfig === 'object' ? guildOrConfig : {};
     const rawTarget = typeof guildOrConfig === 'string' ? guildOrConfig : (config.targetGuild || '');
-    const parsed = parseGuildReference(config.targetGuildId || rawTarget);
-    const targetGuildId = String(config.targetGuildId || parsed.id || '').trim();
-    const targetGuild = String(config.targetGuild || parsed.name || '').trim();
+    const rawConfiguredGuildId = String(config.targetGuildId || '').trim();
+    const parsedConfiguredGuild = parseGuildReference(rawConfiguredGuildId);
+    const parsedTarget = parseGuildReference(rawTarget);
+    let targetGuildId = parsedConfiguredGuild.id || parsedTarget.id || '';
+    let targetGuild = String(config.targetGuild || parsedTarget.name || '').trim();
+
+    // A URL or ID is not a guild name; resolve its readable name before filtering AtlasChill.
+    if (parseGuildReference(targetGuild).id) targetGuild = '';
+    if (!targetGuildId || !targetGuild) {
+        const resolveInput = targetGuild || rawTarget || (rawConfiguredGuildId && !parsedConfiguredGuild.id ? rawConfiguredGuildId : targetGuildId);
+        const resolvedGuild = await resolveOfficialGuildReference(resolveInput);
+        if (resolvedGuild.id) targetGuildId = resolvedGuild.id;
+        if (resolvedGuild.name && (!targetGuild || parseGuildReference(config.targetGuild).id)) targetGuild = resolvedGuild.name;
+    }
+
     if (!targetGuildId && !targetGuild) return null;
+
+    // Repair legacy tracker values such as targetGuildId: "PLAC" after resolving the actual SBI ID.
+    if (config && typeof guildOrConfig === 'object' && targetGuildId) {
+        const configuredNameIsReference = Boolean(parseGuildReference(config.targetGuild).id);
+        const idChanged = String(config.targetGuildId || '').trim() !== targetGuildId;
+        const nameChanged = Boolean(targetGuild && (configuredNameIsReference || !String(config.targetGuild || '').trim()) &&
+            String(config.targetGuild || '').trim() !== targetGuild);
+        if (idChanged || nameChanged) {
+            config.targetGuildId = targetGuildId;
+            if (targetGuild && (configuredNameIsReference || !String(config.targetGuild || '').trim())) config.targetGuild = targetGuild;
+            try { saveData(); }
+            catch (error) { console.warn('⚠️ [GuildResolver] ไม่สามารถบันทึก ID ที่ resolve แล้วได้: ' + String(error?.message || error)); }
+            console.log('✅ [GuildResolver] อัปเดต Tracker: กิลด์="' + (targetGuild || targetGuildId) + '" | Guild ID=' + targetGuildId);
+        }
+    }
 
     const scopeKey = String(targetGuildId || targetGuild).trim().toLowerCase();
     const sourceByScope = fetchGuildRecentBattles._lastSourceByScope ||
@@ -2646,7 +2761,7 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
                         lastDetail = (status ? 'HTTP ' + status : String(error?.code || error?.message || 'request failed')) +
                             (responseDetail ? ' | API=' + responseDetail : '');
                         console.warn('⚠️ [Official API สำรอง] Endpoint=' + (url.includes('gameinfo-sgp') ? 'Asia' : 'Global') +
-                            ' | offset=' + offset + ' | กิลด์=' + (targetGuild || targetGuildId) + ' | สาเหตุ=' + lastDetail);
+                            ' | offset=' + offset + ' | กิลด์=' + (targetGuild || '-') + ' | Guild ID=' + targetGuildId + ' | สาเหตุ=' + lastDetail);
                         if (Number(status) === 429) {
                             const waitMs = Math.max(retryAfterMs(error), 60000);
                             officialApiRateLimitedUntil = Math.max(officialApiRateLimitedUntil, Date.now() + waitMs);
