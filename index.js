@@ -2754,6 +2754,12 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
                 let endpointHadError = false;
                 const endpointName = url.includes('gameinfo-sgp') ? 'Asia' : 'Global';
                 for (const offset of [0, 51]) {
+                    if (officialApiRateLimitedUntil > Date.now()) {
+                        endpointHadError = true;
+                        lastDetail = 'พักตาม Rate Limit ก่อนเรียกหน้าถัดไป';
+                        console.warn('⏸️ [Official API หลัก] หยุด pagination ชั่วคราวเพราะมี Rate Limit hold อยู่');
+                        break;
+                    }
                     const requestStartedAt = Date.now();
                     try {
                         const response = await axios.get(url, {
