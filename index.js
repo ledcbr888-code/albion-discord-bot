@@ -2617,12 +2617,13 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
             ];
             for (const url of urls) {
                 const endpointIds = new Set();
-                for (const offset of [0, 100]) {
+                for (const offset of [0, 51]) {
                     try {
                         const response = await axios.get(url, {
                             timeout: 10000,
                             headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
-                            params: { range: 'week', offset, limit: 100, sort: 'recent', guildId: targetGuildId }
+                            // Official GameInfo battles endpoint uses bounded pagination; avoid unsupported range/max-limit values.
+                            params: { offset, limit: 51, sort: 'recent', guildId: targetGuildId }
                         });
                         if (!Array.isArray(response.data)) {
                             lastDetail = 'รูปแบบข้อมูลไม่ถูกต้อง';
@@ -2635,11 +2636,15 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
                         }
                         console.log('ℹ️ [Official API สำรอง] Endpoint=' + (url.includes('gameinfo-sgp') ? 'Asia' : 'Global') +
                             ' | offset=' + offset + ' | ได้ ' + response.data.length + ' รายการ');
-                        if (response.data.length < 100) break;
+                        if (response.data.length < 51) break;
                     } catch (error) {
                         const status = error?.response?.status || error?.statusCode;
-                        lastDetail = status ? 'HTTP ' + status : String(error?.code || error?.message || 'request failed')
-                            .replace(/https?:\/\/\S+/gi, '[URL]').slice(0, 140);
+                        const responseBody = error?.response?.data;
+                        const responseDetail = responseBody == null ? '' :
+                            (typeof responseBody === 'string' ? responseBody : JSON.stringify(responseBody))
+                                .replace(/https?:\/\/\S+/gi, '[URL]').replace(/\s+/g, ' ').slice(0, 180);
+                        lastDetail = (status ? 'HTTP ' + status : String(error?.code || error?.message || 'request failed')) +
+                            (responseDetail ? ' | API=' + responseDetail : '');
                         console.warn('⚠️ [Official API สำรอง] Endpoint=' + (url.includes('gameinfo-sgp') ? 'Asia' : 'Global') +
                             ' | offset=' + offset + ' | กิลด์=' + (targetGuild || targetGuildId) + ' | สาเหตุ=' + lastDetail);
                         if (Number(status) === 429) {
