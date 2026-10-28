@@ -41,6 +41,8 @@ jobs:
           fi
 
           git cat-file -e "${BEFORE_SHA}^{commit}"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git tag -a "$TAG" "$BEFORE_SHA" -m "Automatic backup of main before commit $AFTER_SHA"
           git push origin "refs/tags/$TAG"
 
