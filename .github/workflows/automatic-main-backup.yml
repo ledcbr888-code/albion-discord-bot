@@ -6,39 +6,52 @@ on:
       - main
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   backup-previous-main:
-    name: Save previous main commit
+    name: Archive previous main commit
     if: github.event.before != '0000000000000000000000000000000000000000'
     runs-on: ubuntu-latest
     steps:
-      - name: Create immutable backup tag for previous main through GitHub API
+      - name: Checkout previous main commit
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.before }}
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Create source archive and checksum
         shell: bash
         env:
           BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.event.after }}
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
-          if [[ ! "$BEFORE_SHA" =~ ^[0-9a-f]{40}$ ]] || [[ "$BEFORE_SHA" =~ ^0+$ ]]; then
-            echo "::notice::No valid previous main commit was supplied; nothing to back up."
-            exit 0
-          fi
+          BACKUP_DIR="$RUNNER_TEMP/main-backup"
+          mkdir -p "$BACKUP_DIR"
+          ARCHIVE="$BACKUP_DIR/albion-discord-bot-main-before-$BEFORE_SHA.tar.gz"
 
-          TAG="backup-main-before-${AFTER_SHA:0:12}"
-          REF_PATH="repos/${GITHUB_REPOSITORY}/git/ref/tags/$TAG"
+          # Archive the exact previous main tree; exclude Git internals.
+          tar --exclude='./.git' -czf "$ARCHIVE" -C "$GITHUB_WORKSPACE" .
+          test -s "$ARCHIVE"
 
-          # Make reruns idempotent: never overwrite an existing backup tag.
-          if gh api "$REF_PATH" >/dev/null 2>&1; then
-            echo "::notice::Backup tag $TAG already exists; leaving it unchanged."
-            exit 0
-          fi
+          {
+            echo "repository=$GITHUB_REPOSITORY"
+            echo "main_before_sha=$BEFORE_SHA"
+            echo "main_after_push_sha=$AFTER_SHA"
+            echo "backup_created_utc=$(date -u +'%Y-%m-%dT%H:%M:%SZ')"
+            echo "archive_sha256=$(sha256sum "$ARCHIVE" | awk '{print $1}')"
+          } > "$BACKUP_DIR/manifest.txt"
 
-          gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
-            -f "ref=refs/tags/$TAG" \
-            -f "sha=$BEFORE_SHA" >/dev/null
+          cat "$BACKUP_DIR/manifest.txt"
 
-          echo "::notice::Created $TAG pointing to previous main commit $BEFORE_SHA"
+      - name: Upload automatic backup artifact
+        uses: actions/upload-artifact@v7.0.2
+        with:
+          name: main-backup-before-${{ github.event.after }}
+          path: ${{ runner.temp }}/main-backup/
+          if-no-files-found: error
+          retention-days: 90
+          compression-level: 0
