@@ -1,0 +1,47 @@
+name: Automatic backup before every main update
+
+on:
+  push:
+    branches:
+      - main
+
+permissions:
+  contents: write
+
+jobs:
+  backup-previous-main:
+    name: Save previous main commit
+    if: github.event.before != '0000000000000000000000000000000000000000'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout complete repository history
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.after }}
+          fetch-depth: 0
+
+      - name: Create immutable backup tag for previous main
+        shell: bash
+        env:
+          BEFORE_SHA: ${{ github.event.before }}
+          AFTER_SHA: ${{ github.event.after }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$BEFORE_SHA" =~ ^[0-9a-f]{40}$ ]] || [[ "$BEFORE_SHA" =~ ^0+$ ]]; then
+            echo "::notice::No valid previous main commit was supplied; nothing to back up."
+            exit 0
+          fi
+
+          TAG="backup-main-before-${AFTER_SHA:0:12}"
+
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "::notice::Backup tag $TAG already exists; leaving it unchanged."
+            exit 0
+          fi
+
+          git cat-file -e "${BEFORE_SHA}^{commit}"
+          git tag -a "$TAG" "$BEFORE_SHA" -m "Automatic backup of main before commit $AFTER_SHA"
+          git push origin "refs/tags/$TAG"
+
+          echo "::notice::Created $TAG pointing to previous main commit $BEFORE_SHA"
