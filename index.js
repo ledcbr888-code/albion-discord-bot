@@ -984,7 +984,7 @@ async function fetchOfficialBattle(matchId, options = {}) {
 async function fetchOfficialBattleEventsFallback(matchId, options = {}) {
     const key = String(matchId || '').trim();
     const targetGuild = String(options?.targetGuild || '').trim();
-    if (!/^\\d+$/.test(key) || !targetGuild) return null;
+    if (!/^\d+$/.test(key) || !targetGuild) return null;
 
     const validateForTarget = data => {
         if (!data) return null;
@@ -2848,7 +2848,7 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
     const queueEventHints = (ids, confirmedBattleIds = null) => {
         if (baselineOnly) return 0;
         const normalized = [...new Set((Array.isArray(ids) ? ids : [])
-            .map(id => String(id || '').trim()).filter(id => /^\\d+$/.test(id)))];
+            .map(id => String(id || '').trim()).filter(id => /^\d+$/.test(id)))];
         const eventQueue = pendingEventsByScope.get(queueScopeKey) || new Map();
         const confirmed = new Set(Array.isArray(confirmedBattleIds) ? confirmedBattleIds.map(String) : []);
         const now = Date.now();
@@ -3347,7 +3347,7 @@ async function checkAutoBattlesForGuild() {
             }
             for (const [idValue, queued] of pendingEventQueue.entries()) {
                 const id = String(idValue || '');
-                if (!/^\\d+$/.test(id) || candidateMeta.has(id) || processedBattles.has(id)) continue;
+                if (!/^\d+$/.test(id) || candidateMeta.has(id) || processedBattles.has(id)) continue;
                 candidateMeta.set(id, {
                     firstSeenAt: Number(queued?.firstSeenAt) || battleListObservedAt,
                     source: queued?.source || 'Official GameInfo Events (event-only hint)',
@@ -3360,7 +3360,7 @@ async function checkAutoBattlesForGuild() {
             const newMatchIds = [...candidateMeta.keys()]
                 .filter(id => !processedBattles.has(String(id)))
                 .filter(id => (detailRetryStates.get(String(id))?.nextRetryAt || 0) <= retryCheckAt)
-                // Prioritize never-failed IDs ahead of older 404/retry candidates to avoid starvation.
+                // Prioritize confirmed Battle List IDs first; within each source, fresh IDs run before retries.
                 .sort((a, b) => {
                     const eventOnlyA = candidateMeta.get(String(a))?.eventOnly === true ? 1 : 0;
                     const eventOnlyB = candidateMeta.get(String(b))?.eventOnly === true ? 1 : 0;
