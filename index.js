@@ -2541,6 +2541,15 @@ function extractBattleIdsFromHtml(html, targetGuild = '') {
     return [...ids];
 }
 
+function getAutoBattleQueueScopeKey(config = {}, targetGuildId = '', targetGuild = '') {
+    const serverId = String(config?.guildId || currentGuildId() || 'global').trim();
+    const configuredGuildId = parseGuildReference(config?.targetGuildId || '').id;
+    const configuredTarget = parseGuildReference(config?.targetGuild || '');
+    const resolvedId = String(targetGuildId || configuredGuildId || configuredTarget.id || '').trim();
+    const targetName = String(targetGuild || configuredTarget.name || config?.targetGuild || config?.targetGuildId || '').trim();
+    return serverId + ':' + (resolvedId || targetName).toLowerCase();
+}
+
 async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
     const baselineOnly = options?.baselineOnly === true;
     const config = guildOrConfig && typeof guildOrConfig === 'object' ? guildOrConfig : {};
@@ -2578,10 +2587,11 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
     }
 
     const scopeKey = String(targetGuildId || targetGuild).trim().toLowerCase();
+    const queueScopeKey = getAutoBattleQueueScopeKey(config, targetGuildId, targetGuild);
     const sourceByScope = fetchGuildRecentBattles._lastSourceByScope ||
         (fetchGuildRecentBattles._lastSourceByScope = new Map());
-    const setSource = source => sourceByScope.set(scopeKey, source);
-    const pendingIds = fetchGuildRecentBattles._pendingMatchIds ||
+    const setSource = source => sourceByScope.set(queueScopeKey, source);
+    const pendingByScope = fetchGuildRecentBattles._pendingMatchIds ||
         (fetchGuildRecentBattles._pendingMatchIds = new Map());
     const queueCandidates = (ids, source) => {
         setSource(source);
@@ -2589,12 +2599,12 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
             .map(id => String(id || '').trim())
             .filter(id => /^\d+$/.test(id)))];
         if (baselineOnly) return normalized;
+        const pendingIds = pendingByScope.get(queueScopeKey) || new Map();
         const next = new Map();
         for (const id of normalized) {
             if (!processedBattles.has(id)) next.set(id, pendingIds.get(id) || { firstSeenAt: Date.now() });
         }
-        // Keep unresolved IDs in the queue even if they are no longer in the latest
-        // visible API results, so a temporary detail failure cannot silently drop a fight.
+        // Preserve unresolved IDs only inside this Discord-server + target-guild queue.
         for (const [id, metadata] of pendingIds.entries()) {
             if (!processedBattles.has(id) && !next.has(id)) next.set(id, metadata);
         }
@@ -2609,8 +2619,9 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
             next.delete(oldestId);
             dropped++;
         }
-        fetchGuildRecentBattles._pendingMatchIds = next;
-        if (dropped) console.warn('⚠️ [Auto-Battle Queue] คิวเกิน 1,000 Match ID; ตัดรายการเก่าที่สุดออก ' + dropped + ' รายการ');
+        pendingByScope.set(queueScopeKey, next);
+        if (dropped) console.warn('⚠️ [Auto-Battle Queue] คิว Tracker=' + queueScopeKey +
+            ' เกิน 1,000 Match ID; ตัดรายการเก่าที่สุดออก ' + dropped + ' รายการ');
         return [...next.keys()];
     };
     console.log('🔄 Auto-Battle source: Official Albion GameInfo API ONLY | Server=Asia' +
@@ -2620,7 +2631,7 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
         const source = 'Official Albion API unavailable: Guild ID required';
         setSource(source);
         console.warn('⚠️ [Official API หลัก] ไม่สามารถค้นหาไฟต์ได้ เพราะไม่มี Guild ID ที่ผ่านการตรวจสอบ | กิลด์=' + (targetGuild || 'ไม่ทราบชื่อ'));
-        return queueCandidates([], source);
+        return baselineOnly ? null : queueCandidates([], source);
     }
 
     // Official GameInfo is the sole source for Auto-Battle Match ID discovery.
@@ -2736,34 +2747,62 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
     const source = 'Official Albion API unavailable';
     setSource(source);
     console.warn('⚠️ [Auto-Battle] Official Albion GameInfo API ใช้งานไม่ได้; รอบนี้จะไม่เรียกแหล่งข้อมูลอื่น และจะตรวจใหม่ในรอบถัดไป');
-    return queueCandidates([], source);
+    return baselineOnly ? null : queueCandidates([], source);
 }
 
 async function primeAutoBattleHistoryForGuild(configs = autoBattleConfigs) {
-    // IMPORTANT: the recent-battles page contains historical fights. When a
-    // tracker is created for the first time (or after an upgrade with no saved
-    // history), mark everything currently visible as already seen. Only fights
-    // that appear after this baseline are eligible for an alert.
+    // Initialize a baseline only once per tracker. On restart, keep the prior
+    // baseline so battles that appeared during downtime remain eligible to report.
     let added = 0;
+    let changed = false;
+    const hadHistoricalProcessedIds = processedBattles.size > 0;
     for (const config of configs) {
+        if (!config || config.baselineInitialized === true) continue;
+
+        // Existing configs from older versions had no marker. If persisted
+        // processed IDs exist, preserve their history instead of re-baselining
+        // and accidentally swallowing fights that happened while the bot was down.
+        if (typeof config.baselineInitialized !== 'boolean' && hadHistoricalProcessedIds) {
+            config.baselineInitialized = true;
+            changed = true;
+            console.log('ℹ️ Auto-Battle legacy baseline state preserved for ' +
+                String(config.targetGuild || config.targetGuildId || 'unknown') +
+                '; existing processed Match IDs found, skipping restart baseline.');
+            continue;
+        }
+
         try {
             const recentMatches = await fetchGuildRecentBattles(config, { baselineOnly: true });
+            if (!Array.isArray(recentMatches)) {
+                console.warn('⚠️ Auto-Battle baseline pending for ' +
+                    String(config.targetGuild || config.targetGuildId || 'unknown') +
+                    '; Official API unavailable, will retry without marking the tracker initialized.');
+                continue;
+            }
             for (const id of recentMatches) {
-                const key = String(id);
-                if (!processedBattles.has(key)) {
+                const key = String(id || '').trim();
+                if (/^\d+$/.test(key) && !processedBattles.has(key)) {
                     processedBattles.add(key);
                     added++;
                 }
             }
+            config.baselineInitialized = true;
+            changed = true;
+            console.log('✅ Auto-Battle baseline initialized for ' +
+                String(config.targetGuild || config.targetGuildId || 'unknown') +
+                ': marked ' + recentMatches.length + ' existing battle(s) as already seen.');
         } catch (err) {
-            console.warn(`⚠️ Auto-Battle baseline failed for ${config.targetGuild}: ${err.message}`);
+            console.warn('⚠️ Auto-Battle baseline failed for ' +
+                String(config.targetGuild || config.targetGuildId || 'unknown') + ': ' +
+                String(err?.message || err));
         }
     }
 
     if (processedBattles.size > 1000) {
         processedBattles = new Set([...processedBattles].slice(-1000));
+        changed = true;
     }
-    if (added > 0) saveData();
+    if (added > 0 || changed) saveData();
     return added;
 }
 
@@ -2820,17 +2859,25 @@ async function checkAutoBattlesForGuild() {
             }
             missingScopeWarnings.delete(missingTrackingScopeKey);
 
+            if (config.baselineInitialized !== true) {
+                // Never process this tracker until a valid baseline has been stored.
+                // If the API is unavailable, the next scheduled poll retries initialization.
+                await primeAutoBattleHistoryForGuild([config]);
+                continue;
+            }
+
             const recentMatches = await fetchGuildRecentBattles(config);
             if (!Array.isArray(recentMatches) || !recentMatches.length) continue;
             const battleListObservedAt = Date.now();
             const candidateMeta = new Map();
+            const pendingQueueScopeKey = getAutoBattleQueueScopeKey(config);
             for (const idValue of recentMatches) {
                 const id = String(idValue || '');
                 if (!/^\d+$/.test(id) || candidateMeta.has(id)) continue;
-                const queued = fetchGuildRecentBattles._pendingMatchIds?.get(id);
+                const queued = fetchGuildRecentBattles._pendingMatchIds?.get(pendingQueueScopeKey)?.get(id);
                 candidateMeta.set(id, {
                     firstSeenAt: Number(queued?.firstSeenAt) || battleListObservedAt,
-                    source: fetchGuildRecentBattles._lastSourceByScope?.get(String(config.targetGuildId || config.targetGuild || '').trim().toLowerCase()) || 'Official GameInfo Battle List'
+                    source: fetchGuildRecentBattles._lastSourceByScope?.get(pendingQueueScopeKey) || 'Official GameInfo Battle List'
                 });
             }
             const detailRetryStates = checkAutoBattlesForGuild._detailRetryStates ||
@@ -3054,9 +3101,8 @@ async function checkAutoBattlesForGuild() {
                 }
             }
 
-            if (processedBattles.size > 300) {
-                const arr = [...processedBattles];
-                processedBattles = new Set(arr.slice(150));
+            if (processedBattles.size > 1000) {
+                processedBattles = new Set([...processedBattles].slice(-1000));
             }
         }
     } catch (err) {
@@ -5866,6 +5912,12 @@ client.on('interactionCreate', async interaction => {
                 (targetGuildId && c.targetGuildId === targetGuildId) ||
                 (guildName && (c.targetGuild || '').toLowerCase() === guildName.toLowerCase())
             );
+            const existingConfig = duplicateIndex >= 0 ? existingConfigs[duplicateIndex] : null;
+            const baselineAlreadyInitialized = existingConfig
+                ? (typeof existingConfig.baselineInitialized === 'boolean'
+                    ? existingConfig.baselineInitialized
+                    : processedBattles.size > 0)
+                : false;
 
             const configData = {
                 guildId: interaction.guildId,
@@ -5873,6 +5925,7 @@ client.on('interactionCreate', async interaction => {
                 targetGuild: guildName,
                 targetGuildId: targetGuildId || undefined,
                 minFrames: minFrames,
+                baselineInitialized: baselineAlreadyInitialized,
                 createdAt: new Date().toISOString()
             };
 
@@ -5895,22 +5948,32 @@ client.on('interactionCreate', async interaction => {
                 console.error(`❌ Auto-Battle config persistence error for ${guildLabel}:`, saveErr.message);
             }
 
-            // Baseline asynchronously after the interaction has completed.
-            void (async () => {
-                try {
-                    const recentMatches = await fetchGuildRecentBattles(configData, { baselineOnly: true });
-                    const existingIds = [...new Set(
-                        (Array.isArray(recentMatches) ? recentMatches : []).map(String).filter(Boolean)
-                    )];
-                    // Treat every battle already visible when this tracker is configured
-                    // as history. Never leave an older Match ID eligible for a new alert.
-                    for (const id of existingIds) processedBattles.add(id);
-                    saveData();
-                    console.log(`✅ Auto-Battle baseline completed for ${guildLabel}${targetGuildId ? ` (${targetGuildId})` : ''}: marked ${existingIds.length} existing battle(s) as already seen.`);
-                } catch (err) {
-                    console.warn(`⚠️ Auto-Battle baseline failed for ${guildLabel}: ${err.message}`);
-                }
-            })();
+            // Establish a baseline only for a new/uninitialized tracker. Keep the
+            // marker false if the API is unavailable so scheduled polling can retry.
+            if (configData.baselineInitialized !== true) {
+                void (async () => {
+                    try {
+                        const recentMatches = await fetchGuildRecentBattles(configData, { baselineOnly: true });
+                        if (!Array.isArray(recentMatches)) {
+                            console.warn('⚠️ Auto-Battle baseline pending for ' + guildLabel +
+                                '; Official API unavailable. The tracker will retry initialization on the next poll.');
+                            return;
+                        }
+                        const existingIds = [...new Set(
+                            recentMatches.map(id => String(id || '').trim()).filter(id => /^\d+$/.test(id))
+                        )];
+                        for (const id of existingIds) processedBattles.add(id);
+                        configData.baselineInitialized = true;
+                        saveData();
+                        console.log('✅ Auto-Battle baseline initialized for ' + guildLabel +
+                            (targetGuildId ? ' (' + targetGuildId + ')' : '') +
+                            ': marked ' + existingIds.length + ' existing battle(s) as already seen.');
+                    } catch (err) {
+                        console.warn('⚠️ Auto-Battle baseline failed for ' + guildLabel + ': ' +
+                            String(err?.message || err));
+                    }
+                })();
+            }
 
             return;
         }
