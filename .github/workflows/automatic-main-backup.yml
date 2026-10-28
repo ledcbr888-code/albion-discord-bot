@@ -18,7 +18,7 @@ jobs:
         uses: actions/checkout@v7
         with:
           ref: ${{ github.event.after }}
-          fetch-depth: 0
+          fetch-depth: 1
 
       - name: Create immutable backup tag for previous main
         shell: bash
@@ -40,6 +40,8 @@ jobs:
             exit 0
           fi
 
+          # Fetch only the previous main commit rather than cloning all repository history.
+          git fetch --no-tags --depth=1 origin "$BEFORE_SHA"
           git cat-file -e "${BEFORE_SHA}^{commit}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
