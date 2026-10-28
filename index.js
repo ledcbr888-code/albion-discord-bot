@@ -496,6 +496,30 @@ function getApiUrls(matchId) {
     ];
 }
 
+
+/**
+ * Validate an official Global Battle response before considering it as an Auto-Battle
+ * fallback for an Asia 404. Match ID, target guild, and a usable player roster must all match.
+ */
+function isValidatedOfficialGlobalBattle(matchId, targetGuild, data) {
+    if (!data || typeof data !== 'object' || !String(targetGuild || '').trim()) return false;
+    const returnedId = data.id ?? data.Id ?? data.battleId ?? data.BattleId;
+    if (String(returnedId ?? '').trim() !== String(matchId ?? '').trim()) return false;
+
+    const rawGuilds = data.guilds ?? data.Guilds;
+    const guildRows = Array.isArray(rawGuilds)
+        ? rawGuilds
+        : (rawGuilds && typeof rawGuilds === 'object' ? Object.values(rawGuilds) : []);
+    const guildNames = guildRows
+        .map(guild => typeof guild === 'string' ? guild : (guild?.name ?? guild?.Name ?? ''))
+        .map(name => String(name || '').trim())
+        .filter(Boolean);
+    if (!isExactGuildMatch(targetGuild, guildNames)) return false;
+
+    // Do not accept a Battle payload that has guild labels but no usable player data.
+    return getApiPlayers(data).length > 0;
+}
+
 function extractMainHandInfo(obj) {
     if (!obj || typeof obj !== 'object') return null;
 
@@ -877,7 +901,8 @@ async function fetchOfficialBattleUncached(matchId, options = {}) {
     const autoBattle = options?.autoBattle === true;
     // A 429 is generally shared across regional endpoints. Pause official requests
     // globally rather than retrying every region for every candidate battle.
-    // Auto-Battle trackers are configured for Asia: do not query the unrelated Global detail endpoint.
+    // Auto-Battle always tries Asia first. Only after an Asia 404, the Global endpoint may
+    // be queried once, and its response is rejected unless ID, target guild, and player data match.
     const urls = autoBattle
         ? [`https://gameinfo-sgp.albiononline.com/api/gameinfo/battles/${encodeURIComponent(matchId)}`]
         : getApiUrls(matchId).reverse();
@@ -906,6 +931,37 @@ async function fetchOfficialBattleUncached(matchId, options = {}) {
                             endpoint: url.includes('gameinfo-sgp') ? 'Asia' : 'global',
                             at: Date.now()
                         });
+                    }
+                    if (autoBattle && Number(status) === 404 && String(options?.targetGuild || '').trim()) {
+                        const globalUrl = `https://gameinfo.albiononline.com/api/gameinfo/battles/${encodeURIComponent(matchId)}`;
+                        try {
+                            const globalResponse = await axios.get(globalUrl, {
+                                timeout: 5000,
+                                headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' }
+                            });
+                            if (isValidatedOfficialGlobalBattle(matchId, options.targetGuild, globalResponse.data)) {
+                                console.warn('✅ [Auto-Battle Global fallback] Asia HTTP 404; Global รายละเอียดตรง Match ID=' +
+                                    matchId + ' และกิลด์=' + options.targetGuild + ' พร้อมข้อมูลผู้เล่น จึงรับข้อมูลสำรอง');
+                                return globalResponse.data;
+                            }
+                            const globalId = globalResponse.data?.id ?? globalResponse.data?.Id ??
+                                globalResponse.data?.battleId ?? globalResponse.data?.BattleId ?? 'ไม่ระบุ';
+                            console.warn('⚠️ [Auto-Battle Global fallback] ไม่รับข้อมูลสำรอง Match ID=' + matchId +
+                                ' | Global ตอบกลับแต่ไม่ผ่านการตรวจ ID/กิลด์/รายชื่อผู้เล่น' +
+                                ' | returnedID=' + globalId);
+                        } catch (globalError) {
+                            const globalStatus = Number(globalError?.response?.status || globalError?.statusCode) || 0;
+                            if (globalStatus === 429) {
+                                const waitMs = Math.max(retryAfterMs(globalError), 60000);
+                                officialApiRateLimitedUntil = Math.max(officialApiRateLimitedUntil, Date.now() + waitMs);
+                                console.warn('⏳ [Auto-Battle Global fallback] HTTP 429 | พัก Official API ' +
+                                    Math.ceil(waitMs / 1000) + ' วินาที | Match ID=' + matchId);
+                            } else {
+                                console.warn('ℹ️ [Auto-Battle Global fallback] ไม่สำเร็จ Match ID=' + matchId +
+                                    ' | HTTP=' + (globalStatus || globalError?.code || globalError?.message || 'unknown') +
+                                    ' | คงผล Asia 404 และจะลองใหม่ตาม backoff');
+                            }
+                        }
                     }
                     if (status === 429) {
                         sawRateLimit = true;
@@ -3360,7 +3416,7 @@ async function checkAutoBattlesForGuild() {
                     }
                     if (needsRequest) prefetchBudget.used++;
                     const detailStartedAt = Date.now();
-                    const detail = await fetchOfficialBattle(matchId, { autoBattle: true });
+                    const detail = await fetchOfficialBattle(matchId, { autoBattle: true, targetGuild: config.targetGuild });
                     prefetchedBattleDetails.set(matchId, detail);
                     prefetchedBattleFetchMs.set(matchId, Date.now() - detailStartedAt);
                 }
@@ -3396,7 +3452,7 @@ async function checkAutoBattlesForGuild() {
                         ? null
                         : (hasPrefetchedDetail
                             ? prefetchedBattleDetails.get(detailKey)
-                            : await fetchOfficialBattle(latestMatchId, { autoBattle: true }));
+                            : await fetchOfficialBattle(latestMatchId, { autoBattle: true, targetGuild: config.targetGuild }));
                     battleDetailFetchMs = isEventOnlyCandidate ? 0 : (hasPrefetchedDetail
                         ? (prefetchedBattleFetchMs.get(detailKey) ?? Date.now() - battleProcessingStartedAt)
                         : Date.now() - battleProcessingStartedAt);
@@ -3421,7 +3477,7 @@ async function checkAutoBattlesForGuild() {
                         eventBudget.used++;
                         const eventCandidateStartedAt = Date.now();
                         // Events-only IDs may still have a valid canonical Battle Detail. Try that first.
-                        officialBattle = await fetchOfficialBattle(detailKey, { autoBattle: true });
+                        officialBattle = await fetchOfficialBattle(detailKey, { autoBattle: true, targetGuild: config.targetGuild });
                         if (officialBattle) {
                             detectionSource += ' + Official Battle Detail from Events hint';
                         } else {
