@@ -2821,7 +2821,10 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
                 }
 
                 if (endpointHadResponse) {
-                    const finalIds = bestPartialIds.length > endpointIdsArray.length ? bestPartialIds : endpointIdsArray;
+                    // Union IDs from all attempted official endpoints. When Asia returns a partial
+                    // page and Global succeeds, keep unique IDs from both instead of discarding
+                    // potentially newer matches from the successful fallback.
+                    const finalIds = [...new Set([...bestPartialIds, ...endpointIdsArray])];
                     officialCache.set(targetGuildId, { ids: finalIds, expiresAt: Date.now() + 45000 });
                     while (officialCache.size > 100) officialCache.delete(officialCache.keys().next().value);
                     publishSource(finalIds.length ? 'Official Albion API' : 'Official Albion API (ไม่พบไฟต์)');
