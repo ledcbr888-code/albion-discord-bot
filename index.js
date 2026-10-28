@@ -5619,7 +5619,7 @@ async function processAvaImageMessageInternal(message, fallbackAttachments = [])
         if (!ocr.mapName) {
             // An unreadable screenshot is terminal for this message: do not let the poller OCR it again.
             setAvaMessageState(messageGuildId, message.id, 'unclear', 'OCR could not confidently read map name; user must submit a clearer screenshot.');
-            const exampleImageUrl = 'https://raw.githubusercontent.com/ledcbr888-code/albion-discord-bot/main/assets/AVA.png';
+            const exampleImageUrl = 'https://raw.githubusercontent.com/ledcbr888-code/albion-discord-bot/main/assets/AVAgif.gif';
             const helpEmbed = new EmbedBuilder()
                 .setColor(0xF1C40F)
                 .setTitle('ตัวอย่างรูปที่ชัดเจน / Example of a clear screenshot')
