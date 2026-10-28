@@ -1,0 +1,17 @@
+# Dependencies
+node_modules/
+package-lock.json
+# Sensitive - ห้ามขึ้น GitHub เด็ดขาด
+.env
+.env.local
+.env.production
+.env.*.local
+# OS & Logs
+WebP/
+.DS_Store
+npm-debug.log*
+*.log
+logs/
+# Build
+dist/
+build/ 
