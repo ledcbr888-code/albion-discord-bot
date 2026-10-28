@@ -779,6 +779,8 @@ async function fetchAlbionBBBattleFallback(matchId) {
 // trigger duplicate API bursts during a single polling cycle.
 const battleFetchInFlight = new Map();
 const battleFetchFailureUntil = new Map();
+// Auto-Battle-only failure metadata used to apply a longer backoff to Asia 404s.
+const autoBattleDetailFailure = new Map();
 // GameInfo rate limits are shared across battle IDs, so back off globally.
 let officialApiRateLimitedUntil = 0;
 
@@ -872,14 +874,17 @@ async function fetchOfficialBattleUncached(matchId, options = {}) {
     const autoBattle = options?.autoBattle === true;
     // A 429 is generally shared across regional endpoints. Pause official requests
     // globally rather than retrying every region for every candidate battle.
-    const urls = getApiUrls(matchId).reverse();
+    // Auto-Battle trackers are configured for Asia: do not query the unrelated Global detail endpoint.
+    const urls = autoBattle
+        ? [`https://gameinfo-sgp.albiononline.com/api/gameinfo/battles/${encodeURIComponent(matchId)}`]
+        : getApiUrls(matchId).reverse();
     let sawRateLimit = false;
     if (officialApiRateLimitedUntil > Date.now()) {
         console.log('⏭️ Official battle API cooldown active for ' + Math.ceil((officialApiRateLimitedUntil - Date.now()) / 1000) + 's' + (autoBattle ? '; Auto-Battle จะลองใหม่ในรอบถัดไปสำหรับ ' : '; trying public fallbacks for ') + matchId + '.');
     } else {
         const maxAttempts = autoBattle ? 1 : 2;
         for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-            const requestUrls = urls; // Auto-Battle can try both Official endpoints, but no third-party details.
+            const requestUrls = urls; // Auto-Battle uses Asia only; shared lookups retain their existing regional fallback behavior.
             for (let endpointIndex = 0; endpointIndex < requestUrls.length; endpointIndex++) {
                 const url = requestUrls[endpointIndex];
                 try {
@@ -892,6 +897,13 @@ async function fetchOfficialBattleUncached(matchId, options = {}) {
                     console.warn('⚠️ Official battle API returned an unexpected payload for ' + matchId + ' from ' + (url.includes('gameinfo-sgp') ? 'Asia' : 'global') + '.');
                 } catch (err) {
                     const status = err.response?.status;
+                    if (autoBattle) {
+                        autoBattleDetailFailure.set('autoBattle:' + String(matchId), {
+                            status: Number(status) || 0,
+                            endpoint: url.includes('gameinfo-sgp') ? 'Asia' : 'global',
+                            at: Date.now()
+                        });
+                    }
                     if (status === 429) {
                         sawRateLimit = true;
                         const waitMs = Math.max(retryAfterMs(err), 60000);
@@ -910,7 +922,10 @@ async function fetchOfficialBattleUncached(matchId, options = {}) {
     }
 
     if (autoBattle) {
-        console.warn('⚠️ [Auto-Battle] Official GameInfo ยังไม่มีรายละเอียด Match ID=' + matchId + ' หรือ API ตอบไม่สำเร็จ; จะลองใหม่รอบถัดไป โดยไม่เรียก AlbionBB fallback.');
+        const failure = autoBattleDetailFailure.get('autoBattle:' + String(matchId));
+        console.warn('⚠️ [Auto-Battle] Official GameInfo Asia ยังไม่มีรายละเอียด Match ID=' + matchId +
+            (failure?.status ? ' | HTTP=' + failure.status : '') +
+            ' | จะลองใหม่ตาม backoff โดยไม่เรียก AlbionBB fallback.');
         return null;
     }
 
@@ -941,10 +956,12 @@ async function fetchOfficialBattle(matchId, options = {}) {
     if (battleFetchInFlight.has(cacheKey)) return battleFetchInFlight.get(cacheKey);
     const blockedUntil = battleFetchFailureUntil.get(cacheKey) || 0;
     if (blockedUntil > Date.now()) { console.log('⏭️ Reusing recent failed lookup for Match ID ' + key + '; will retry after cooldown.'); return null; }
+    if (autoBattle) autoBattleDetailFailure.delete(cacheKey);
     const task = fetchOfficialBattleUncached(key, options)
         .then(data => {
             if (data) {
                 battleFetchFailureUntil.delete(cacheKey);
+                if (autoBattle) autoBattleDetailFailure.delete(cacheKey);
                 if (autoBattle) {
                     const guildRows = data.guilds ? (Array.isArray(data.guilds) ? data.guilds : Object.values(data.guilds)) : [];
                     if (guildRows.some(guild => Boolean(guild?.name || guild?.Name))) {
@@ -2606,11 +2623,19 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
         const pendingIds = pendingByScope.get(queueScopeKey) || new Map();
         const next = new Map();
         for (const id of normalized) {
-            if (!processedBattles.has(id)) next.set(id, pendingIds.get(id) || { firstSeenAt: Date.now(), source });
+            if (processedBattles.has(id)) continue;
+            const previous = pendingIds.get(id);
+            next.set(id, {
+                firstSeenAt: Number(previous?.firstSeenAt) || Date.now(),
+                source
+            });
         }
-        // Preserve unresolved IDs only inside this Discord-server + target-guild queue.
+        // Events-only hints are provisional, not report candidates. Drop any legacy hint-only
+        // entries and retain only unresolved IDs discovered from an authoritative Battle List.
         for (const [id, metadata] of pendingIds.entries()) {
-            if (!processedBattles.has(id) && !next.has(id)) next.set(id, metadata);
+            if (processedBattles.has(id) || next.has(id)) continue;
+            if (String(metadata?.source || '').includes('Events')) continue;
+            next.set(id, metadata);
         }
         let dropped = 0;
         while (next.size > 1000) {
@@ -2863,59 +2888,49 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
         }
     };
 
-    // Run both Official discovery paths concurrently. Normal polling can return
-    // immediately when /events exposes a new BattleId; the /battles request continues
-    // in the background to refresh its cache for coverage on later polls.
+    // Events are provisional hints only. A BattleId becomes a report candidate only after
+    // it appears in the authoritative /battles list for this guild.
     const eventPromise = fetchRecentEventBattleIds();
     const officialPromise = fetchOfficial({ silentSource: true }).catch(error => {
         console.warn('⚠️ [Official API หลัก] การค้นหา Battle List ล้มเหลว: ' + String(error?.message || error));
         return null;
     });
-    const eventResult = await eventPromise;
-    const eventIds = eventResult?.valid && Array.isArray(eventResult.ids) ? eventResult.ids : [];
-
-    if (!baselineOnly && eventIds.length) {
-        const cachedBattleList = officialCache.get(targetGuildId);
-        const cachedBattleIds = cachedBattleList && cachedBattleList.expiresAt > Date.now() &&
-            Array.isArray(cachedBattleList.ids) ? cachedBattleList.ids : [];
-        const combinedIds = [...new Set([...eventIds, ...cachedBattleIds])];
-        const source = 'Official GameInfo Events (early detection)';
-        setSource(source);
-        console.log('🚀 [Auto-Battle Early Detection] Guild=' + (targetGuild || targetGuildId) +
-            ' | Battle IDs จาก Events=' + eventIds.length +
-            ' | IDs จาก Battle List cache=' + cachedBattleIds.length +
-            ' | ส่ง candidates เข้าคิวโดยไม่รอ Battle List request');
-        // When the background Battle List request completes, add its IDs to the same
-        // scoped queue so IDs discovered only there are still processed on a later poll.
-        void officialPromise.then(backgroundIds => {
-            if (!Array.isArray(backgroundIds)) return;
-            queueCandidates(backgroundIds, 'Official GameInfo Battle List (background after Events)');
-            console.log('ℹ️ [Auto-Battle Queue] เพิ่ม Match ID จาก Battle List เบื้องหลังเข้าคิว Tracker=' +
-                queueScopeKey + ' | รายการจาก API=' + backgroundIds.length);
-        }).catch(error => {
-            console.warn('⚠️ [Auto-Battle Queue] เก็บ Battle List เบื้องหลังไม่สำเร็จ | Tracker=' +
-                queueScopeKey + ' | Error=' + String(error?.message || error));
-        });
-        return queueCandidates(combinedIds, source);
-    }
 
     const officialIds = await officialPromise;
     if (Array.isArray(officialIds)) {
-        const combinedIds = [...new Set([...officialIds, ...eventIds])];
-        const source = eventIds.length
-            ? 'Official Albion Events + Battle List'
-            : (officialIds.length ? 'Official Albion API PRIMARY' : 'Official Albion API PRIMARY (ไม่พบไฟต์ที่ตรงกิลด์)');
+        const source = officialIds.length
+            ? 'Official GameInfo Battle List'
+            : 'Official GameInfo Battle List (ไม่พบไฟต์ที่ตรงกิลด์)';
         setSource(source);
-        return queueCandidates(combinedIds, source);
+
+        // Do not block the polling cycle on /events. Compare its hints in the background,
+        // but never enqueue IDs that are absent from /battles.
+        void eventPromise.then(eventResult => {
+            if (!eventResult?.valid || !Array.isArray(eventResult.ids) || !eventResult.ids.length) return;
+            const battleListIds = new Set(officialIds.map(String));
+            const confirmed = eventResult.ids.filter(id => battleListIds.has(String(id))).length;
+            const provisionalOnly = eventResult.ids.length - confirmed;
+            console.log('ℹ️ [Auto-Battle Event Hints] Guild=' + (targetGuild || targetGuildId) +
+                ' | Events Battle IDs=' + eventResult.ids.length +
+                ' | ยืนยันใน Battle List=' + confirmed +
+                ' | รอ Battle List ยืนยัน=' + provisionalOnly +
+                ' | ไม่ส่ง Event-only IDs เข้าคิวรายงาน');
+        }).catch(error => {
+            console.warn('⚠️ [Auto-Battle Event Hints] ประมวลผล hint ไม่สำเร็จ: ' + String(error?.message || error));
+        });
+
+        return queueCandidates(officialIds, source);
     }
 
-    if (eventResult?.valid) {
-        const source = eventIds.length
-            ? 'Official Albion Events (Battle List unavailable)'
-            : 'Official Albion Events available; no Battle ID in recent events';
+    // If /battles is unavailable, Events can be logged as a hint but cannot independently
+    // populate the report queue because its IDs may return 404 from /battles/{id}.
+    const eventResult = await eventPromise;
+    if (eventResult?.valid && Array.isArray(eventResult.ids) && eventResult.ids.length) {
+        const source = 'Official Albion API unavailable; Events hints waiting for Battle List';
         setSource(source);
-        if (eventIds.length) console.warn('⚠️ [Auto-Battle] ใช้ Battle ID จาก Events เพราะ Battle List ใช้งานไม่ได้');
-        return queueCandidates(eventIds, source);
+        console.warn('⚠️ [Auto-Battle] พบ Event Battle ID=' + eventResult.ids.length +
+            ' แต่ Battle List ใช้งานไม่ได้; ยังไม่ส่ง IDs เข้าคิวจนกว่า /battles จะยืนยัน');
+        return baselineOnly ? null : queueCandidates([], source);
     }
 
     const source = 'Official Albion API unavailable';
@@ -3002,7 +3017,11 @@ function scheduleAutoBattleDetailRetry(matchId, reason) {
     const key = String(matchId);
     const previous = retryStates.get(key) || { attempts: 0, hourlyRetry: false };
     const attempts = Math.min(8, (Number(previous.attempts) || 0) + 1);
-    const delays = [60000, 120000, 300000, 600000, 900000, 900000, 900000];
+    const failure = autoBattleDetailFailure.get('autoBattle:' + key);
+    const isAsia404 = Number(failure?.status) === 404 && failure?.endpoint === 'Asia';
+    const delays = isAsia404
+        ? [180000, 300000, 600000, 900000, 900000, 900000, 900000]
+        : [60000, 120000, 300000, 600000, 900000, 900000, 900000];
     const hourlyRetry = previous.hourlyRetry === true || attempts >= 8;
     const waitMs = hourlyRetry ? 60 * 60 * 1000 : delays[Math.min(attempts - 1, delays.length - 1)];
     retryStates.delete(key);
@@ -3069,7 +3088,13 @@ async function checkAutoBattlesForGuild() {
             const newMatchIds = [...candidateMeta.keys()]
                 .filter(id => !processedBattles.has(String(id)))
                 .filter(id => (detailRetryStates.get(String(id))?.nextRetryAt || 0) <= retryCheckAt)
-                .sort((a, b) => candidateMeta.get(String(a)).firstSeenAt - candidateMeta.get(String(b)).firstSeenAt);
+                // Prioritize never-failed IDs ahead of older 404/retry candidates to avoid starvation.
+                .sort((a, b) => {
+                    const attemptsA = Number(detailRetryStates.get(String(a))?.attempts) || 0;
+                    const attemptsB = Number(detailRetryStates.get(String(b))?.attempts) || 0;
+                    return attemptsA - attemptsB ||
+                        candidateMeta.get(String(a)).firstSeenAt - candidateMeta.get(String(b)).firstSeenAt;
+                });
             if (!newMatchIds.length) continue;
 
             // Prefetch at most five battle details concurrently. Report rendering/sending remains
@@ -3136,8 +3161,12 @@ async function checkAutoBattlesForGuild() {
                         ? (prefetchedBattleFetchMs.get(detailKey) ?? Date.now() - battleProcessingStartedAt)
                         : Date.now() - battleProcessingStartedAt;
                 if (!officialBattle) {
-                    scheduleAutoBattleDetailRetry(latestMatchId, 'Official GameInfo ทั้ง Asia/Global ยังไม่มีรายละเอียดหรือ API ตอบไม่สำเร็จ');
-                    console.warn('⚠️ ยังดึงข้อมูล Battle ' + latestMatchId + ' ไม่สำเร็จ; ยังไม่ทำเครื่องหมายว่าเสร็จ | detailFetch=' + battleDetailFetchMs + 'ms | firstSeenAt=' + new Date(battleListFirstSeenAt).toISOString());
+                    const failure = autoBattleDetailFailure.get('autoBattle:' + detailKey);
+                    const failureSummary = Number(failure?.status) === 404
+                        ? 'Official GameInfo Asia HTTP 404; รายละเอียด Battle อาจยังไม่พร้อม'
+                        : 'Official GameInfo Asia ยังไม่มีรายละเอียดหรือ API ตอบไม่สำเร็จ';
+                    scheduleAutoBattleDetailRetry(latestMatchId, failureSummary + ' | Source=' + detectionSource);
+                    console.warn('⚠️ ยังดึงข้อมูล Battle ' + latestMatchId + ' ไม่สำเร็จ; ยังไม่ทำเครื่องหมายว่าเสร็จ | Source=' + detectionSource + ' | detailFetch=' + battleDetailFetchMs + 'ms | firstSeenAt=' + new Date(battleListFirstSeenAt).toISOString());
                     continue;
                 }
 
