@@ -1141,7 +1141,7 @@ async function probeOfficialBattleEvents(matchId, options = {}) {
             uniquePlayerNames: observedPlayerNames.size,
             zeroFameEventCount,
             earliestEventAt: new Date(Math.min(...eventTimes)).toISOString(),
-            complete: true
+            responseWindowComplete: true
         };
         autoBattleEventsProbeCache.set(key, { data: summary, expiresAt: Date.now() + 3 * 60 * 1000 });
         while (autoBattleEventsProbeCache.size > 200) {
@@ -3216,7 +3216,9 @@ async function primeAutoBattleHistoryForGuild(configs = autoBattleConfigs) {
 
 async function checkAutoBattles() {
     checkAutoBattles._detailLookupBudget = { used: 0, limit: 25, startedAt: Date.now() };
-    checkAutoBattles._eventFallbackBudget = { used: 0, limit: 2, startedAt: Date.now() };
+    // Event-only diagnostics are budgeted per Discord-server/target-guild tracker,
+    // so one busy guild cannot consume every other tracker's probe allowance.
+    checkAutoBattles._eventFallbackBudget = new Map();
     const guilds = getAllGuildConfigs();
     for (const { guildId } of guilds) {
         await guildContext.run({ guildId }, async () => {
@@ -3400,12 +3402,21 @@ async function checkAutoBattlesForGuild() {
                         : Date.now() - battleProcessingStartedAt);
 
                     if (isEventOnlyCandidate) {
-                        const eventBudget = checkAutoBattles._eventFallbackBudget ||
-                            (checkAutoBattles._eventFallbackBudget = { used: 0, limit: 2, startedAt: Date.now() });
+                        const eventBudgets = checkAutoBattles._eventFallbackBudget ||
+                            (checkAutoBattles._eventFallbackBudget = new Map());
+                        let eventBudget = eventBudgets.get(pendingQueueScopeKey);
+                        if (!eventBudget) {
+                            eventBudget = { used: 0, limit: 2, quotaLogEmitted: false };
+                            eventBudgets.set(pendingQueueScopeKey, eventBudget);
+                        }
                         if (eventBudget.used >= eventBudget.limit) {
-                            console.log('⏸️ [Auto-Battle Events Probe] ใช้โควตาตรวจ Event-only ครบ ' +
-                                eventBudget.limit + ' Match ID ในรอบนี้แล้ว; เก็บคิวไว้รอบถัดไป | Match ID=' + detailKey);
-                            continue;
+                            if (!eventBudget.quotaLogEmitted) {
+                                console.log('⏸️ [Auto-Battle Events Probe] Tracker=' + pendingQueueScopeKey +
+                                    ' ใช้โควตาตรวจ Event-only ครบ ' + eventBudget.limit +
+                                    ' Match ID ในรอบนี้แล้ว; เก็บ IDs ที่เหลือไว้รอบถัดไป');
+                                eventBudget.quotaLogEmitted = true;
+                            }
+                            break;
                         }
                         eventBudget.used++;
                         const eventCandidateStartedAt = Date.now();
@@ -3419,11 +3430,11 @@ async function checkAutoBattlesForGuild() {
                             const probe = await probeOfficialBattleEvents(detailKey, { targetGuild: config.targetGuild });
                             if (probe) {
                                 console.log('ℹ️ [Auto-Battle Events Probe] Match ID=' + detailKey +
-                                    ' | Events ครบ=' + probe.eventCount +
-                                    ' | Guilds=' + probe.guildNames.length +
-                                    ' | Players ที่ปรากฏใน Events=' + probe.uniquePlayerNames +
-                                    ' | zero-Fame Events=' + probe.zeroFameEventCount +
-                                    ' | ข้อมูลนี้ใช้ยืนยัน Event เท่านั้น ไม่ใช้แทน Battle Detail เพื่อคำนวณ Fame/K/D; เก็บคิวรอ Official Battle Detail');
+                                    ' | Records ที่ API ตอบกลับ=' + probe.eventCount +
+                                    ' | Guilds ที่พบ=' + probe.guildNames.length +
+                                    ' | Players ที่ปรากฏ=' + probe.uniquePlayerNames +
+                                    ' | zero-Fame Records=' + probe.zeroFameEventCount +
+                                    ' | จำนวนนี้ไม่ยืนยันว่าเป็น Events ทั้งไฟต์ และไม่ใช้แทน Battle Detail เพื่อคำนวณ Fame/K/D');
                             }
                         }
                         battleDetailFetchMs = Date.now() - eventCandidateStartedAt;
