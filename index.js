@@ -932,7 +932,10 @@ async function fetchOfficialBattleUncached(matchId, options = {}) {
                             at: Date.now()
                         });
                     }
-                    if (autoBattle && Number(status) === 404 && String(options?.targetGuild || '').trim()) {
+                    // Event-only hints have already failed Battle List validation; a second regional
+                    // request adds latency without evidence of a usable Global Battle. Keep the
+                    // Global fallback for authoritative Battle List candidates only.
+                    if (autoBattle && options?.eventOnly !== true && Number(status) === 404 && String(options?.targetGuild || '').trim()) {
                         const globalUrl = `https://gameinfo.albiononline.com/api/gameinfo/battles/${encodeURIComponent(matchId)}`;
                         try {
                             const globalResponse = await axios.get(globalUrl, {
@@ -3477,7 +3480,7 @@ async function checkAutoBattlesForGuild() {
                         eventBudget.used++;
                         const eventCandidateStartedAt = Date.now();
                         // Events-only IDs may still have a valid canonical Battle Detail. Try that first.
-                        officialBattle = await fetchOfficialBattle(detailKey, { autoBattle: true, targetGuild: config.targetGuild });
+                        officialBattle = await fetchOfficialBattle(detailKey, { autoBattle: true, targetGuild: config.targetGuild, eventOnly: true });
                         if (officialBattle) {
                             detectionSource += ' + Official Battle Detail from Events hint';
                         } else {
