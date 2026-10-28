@@ -5440,7 +5440,7 @@ const commands = [
             .addChannelOption(o => o.setName('channel').setDescription('ห้องที่ต้องการให้แจ้งเตือน').addChannelTypes(ChannelType.GuildText).setRequired(true))
             .addStringOption(o => o.setName('guild').setDescription('ชื่อ Guild ที่ต้องการติดตาม').setRequired(true))
             .addStringOption(o => o.setName('min_frames').setDescription('Fame ขั้นต่ำ เช่น 50K (Fame รวมของรายการติดตาม)').setRequired(true))
-            .addStringOption(o => o.setName('guild_id').setDescription('Guild ID จาก AlbionBB เช่น 0SZ1Nlh7RfmuuuxS0lZ3kw')))
+            .addStringOption(o => o.setName('guild_id').setDescription('Guild ID หรือ URL กิลด์ เช่น https://albiononline.com/killboard/guild/<ID>')))
         .addSubcommand(s => s.setName('list').setDescription('แสดงรายชื่อกิลด์ที่ตั้งค่า Auto-Battle ในเซิร์ฟเวอร์นี้'))
         .addSubcommand(s => s.setName('remove').setDescription('ลบกิลด์ที่ตั้งค่า Auto-Battle ออก')
             .addStringOption(o => o.setName('guild').setDescription('ชื่อ Guild ที่ต้องการยกเลิกติดตาม Auto-Battle').setRequired(true))),
@@ -5946,15 +5946,17 @@ client.on('interactionCreate', async interaction => {
             const guildInput = interaction.options.getString('guild').trim();
             const explicitGuildId = interaction.options.getString('guild_id')?.trim() || '';
             const parsedGuild = parseGuildReference(guildInput);
-            const guildName = parsedGuild.name || guildInput;
-            const targetGuildId = explicitGuildId || parsedGuild.id || '';
+            const parsedExplicitGuildId = parseGuildReference(explicitGuildId);
+            const guildName = parsedGuild.name || (parsedGuild.id ? '' : guildInput);
+            const targetGuildId = parsedExplicitGuildId.id || parsedGuild.id || '';
+            const guildLabel = guildName || targetGuildId || guildInput;
             const minFramesInput = interaction.options.getString('min_frames');
             const minFrames = parseFameValue(minFramesInput);
 
             let existingConfigs = autoBattleConfigs.filter(c => c.guildId === interaction.guildId);
             const duplicateIndex = existingConfigs.findIndex(c =>
                 (targetGuildId && c.targetGuildId === targetGuildId) ||
-                (c.targetGuild || '').toLowerCase() === guildName.toLowerCase()
+                (guildName && (c.targetGuild || '').toLowerCase() === guildName.toLowerCase())
             );
 
             const configData = {
@@ -5967,7 +5969,7 @@ client.on('interactionCreate', async interaction => {
             };
 
             if (duplicateIndex >= 0) {
-                const globalIndex = autoBattleConfigs.findIndex(c => c.guildId === interaction.guildId && ((targetGuildId && c.targetGuildId === targetGuildId) || (c.targetGuild || '').toLowerCase() === guildName.toLowerCase()));
+                const globalIndex = autoBattleConfigs.findIndex(c => c.guildId === interaction.guildId && ((targetGuildId && c.targetGuildId === targetGuildId) || (guildName && (c.targetGuild || '').toLowerCase() === guildName.toLowerCase())));
                 if (globalIndex >= 0) autoBattleConfigs[globalIndex] = configData;
             } else {
                 autoBattleConfigs.push(configData);
@@ -5975,14 +5977,14 @@ client.on('interactionCreate', async interaction => {
             // Acknowledge the Discord interaction before any synchronous file
             // or persistence work. This prevents the command from remaining on
             // "กำลังคิด…" even when the configuration has already been added.
-            await interaction.editReply({ content: `✅ ตั้งค่า **Auto-Battle Tracker** สำเร็จเรียบร้อย!\n- 🌐 เซิร์ฟเวอร์: **EAST (ตายตัว)**\n- 📢 ห้องแจ้งเตือน: <#${channel.id}>\n- 🛡️ กิลด์ที่ติดตาม: **${guildName}**${targetGuildId ? ` (ID: ${targetGuildId})` : ''}\n- 💰 Fame ขั้นต่ำ: **${formatFame(minFrames)}**\n\n📌 *บันทึกการตั้งค่าแล้ว ระบบกำลังเตรียมรายการ Battle เบื้องหลัง และจะตรวจสอบไฟต์ใหม่ทุกๆ 60 วินาทีครับ*` });
+            await interaction.editReply({ content: `✅ ตั้งค่า **Auto-Battle Tracker** สำเร็จเรียบร้อย!\n- 🌐 เซิร์ฟเวอร์: **EAST (ตายตัว)**\n- 📢 ห้องแจ้งเตือน: <#${channel.id}>\n- 🛡️ กิลด์ที่ติดตาม: **${guildLabel}**${targetGuildId ? ` (ID: ${targetGuildId})` : ''}\n- 💰 Fame ขั้นต่ำ: **${formatFame(minFrames)}**\n\n📌 *บันทึกการตั้งค่าแล้ว ระบบกำลังเตรียมรายการ Battle เบื้องหลัง และจะตรวจสอบไฟต์ใหม่ทุกๆ 60 วินาทีครับ*` });
 
             // Persist after Discord has acknowledged the command. The in-memory
             // config is already active for the running scheduler.
             try {
-                if (!saveData()) console.warn(`⚠️ Auto-Battle config saved in memory but persistence failed for ${guildName}.`);
+                if (!saveData()) console.warn(`⚠️ Auto-Battle config saved in memory but persistence failed for ${guildLabel}.`);
             } catch (saveErr) {
-                console.error(`❌ Auto-Battle config persistence error for ${guildName}:`, saveErr.message);
+                console.error(`❌ Auto-Battle config persistence error for ${guildLabel}:`, saveErr.message);
             }
 
             // Baseline asynchronously after the interaction has completed.
@@ -5996,9 +5998,9 @@ client.on('interactionCreate', async interaction => {
                     // as history. Never leave an older Match ID eligible for a new alert.
                     for (const id of existingIds) processedBattles.add(id);
                     saveData();
-                    console.log(`✅ Auto-Battle baseline completed for ${guildName}${targetGuildId ? ` (${targetGuildId})` : ''}: marked ${existingIds.length} existing battle(s) as already seen.`);
+                    console.log(`✅ Auto-Battle baseline completed for ${guildLabel}${targetGuildId ? ` (${targetGuildId})` : ''}: marked ${existingIds.length} existing battle(s) as already seen.`);
                 } catch (err) {
-                    console.warn(`⚠️ Auto-Battle baseline failed for ${guildName}: ${err.message}`);
+                    console.warn(`⚠️ Auto-Battle baseline failed for ${guildLabel}: ${err.message}`);
                 }
             })();
 
