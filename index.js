@@ -2570,6 +2570,10 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
     }
 
     if (!targetGuildId && !targetGuild) return null;
+    if (targetGuildId && !/^[A-Za-z0-9_-]{16,}$/.test(String(targetGuildId))) {
+        console.warn('⚠️ [GuildResolver] ปฏิเสธ Guild ID ที่รูปแบบไม่ถูกต้อง; ต้องเป็น ID ของ Albion ที่ผ่านการตรวจสอบ | Guild=' + (targetGuild || 'ไม่ทราบชื่อ'));
+        targetGuildId = '';
+    }
 
     // Repair legacy tracker values such as targetGuildId: "PLAC" after resolving the actual SBI ID.
     if (config && typeof guildOrConfig === 'object' && targetGuildId) {
@@ -2639,52 +2643,139 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
         (fetchGuildRecentBattles._officialListCache = new Map());
     const officialInFlight = fetchGuildRecentBattles._officialListInFlight ||
         (fetchGuildRecentBattles._officialListInFlight = new Map());
-    const fetchOfficial = async () => {
+    const officialEventCache = fetchGuildRecentBattles._officialEventCache ||
+        (fetchGuildRecentBattles._officialEventCache = new Map());
+    const officialEventInFlight = fetchGuildRecentBattles._officialEventInFlight ||
+        (fetchGuildRecentBattles._officialEventInFlight = new Map());
+
+    // Early warning from the Official Asia kill-event stream. Event BattleId values
+    // are candidates only; the existing official battle-detail validation/report flow
+    // remains authoritative and retries when the Battle record is not ready yet.
+    const fetchRecentEventBattleIds = async () => {
+        const now = Date.now();
+        const cached = officialEventCache.get(targetGuildId);
+        if (cached && cached.expiresAt > now) {
+            return { valid: cached.valid === true, ids: Array.isArray(cached.ids) ? [...cached.ids] : [] };
+        }
+        if (officialEventInFlight.has(targetGuildId)) return await officialEventInFlight.get(targetGuildId);
+        if (officialApiRateLimitedUntil > now) return { valid: false, ids: [] };
+
+        const task = (async () => {
+            if (officialApiRateLimitedUntil > Date.now()) return { valid: false, ids: [] };
+            try {
+                const response = await axios.get('https://gameinfo-sgp.albiononline.com/api/gameinfo/events', {
+                    timeout: 8000,
+                    headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
+                    params: { limit: 51, offset: 0, guildId: targetGuildId }
+                });
+                if (!Array.isArray(response.data)) {
+                    console.warn('⚠️ [Official API Events] รูปแบบข้อมูลไม่ถูกต้อง | Guild=' +
+                        (targetGuild || targetGuildId));
+                    officialEventCache.set(targetGuildId, {
+                        valid: false, ids: [], expiresAt: Date.now() + 5000
+                    });
+                    return { valid: false, ids: [] };
+                }
+
+                const ids = [...new Set(response.data
+                    .map(row => row?.BattleId ?? row?.battleId)
+                    .map(id => String(id ?? '').trim())
+                    .filter(id => /^\d+$/.test(id) && Number(id) > 0))];
+                officialEventCache.set(targetGuildId, {
+                    valid: true, ids, expiresAt: Date.now() + 15000
+                });
+                while (officialEventCache.size > 100) {
+                    officialEventCache.delete(officialEventCache.keys().next().value);
+                }
+                console.log('ℹ️ [Official API Events] Server=Asia | Guild=' + (targetGuild || targetGuildId) +
+                    ' | Events=' + response.data.length + ' | พบ Battle ID=' + ids.length);
+                return { valid: true, ids };
+            } catch (error) {
+                const status = error?.response?.status || error?.statusCode;
+                const responseBody = error?.response?.data;
+                const responseDetail = responseBody == null ? '' :
+                    (typeof responseBody === 'string' ? responseBody : JSON.stringify(responseBody))
+                        .replace(/https?:\/\/\S+/gi, '[URL]').replace(/\s+/g, ' ').slice(0, 180);
+                const detail = (status ? 'HTTP ' + status : String(error?.code || error?.message || 'request failed')) +
+                    (responseDetail ? ' | API=' + responseDetail : '');
+                console.warn('⚠️ [Official API Events] Server=Asia | Guild=' + (targetGuild || targetGuildId) +
+                    ' | สาเหตุ=' + detail + ' | จะใช้ Battle List ตามปกติต่อ');
+                if (Number(status) === 429) {
+                    const waitMs = Math.max(retryAfterMs(error), 60000);
+                    officialApiRateLimitedUntil = Math.max(officialApiRateLimitedUntil, Date.now() + waitMs);
+                    console.warn('⏳ [Official API Events] HTTP 429 | พักการเรียก API ' + Math.ceil(waitMs / 1000) + ' วินาที');
+                }
+                officialEventCache.set(targetGuildId, {
+                    valid: false, ids: [],
+                    expiresAt: Math.max(Date.now() + 5000, officialApiRateLimitedUntil || 0)
+                });
+                return { valid: false, ids: [] };
+            }
+        })();
+        officialEventInFlight.set(targetGuildId, task);
+        try {
+            return await task;
+        } finally {
+            if (officialEventInFlight.get(targetGuildId) === task) officialEventInFlight.delete(targetGuildId);
+        }
+    };
+
+    const fetchOfficial = async ({ silentSource = false } = {}) => {
+        const publishSource = source => { if (!silentSource) setSource(source); };
         const now = Date.now();
         const cached = officialCache.get(targetGuildId);
         if (cached && cached.expiresAt > now) {
-            setSource('Official Albion API (cache)');
+            publishSource('Official Albion API (cache)');
             return Array.isArray(cached.ids) ? [...cached.ids] : null;
         }
         if (officialInFlight.has(targetGuildId)) {
             const result = await officialInFlight.get(targetGuildId);
-            setSource('Official Albion API (shared request)');
+            publishSource('Official Albion API (shared request)');
             return result;
         }
         if (officialApiRateLimitedUntil > now) {
-            setSource('Official Albion API (พักตาม Rate Limit)');
+            publishSource('Official Albion API (พักตาม Rate Limit)');
             return null;
         }
         const task = (async () => {
             let sawValidResponse = false;
             let lastDetail = 'ไม่ทราบสาเหตุ';
+            let bestPartialIds = [];
             const urls = [
                 'https://gameinfo-sgp.albiononline.com/api/gameinfo/battles',
                 'https://gameinfo.albiononline.com/api/gameinfo/battles'
             ];
             for (const url of urls) {
                 const endpointIds = new Set();
+                let endpointHadResponse = false;
+                let endpointHadError = false;
+                const endpointName = url.includes('gameinfo-sgp') ? 'Asia' : 'Global';
                 for (const offset of [0, 51]) {
                     try {
                         const response = await axios.get(url, {
                             timeout: 10000,
                             headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' },
-                            // Official GameInfo battles endpoint uses bounded pagination; avoid unsupported range/max-limit values.
+                            // Keep bounded pagination; this code deliberately requests only the recent two pages.
                             params: { offset, limit: 51, sort: 'recent', guildId: targetGuildId }
                         });
                         if (!Array.isArray(response.data)) {
                             lastDetail = 'รูปแบบข้อมูลไม่ถูกต้อง';
+                            endpointHadError = true;
+                            console.warn('⚠️ [Official API หลัก] Endpoint=' + endpointName +
+                                ' | offset=' + offset + ' | รูปแบบข้อมูลไม่ถูกต้อง | จะลอง Official endpoint ถัดไป');
                             break;
                         }
                         sawValidResponse = true;
+                        endpointHadResponse = true;
                         for (const row of response.data) {
                             const id = row?.id ?? row?.albionId ?? row?.battleId;
                             if (/^\d+$/.test(String(id))) endpointIds.add(String(id));
                         }
-                        console.log('ℹ️ [Official API หลัก] Endpoint=' + (url.includes('gameinfo-sgp') ? 'Asia' : 'Global') +
+                        console.log('ℹ️ [Official API หลัก] Endpoint=' + endpointName +
                             ' | offset=' + offset + ' | ได้ ' + response.data.length + ' รายการ');
                         if (response.data.length < 51) break;
                     } catch (error) {
+                        endpointHadError = true;
                         const status = error?.response?.status || error?.statusCode;
                         const responseBody = error?.response?.data;
                         const responseDetail = responseBody == null ? '' :
@@ -2692,8 +2783,9 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
                                 .replace(/https?:\/\/\S+/gi, '[URL]').replace(/\s+/g, ' ').slice(0, 180);
                         lastDetail = (status ? 'HTTP ' + status : String(error?.code || error?.message || 'request failed')) +
                             (responseDetail ? ' | API=' + responseDetail : '');
-                        console.warn('⚠️ [Official API หลัก] Endpoint=' + (url.includes('gameinfo-sgp') ? 'Asia' : 'Global') +
-                            ' | offset=' + offset + ' | กิลด์=' + (targetGuild || '-') + ' | Guild ID=' + targetGuildId + ' | สาเหตุ=' + lastDetail);
+                        console.warn('⚠️ [Official API หลัก] Endpoint=' + endpointName +
+                            ' | offset=' + offset + ' | กิลด์=' + (targetGuild || '-') +
+                            ' | Guild ID=' + targetGuildId + ' | สาเหตุ=' + lastDetail);
                         if (Number(status) === 429) {
                             const waitMs = Math.max(retryAfterMs(error), 60000);
                             officialApiRateLimitedUntil = Math.max(officialApiRateLimitedUntil, Date.now() + waitMs);
@@ -2702,29 +2794,50 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
                         break;
                     }
                 }
-                if (endpointIds.size) {
-                    const ids = [...endpointIds];
-                    officialCache.set(targetGuildId, { ids, expiresAt: Date.now() + 45000 });
+
+                const endpointIdsArray = [...endpointIds];
+                // Keep the largest partial list seen so far. This lets a successful alternate
+                // endpoint repair an incomplete page without throwing away useful IDs.
+                if (endpointIdsArray.length > bestPartialIds.length) bestPartialIds = endpointIdsArray;
+
+                if (endpointHadError) {
+                    if (officialApiRateLimitedUntil > Date.now()) break; // Respect 429; do not immediately try another host.
+                    console.warn('⚠️ [Official API หลัก] Endpoint=' + endpointName +
+                        ' ส่งข้อมูลไม่ครบ/ล้มเหลว; กำลังลอง Official endpoint ถัดไป' +
+                        (endpointIdsArray.length ? ' | เก็บ partial IDs=' + endpointIdsArray.length : ''));
+                    continue;
+                }
+
+                if (endpointHadResponse) {
+                    const finalIds = bestPartialIds.length > endpointIdsArray.length ? bestPartialIds : endpointIdsArray;
+                    officialCache.set(targetGuildId, { ids: finalIds, expiresAt: Date.now() + 45000 });
                     while (officialCache.size > 100) officialCache.delete(officialCache.keys().next().value);
-                    setSource('Official Albion API');
-                    console.log('✅ [Official API หลัก] รวม ' + ids.length + ' Match ID จากสูงสุด 2 หน้า | กิลด์ ' + (targetGuild || targetGuildId));
-                    return ids;
+                    publishSource(finalIds.length ? 'Official Albion API' : 'Official Albion API (ไม่พบไฟต์)');
+                    console.log('✅ [Official API หลัก] รวม ' + finalIds.length +
+                        ' Match ID | Endpoint ที่ตอบสำเร็จ=' + endpointName +
+                        (bestPartialIds.length > endpointIdsArray.length ? ' | ใช้รายการ partial ที่มีมากกว่า' : '') +
+                        ' | สูงสุด 2 หน้า | กิลด์ ' + (targetGuild || targetGuildId));
+                    return finalIds;
                 }
                 if (officialApiRateLimitedUntil > Date.now()) break;
             }
-            if (sawValidResponse) {
-                officialCache.set(targetGuildId, { ids: [], expiresAt: Date.now() + 45000 });
-                setSource('Official Albion API (ไม่พบไฟต์)');
-                console.log('ℹ️ [Official API หลัก] ไม่พบไฟต์ที่ตรงกิลด์ ' + (targetGuild || targetGuildId));
-                return [];
+
+            if (bestPartialIds.length) {
+                officialCache.set(targetGuildId, { ids: bestPartialIds, expiresAt: Date.now() + 15000 });
+                while (officialCache.size > 100) officialCache.delete(officialCache.keys().next().value);
+                publishSource('Official Albion API (partial)');
+                console.warn('⚠️ [Official API หลัก] ใช้ Partial Match IDs=' + bestPartialIds.length +
+                    ' | ไม่ทิ้งไฟต์ที่ค้นพบแล้ว แม้หน้า/Endpoint ถัดไปล้มเหลว');
+                return bestPartialIds;
             }
+
             officialCache.set(targetGuildId, {
                 ids: null,
                 expiresAt: Math.max(Date.now() + 10000, officialApiRateLimitedUntil || 0)
             });
-            setSource('Official Albion API unavailable');
+            publishSource('Official Albion API unavailable');
             console.warn('⚠️ [Official API หลัก] ค้นหาไฟต์ไม่สำเร็จ | กิลด์=' + (targetGuild || targetGuildId) +
-                ' | สาเหตุ=' + lastDetail);
+                ' | สาเหตุ=' + lastDetail + (sawValidResponse ? ' | มี response บางหน้าแต่ไม่มี Match ID ที่ใช้ได้' : ''));
             return null;
         })();
         officialInFlight.set(targetGuildId, task);
@@ -2735,13 +2848,48 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
         }
     };
 
-    const officialIds = await fetchOfficial();
-    if (Array.isArray(officialIds)) {
-        const source = officialIds.length
-            ? 'Official Albion API PRIMARY'
-            : 'Official Albion API PRIMARY (ไม่พบไฟต์ที่ตรงกิลด์)';
+    // Run both Official discovery paths concurrently. Normal polling can return
+    // immediately when /events exposes a new BattleId; the /battles request continues
+    // in the background to refresh its cache for coverage on later polls.
+    const eventPromise = fetchRecentEventBattleIds();
+    const officialPromise = fetchOfficial({ silentSource: true }).catch(error => {
+        console.warn('⚠️ [Official API หลัก] การค้นหา Battle List ล้มเหลว: ' + String(error?.message || error));
+        return null;
+    });
+    const eventResult = await eventPromise;
+    const eventIds = eventResult?.valid && Array.isArray(eventResult.ids) ? eventResult.ids : [];
+
+    if (!baselineOnly && eventIds.length) {
+        const cachedBattleList = officialCache.get(targetGuildId);
+        const cachedBattleIds = cachedBattleList && cachedBattleList.expiresAt > Date.now() &&
+            Array.isArray(cachedBattleList.ids) ? cachedBattleList.ids : [];
+        const combinedIds = [...new Set([...eventIds, ...cachedBattleIds])];
+        const source = 'Official GameInfo Events (early detection)';
         setSource(source);
-        return queueCandidates(officialIds, source);
+        console.log('🚀 [Auto-Battle Early Detection] Guild=' + (targetGuild || targetGuildId) +
+            ' | Battle IDs จาก Events=' + eventIds.length +
+            ' | IDs จาก Battle List cache=' + cachedBattleIds.length +
+            ' | ส่ง candidates เข้าคิวโดยไม่รอ Battle List request');
+        return queueCandidates(combinedIds, source);
+    }
+
+    const officialIds = await officialPromise;
+    if (Array.isArray(officialIds)) {
+        const combinedIds = [...new Set([...officialIds, ...eventIds])];
+        const source = eventIds.length
+            ? 'Official Albion Events + Battle List'
+            : (officialIds.length ? 'Official Albion API PRIMARY' : 'Official Albion API PRIMARY (ไม่พบไฟต์ที่ตรงกิลด์)');
+        setSource(source);
+        return queueCandidates(combinedIds, source);
+    }
+
+    if (eventResult?.valid) {
+        const source = eventIds.length
+            ? 'Official Albion Events (Battle List unavailable)'
+            : 'Official Albion Events available; no Battle ID in recent events';
+        setSource(source);
+        if (eventIds.length) console.warn('⚠️ [Auto-Battle] ใช้ Battle ID จาก Events เพราะ Battle List ใช้งานไม่ได้');
+        return queueCandidates(eventIds, source);
     }
 
     const source = 'Official Albion API unavailable';
@@ -2846,6 +2994,7 @@ async function checkAutoBattlesForGuild() {
     autoBattleCheckRunning = true;
     try {
         for (const config of autoBattleConfigs) {
+            try {
             const trackerScope = getGuildConfig(config.guildId, false);
             const autoTrackedGuilds = Array.isArray(trackerScope?.guilds)
                 ? trackerScope.guilds.map(g => typeof g === 'string' ? g : g?.name).filter(Boolean)
@@ -3109,6 +3258,12 @@ async function checkAutoBattlesForGuild() {
 
             if (processedBattles.size > 1000) {
                 processedBattles = new Set([...processedBattles].slice(-1000));
+            }
+            } catch (trackerErr) {
+                console.error('❌ [Auto-Battle Tracker] ข้าม Tracker ที่มีข้อผิดพลาด โดยตรวจ Tracker ถัดไปต่อ | Discord Server=' +
+                    String(config?.guildId || 'unknown') + ' | Guild=' +
+                    String(config?.targetGuild || config?.targetGuildId || 'unknown') + ' | Error=' +
+                    String(trackerErr?.message || trackerErr));
             }
         }
     } catch (err) {
