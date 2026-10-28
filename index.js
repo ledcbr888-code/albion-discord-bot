@@ -2770,6 +2770,12 @@ async function primeAutoBattleHistoryForGuild(configs = autoBattleConfigs) {
                 '; existing processed Match IDs found, skipping restart baseline.');
             continue;
         }
+        if (typeof config.baselineInitialized !== 'boolean') {
+            // Persist the pending state before requesting data, so later retries
+            // cannot mistake a failed first baseline for a legacy initialized tracker.
+            config.baselineInitialized = false;
+            changed = true;
+        }
 
         try {
             const recentMatches = await fetchGuildRecentBattles(config, { baselineOnly: true });
@@ -5505,7 +5511,7 @@ client.once('ready', async () => {
                 console.warn(`⚠️ Auto-Battle startup baseline failed for Discord server ${guildId}: ${err.message}`);
             }
         }
-        console.log(`🛡️ Auto-Battle initialized: marked ${seeded} existing battle(s) as already seen across ${serverConfigs.length} Discord server configuration(s). No historical backlog should be reported.`);
+        console.log(`🛡️ Auto-Battle initialization pass complete: newly marked ${seeded} existing battle(s) across ${serverConfigs.length} Discord server configuration(s); previously initialized trackers keep their saved baseline, and pending trackers will retry during polling.`);
     }, 5000);
 
     function getAutoBattleIntervalMs() {
