@@ -14,17 +14,12 @@ jobs:
     if: github.event.before != '0000000000000000000000000000000000000000'
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout complete repository history
-        uses: actions/checkout@v7
-        with:
-          ref: ${{ github.event.after }}
-          fetch-depth: 1
-
-      - name: Create immutable backup tag for previous main
+      - name: Create immutable backup tag for previous main through GitHub API
         shell: bash
         env:
           BEFORE_SHA: ${{ github.event.before }}
           AFTER_SHA: ${{ github.event.after }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
 
@@ -34,18 +29,16 @@ jobs:
           fi
 
           TAG="backup-main-before-${AFTER_SHA:0:12}"
+          REF_PATH="repos/${GITHUB_REPOSITORY}/git/ref/tags/$TAG"
 
-          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+          # Make reruns idempotent: never overwrite an existing backup tag.
+          if gh api "$REF_PATH" >/dev/null 2>&1; then
             echo "::notice::Backup tag $TAG already exists; leaving it unchanged."
             exit 0
           fi
 
-          # Fetch only the previous main commit rather than cloning all repository history.
-          git fetch --no-tags --depth=1 origin "$BEFORE_SHA"
-          git cat-file -e "${BEFORE_SHA}^{commit}"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -a "$TAG" "$BEFORE_SHA" -m "Automatic backup of main before commit $AFTER_SHA"
-          git push origin "refs/tags/$TAG"
+          gh api --method POST "repos/${GITHUB_REPOSITORY}/git/refs" \
+            -f "ref=refs/tags/$TAG" \
+            -f "sha=$BEFORE_SHA" >/dev/null
 
           echo "::notice::Created $TAG pointing to previous main commit $BEFORE_SHA"
