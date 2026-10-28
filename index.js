@@ -782,8 +782,8 @@ const battleFetchFailureUntil = new Map();
 // Auto-Battle-only failure metadata used to apply a longer backoff to Asia 404s.
 const autoBattleDetailFailure = new Map();
 // Cache/deduplicate the bounded Official /events/battle fallback used only for Events-only Auto-Battle hints.
-const autoBattleEventsFallbackCache = new Map();
-const autoBattleEventsFallbackInFlight = new Map();
+const autoBattleEventsProbeCache = new Map();
+const autoBattleEventsProbeInFlight = new Map();
 // GameInfo rate limits are shared across battle IDs, so back off globally.
 let officialApiRateLimitedUntil = 0;
 
@@ -992,11 +992,11 @@ async function probeOfficialBattleEvents(matchId, options = {}) {
     };
 
     const now = Date.now();
-    const cached = autoBattleEventsFallbackCache.get(key);
+    const cached = autoBattleEventsProbeCache.get(key);
     if (cached && cached.expiresAt > now) return validateForTarget(cached.data);
-    if (cached) autoBattleEventsFallbackCache.delete(key);
-    if (autoBattleEventsFallbackInFlight.has(key)) {
-        return validateForTarget(await autoBattleEventsFallbackInFlight.get(key));
+    if (cached) autoBattleEventsProbeCache.delete(key);
+    if (autoBattleEventsProbeInFlight.has(key)) {
+        return validateForTarget(await autoBattleEventsProbeInFlight.get(key));
     }
     if (officialApiRateLimitedUntil > now) return null;
 
@@ -1040,7 +1040,7 @@ async function probeOfficialBattleEvents(matchId, options = {}) {
                 if (!pageEvents) {
                     console.warn('⚠️ [Auto-Battle Events Probe] Match ID=' + key +
                         ' | รูปแบบ /events/battle ไม่ถูกต้อง');
-                    autoBattleEventsFallbackCache.set(key, { data: null, expiresAt: Date.now() + 60000 });
+                    autoBattleEventsProbeCache.set(key, { data: null, expiresAt: Date.now() + 60000 });
                     return null;
                 }
                 console.log('ℹ️ [Auto-Battle Events Probe] Match ID=' + key +
@@ -1063,7 +1063,7 @@ async function probeOfficialBattleEvents(matchId, options = {}) {
                     console.warn('⚠️ [Auto-Battle Events Probe] Match ID=' + key +
                         ' | Endpoint=Asia Events | HTTP=' + (status || error?.message || 'unknown'));
                 }
-                autoBattleEventsFallbackCache.set(key, { data: null, expiresAt: Date.now() + 60000 });
+                autoBattleEventsProbeCache.set(key, { data: null, expiresAt: Date.now() + 60000 });
                 return null;
             }
 
@@ -1091,7 +1091,7 @@ async function probeOfficialBattleEvents(matchId, options = {}) {
             console.warn('⚠️ [Auto-Battle Events Probe] Match ID=' + key +
                 ' | Events=' + events.length + ' | ข้อมูลว่างหรือเกินขีดจำกัด ' +
                 maxPages + ' หน้า; จะไม่ใช้สร้างรายงาน');
-            autoBattleEventsFallbackCache.set(key, { data: null, expiresAt: Date.now() + 60000 });
+            autoBattleEventsProbeCache.set(key, { data: null, expiresAt: Date.now() + 60000 });
             return null;
         }
 
@@ -1129,7 +1129,7 @@ async function probeOfficialBattleEvents(matchId, options = {}) {
             console.warn('⚠️ [Auto-Battle Events Probe] Match ID=' + key +
                 ' | Events=' + events.length + ' | malformed=' + invalidEventCount +
                 ' | ไม่มีข้อมูลครบพอที่จะยืนยัน Events ทั้งไฟต์');
-            autoBattleEventsFallbackCache.set(key, { data: null, expiresAt: Date.now() + 60000 });
+            autoBattleEventsProbeCache.set(key, { data: null, expiresAt: Date.now() + 60000 });
             return null;
         }
 
@@ -1143,18 +1143,18 @@ async function probeOfficialBattleEvents(matchId, options = {}) {
             earliestEventAt: new Date(Math.min(...eventTimes)).toISOString(),
             complete: true
         };
-        autoBattleEventsFallbackCache.set(key, { data: summary, expiresAt: Date.now() + 3 * 60 * 1000 });
-        while (autoBattleEventsFallbackCache.size > 200) {
-            autoBattleEventsFallbackCache.delete(autoBattleEventsFallbackCache.keys().next().value);
+        autoBattleEventsProbeCache.set(key, { data: summary, expiresAt: Date.now() + 3 * 60 * 1000 });
+        while (autoBattleEventsProbeCache.size > 200) {
+            autoBattleEventsProbeCache.delete(autoBattleEventsProbeCache.keys().next().value);
         }
         return validateForTarget(summary);
     })();
 
-    autoBattleEventsFallbackInFlight.set(key, task);
+    autoBattleEventsProbeInFlight.set(key, task);
     try {
         return await task;
     } finally {
-        if (autoBattleEventsFallbackInFlight.get(key) === task) autoBattleEventsFallbackInFlight.delete(key);
+        if (autoBattleEventsProbeInFlight.get(key) === task) autoBattleEventsProbeInFlight.delete(key);
     }
 }
 
