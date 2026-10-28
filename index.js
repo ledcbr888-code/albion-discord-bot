@@ -2803,6 +2803,8 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
             .map(id => String(id || '').trim()).filter(id => /^\d+$/.test(id)))];
         const eventQueue = pendingEventsByScope.get(queueScopeKey) || new Map();
         const confirmed = new Set(Array.isArray(confirmedBattleIds) ? confirmedBattleIds.map(String) : []);
+        // IDs already retained in the authoritative queue must not be duplicated as Events-only hints.
+        for (const id of (pendingByScope.get(queueScopeKey) || new Map()).keys()) confirmed.add(String(id));
         const now = Date.now();
         for (const id of confirmed) eventQueue.delete(id);
         for (const id of normalized) {
