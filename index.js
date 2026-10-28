@@ -2606,7 +2606,7 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
         const pendingIds = pendingByScope.get(queueScopeKey) || new Map();
         const next = new Map();
         for (const id of normalized) {
-            if (!processedBattles.has(id)) next.set(id, pendingIds.get(id) || { firstSeenAt: Date.now() });
+            if (!processedBattles.has(id)) next.set(id, pendingIds.get(id) || { firstSeenAt: Date.now(), source });
         }
         // Preserve unresolved IDs only inside this Discord-server + target-guild queue.
         for (const [id, metadata] of pendingIds.entries()) {
@@ -2876,6 +2876,17 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
             ' | Battle IDs จาก Events=' + eventIds.length +
             ' | IDs จาก Battle List cache=' + cachedBattleIds.length +
             ' | ส่ง candidates เข้าคิวโดยไม่รอ Battle List request');
+        // When the background Battle List request completes, add its IDs to the same
+        // scoped queue so IDs discovered only there are still processed on a later poll.
+        void officialPromise.then(backgroundIds => {
+            if (!Array.isArray(backgroundIds)) return;
+            queueCandidates(backgroundIds, 'Official GameInfo Battle List (background after Events)');
+            console.log('ℹ️ [Auto-Battle Queue] เพิ่ม Match ID จาก Battle List เบื้องหลังเข้าคิว Tracker=' +
+                queueScopeKey + ' | รายการจาก API=' + backgroundIds.length);
+        }).catch(error => {
+            console.warn('⚠️ [Auto-Battle Queue] เก็บ Battle List เบื้องหลังไม่สำเร็จ | Tracker=' +
+                queueScopeKey + ' | Error=' + String(error?.message || error));
+        });
         return queueCandidates(combinedIds, source);
     }
 
@@ -3038,7 +3049,9 @@ async function checkAutoBattlesForGuild() {
                 const queued = fetchGuildRecentBattles._pendingMatchIds?.get(pendingQueueScopeKey)?.get(id);
                 candidateMeta.set(id, {
                     firstSeenAt: Number(queued?.firstSeenAt) || battleListObservedAt,
-                    source: fetchGuildRecentBattles._lastSourceByScope?.get(pendingQueueScopeKey) || 'Official GameInfo Battle List'
+                    source: queued?.source ||
+                        fetchGuildRecentBattles._lastSourceByScope?.get(pendingQueueScopeKey) ||
+                        'Official GameInfo Battle List'
                 });
             }
             const detailRetryStates = checkAutoBattlesForGuild._detailRetryStates ||
