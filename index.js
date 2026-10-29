@@ -87,6 +87,7 @@ let githubSaveQueue = Promise.resolve();
 let githubDataSha = null;
 let githubPersistenceReady = false;
 let guildConfigs = {};
+let banditGlobalVotes = {};
 let legacyMigration = null;
 let autoBattleCheckRunning = false;
 let banditSchedulerRunning = false;
@@ -122,6 +123,25 @@ function normalizeGuildConfig(raw = {}) {
         ctaEvents: Array.isArray(cfg.ctaEvents) ? cfg.ctaEvents : []
     };
 }
+function normalizeBanditGlobalVotes(raw) {
+    const result = {};
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return result;
+    const now = Date.now();
+    const maxAgeMs = 7 * 24 * 60 * 60 * 1000;
+    for (const [eventStamp, voteState] of Object.entries(raw)) {
+        const stamp = Number(eventStamp);
+        if (!Number.isFinite(stamp) || stamp <= 0 || Math.abs(now - stamp) > maxAgeMs) continue;
+        if (!voteState || typeof voteState !== 'object') continue;
+        const confirmations = [...new Set((Array.isArray(voteState.confirmations) ? voteState.confirmations : [])
+            .map(String).filter(id => /^\d+$/.test(id)))];
+        const confirmationSet = new Set(confirmations);
+        const notOccurred = [...new Set((Array.isArray(voteState.notOccurred) ? voteState.notOccurred : [])
+            .map(String).filter(id => /^\d+$/.test(id) && !confirmationSet.has(id)))];
+        result[String(eventStamp)] = { confirmations, notOccurred };
+    }
+    return result;
+}
+
 function getGuildConfig(guildId, create = true) {
     const id = String(guildId || '').trim();
     if (!id) return create ? createDefaultGuildConfig() : null;
@@ -208,6 +228,7 @@ function loadData() {
         if (!ensureDataDirectory()) { guildConfigs = {}; legacyMigration = null; return; }
         if (!fs.existsSync(DATA_FILE)) {
             guildConfigs = {};
+            banditGlobalVotes = {};
             console.warn(`⚠️ tracking.json not found at ${DATA_FILE}.`);
             // If GitHub persistence is configured, wait for remote download before
             // creating a new file, so an empty local file cannot overwrite saved data.
@@ -215,6 +236,7 @@ function loadData() {
             return;
         }
         const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
+        banditGlobalVotes = normalizeBanditGlobalVotes(data?.banditGlobalVotes);
         if (data && data.version >= 3 && data.guilds && !Array.isArray(data.guilds)) {
             guildConfigs = Object.fromEntries(Object.entries(data.guilds).map(([id, cfg]) => [id, normalizeGuildConfig(cfg)]));
             console.log('📁 Tracking v3: ' + Object.keys(guildConfigs).length + ' Discord server configuration(s) loaded.');
@@ -225,7 +247,7 @@ function loadData() {
         console.log('📁 Legacy tracking format detected. Migration will run after Discord is ready.');
     } catch (err) {
         console.error('❌ tracking.json load error:', err.message);
-        guildConfigs = {}; legacyMigration = null;
+        guildConfigs = {}; banditGlobalVotes = {}; legacyMigration = null;
     }
 }
 function saveData() {
@@ -234,6 +256,7 @@ function saveData() {
         guildConfigs = Object.fromEntries(Object.entries(guildConfigs).map(([id, cfg]) => [id, normalizeGuildConfig(cfg)]));
         const payload = JSON.stringify({
             version: 3, updatedAt: new Date().toISOString(),
+            banditGlobalVotes: normalizeBanditGlobalVotes(banditGlobalVotes),
             guilds: Object.fromEntries(Object.entries(guildConfigs).map(([id, cfg]) => [id, { ...cfg, processedBattles: Array.isArray(cfg.processedBattles) ? cfg.processedBattles.slice(-1000) : [], avaProcessedMessages: Array.isArray(cfg.avaProcessedMessages) ? cfg.avaProcessedMessages.slice(-500) : [] }]))
         }, null, 2);
         const tempFile = `${DATA_FILE}.tmp`;
@@ -5794,6 +5817,89 @@ function banditEventKey(event) {
     return event ? event.start.toISOString() : '';
 }
 
+const banditVoteRefreshQueues = new Map();
+
+function getBanditGlobalVoteState(eventStamp) {
+    const key = String(eventStamp || '');
+    if (!/^\d{10,13}$/.test(key)) return { confirmations: [], notOccurred: [] };
+    if (banditGlobalVotes[key] && typeof banditGlobalVotes[key] === 'object') {
+        return banditGlobalVotes[key];
+    }
+
+    // One-time migration: merge per-server votes saved by the old version.
+    const confirmations = new Set();
+    const notOccurred = new Set();
+    for (const { config } of getAllGuildConfigs()) {
+        for (const localConfig of (Array.isArray(config?.banditAuto) ? config.banditAuto : [])) {
+            for (const id of (Array.isArray(localConfig?.banditConfirmations?.[key]) ? localConfig.banditConfirmations[key] : [])) {
+                confirmations.add(String(id));
+            }
+            for (const id of (Array.isArray(localConfig?.banditNotOccurred?.[key]) ? localConfig.banditNotOccurred[key] : [])) {
+                notOccurred.add(String(id));
+            }
+        }
+    }
+    for (const id of confirmations) notOccurred.delete(id);
+    banditGlobalVotes[key] = {
+        confirmations: [...confirmations].filter(id => /^\d+$/.test(id)),
+        notOccurred: [...notOccurred].filter(id => /^\d+$/.test(id))
+    };
+    return banditGlobalVotes[key];
+}
+
+function setBanditGlobalVote(eventStamp, userId, vote) {
+    const state = getBanditGlobalVoteState(eventStamp);
+    const id = String(userId || '');
+    if (!/^\d+$/.test(id) || !['confirm', 'notoccur'].includes(vote)) return state;
+    state.confirmations = state.confirmations.filter(voterId => voterId !== id);
+    state.notOccurred = state.notOccurred.filter(voterId => voterId !== id);
+    if (vote === 'confirm') state.confirmations.push(id);
+    else state.notOccurred.push(id);
+
+    banditGlobalVotes = normalizeBanditGlobalVotes(banditGlobalVotes);
+    return getBanditGlobalVoteState(eventStamp);
+}
+
+function banditGlobalVoteCounts(eventStamp) {
+    const state = getBanditGlobalVoteState(eventStamp);
+    return { confirmed: state.confirmations.length, notOccurred: state.notOccurred.length };
+}
+
+async function refreshBanditVoteMessages(eventStamp, exceptMessageId = null) {
+    const key = String(eventStamp || '');
+    const previous = banditVoteRefreshQueues.get(key) || Promise.resolve();
+    const task = previous.catch(() => {}).then(async () => {
+        const eventKey = new Date(Number(key)).toISOString();
+        for (const { guildId, config } of getAllGuildConfigs()) {
+            const configs = Array.isArray(config?.banditAuto) ? config.banditAuto : [];
+            for (const localConfig of configs) {
+                if (String(localConfig?.lastEventKey || '') !== eventKey ||
+                    !localConfig?.lastMessageId || !localConfig?.channelId ||
+                    String(localConfig.lastMessageId) === String(exceptMessageId || '')) continue;
+                try {
+                    const channel = await client.channels.fetch(String(localConfig.channelId)).catch(() => null);
+                    if (!channel?.messages?.fetch) continue;
+                    const message = await channel.messages.fetch(String(localConfig.lastMessageId)).catch(() => null);
+                    if (!message) continue;
+                    const counts = banditGlobalVoteCounts(key);
+                    await message.edit({
+                        components: [banditAlertComponents(
+                            String(guildId), key, counts.confirmed, counts.notOccurred
+                        )]
+                    });
+                } catch (err) {
+                    console.warn('⚠️ [BANDIT votes] อัปเดตยอดรวมไม่สำเร็จใน Discord Server=' +
+                        String(guildId) + ' | ' + String(err?.message || err));
+                }
+            }
+        }
+    }).finally(() => {
+        if (banditVoteRefreshQueues.get(key) === task) banditVoteRefreshQueues.delete(key);
+    });
+    banditVoteRefreshQueues.set(key, task);
+    return task;
+}
+
 function getBanditChanceStyle(chance) {
     if (chance >= 60) return { label: 'HIGH CHANCE', fill: '#71320e', accent: '#f09a38', text: '#ffd18b' };
     if (chance >= 40) return { label: 'MEDIUM CHANCE', fill: '#66500d', accent: '#e0bd4c', text: '#ffed9b' };
@@ -5913,6 +6019,7 @@ async function checkAndSendBanditAlertsForGuild() {
                 }
                 const card = new AttachmentBuilder(imagePath, { name: imageName });
                 const eventStamp = String(event.start.getTime());
+                const globalVoteCounts = banditGlobalVoteCounts(eventStamp);
                 // Resolve the BANDIT role from the actual Discord server each alert.
                 // This repairs saved configs where banditRoleId is missing or stale.
                 const alertGuild = channel.guild || await client.guilds.fetch(config.guildId).catch(() => null);
@@ -5939,7 +6046,7 @@ async function checkAndSendBanditAlertsForGuild() {
                     content: `${roleId ? `<@&${roleId}> ` : ''}⚔️ **BANDIT ASSAULT — ASIA**\nกำลังจะเริ่มใน **${banditCountdownText(minutesUntil)}**\n🕒 เวลาเริ่ม: **${ictTime} น.**\n🎲 โอกาสเกิด: **${chanceLabel}**`,
                     files: [card],
                     allowedMentions: { parse: [], roles: roleId ? [roleId] : [] },
-                    components: [banditAlertComponents(config.guildId, eventStamp, (config.banditConfirmations?.[eventStamp] || []).length, (config.banditNotOccurred?.[eventStamp] || []).length)]
+                    components: [banditAlertComponents(config.guildId, eventStamp, globalVoteCounts.confirmed, globalVoteCounts.notOccurred)]
                 });
                 config.lastMessageId = alertMessage.id;
                 config.lastEventKey = key;
@@ -6336,32 +6443,30 @@ client.on('interactionCreate', async interaction => {
             if (config.lastEventKey !== eventKey) {
                 return interaction.reply({ content: 'ℹ️ ปุ่มนี้เป็นการแจ้งเตือนรอบเก่าแล้ว', ephemeral: true });
             }
-            if (!config.banditConfirmations || typeof config.banditConfirmations !== 'object') config.banditConfirmations = {};
-            const voters = Array.isArray(config.banditConfirmations[eventStamp]) ? config.banditConfirmations[eventStamp] : [];
-            if (voters.includes(interaction.user.id)) {
-                return interaction.reply({ content: `คุณยืนยันรอบนี้แล้ว (รวม ${voters.length} คน)`, ephemeral: true });
+            const currentVotes = getBanditGlobalVoteState(eventStamp);
+            if (currentVotes.confirmations.includes(String(interaction.user.id))) {
+                return interaction.reply({ content: `คุณยืนยันรอบนี้แล้ว (รวม ${currentVotes.confirmations.length} คนจากทุกเซิร์ฟเวอร์)`, ephemeral: true });
             }
-            if (!config.banditNotOccurred || typeof config.banditNotOccurred !== 'object') config.banditNotOccurred = {};
-            config.banditNotOccurred[eventStamp] = (config.banditNotOccurred[eventStamp] || []).filter(id => id !== interaction.user.id);
-            voters.push(interaction.user.id);
-            config.banditConfirmations[eventStamp] = voters;
+            setBanditGlobalVote(eventStamp, interaction.user.id, 'confirm');
             saveData();
-            await interaction.update({ components: [banditAlertComponents(guildId, eventStamp, voters.length, (config.banditNotOccurred[eventStamp] || []).length)] });
+            const counts = banditGlobalVoteCounts(eventStamp);
+            await interaction.update({ components: [banditAlertComponents(guildId, eventStamp, counts.confirmed, counts.notOccurred)] });
+            await refreshBanditVoteMessages(eventStamp, interaction.message?.id);
             return;
         }
         if (action === 'bandit_notoccur') {
             const config = banditAutoConfigs.find(c => c.guildId === guildId);
             if (!config) return interaction.reply({ content: '❌ ไม่พบการตั้งค่า Bandit Assault นี้', ephemeral: true });
             if (interaction.message?.id !== config.lastMessageId || config.lastEventKey !== new Date(Number(eventStamp)).toISOString()) return interaction.reply({ content: 'ℹ️ ปุ่มนี้เป็นการแจ้งเตือนรอบเก่าแล้ว', ephemeral: true });
-            if (!config.banditNotOccurred || typeof config.banditNotOccurred !== 'object') config.banditNotOccurred = {};
-            const voters = Array.isArray(config.banditNotOccurred[eventStamp]) ? config.banditNotOccurred[eventStamp] : [];
-            if (voters.includes(interaction.user.id)) return interaction.reply({ content: `คุณกดไม่เกิดรอบนี้แล้ว (รวม ${voters.length} คน)`, ephemeral: true });
-            if (!config.banditConfirmations || typeof config.banditConfirmations !== 'object') config.banditConfirmations = {};
-            config.banditConfirmations[eventStamp] = (config.banditConfirmations[eventStamp] || []).filter(id => id !== interaction.user.id);
-            voters.push(interaction.user.id);
-            config.banditNotOccurred[eventStamp] = voters;
+            const currentVotes = getBanditGlobalVoteState(eventStamp);
+            if (currentVotes.notOccurred.includes(String(interaction.user.id))) {
+                return interaction.reply({ content: `คุณกดไม่เกิดรอบนี้แล้ว (รวม ${currentVotes.notOccurred.length} คนจากทุกเซิร์ฟเวอร์)`, ephemeral: true });
+            }
+            setBanditGlobalVote(eventStamp, interaction.user.id, 'notoccur');
             saveData();
-            await interaction.update({ components: [banditAlertComponents(guildId, eventStamp, (config.banditConfirmations[eventStamp] || []).length, voters.length)] });
+            const counts = banditGlobalVoteCounts(eventStamp);
+            await interaction.update({ components: [banditAlertComponents(guildId, eventStamp, counts.confirmed, counts.notOccurred)] });
+            await refreshBanditVoteMessages(eventStamp, interaction.message?.id);
             return;
         }
         if (['bandit_role', 'bandit_role_remove', 'bandit_role_add'].includes(action)) {
