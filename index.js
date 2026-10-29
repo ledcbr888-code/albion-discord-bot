@@ -189,6 +189,105 @@ function formatBotStatsUptime(milliseconds) {
     return (days ? days + ' วัน ' : '') + (hours ? hours + ' ชม. ' : '') + minutes + ' นาที';
 }
 
+function buildBotStatsPayload(requestedPage = 0) {
+    const now = Date.now();
+    const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+    const joinedGuilds = [...client.guilds.cache.values()].sort((a, b) =>
+        String(a.name || '').localeCompare(String(b.name || ''), 'th')
+    );
+    const joinedGuildIds = new Set(joinedGuilds.map(guild => String(guild.id)));
+    const currentConfigs = getAllGuildConfigs().filter(({ guildId }) => joinedGuildIds.has(String(guildId)));
+    const autoBattleGuilds = new Set();
+    const banditGuilds = new Set();
+    const avaGuilds = new Set();
+    const battleLinkGuilds = new Set();
+
+    for (const { guildId, config } of currentConfigs) {
+        const key = String(guildId);
+        if (Array.isArray(config?.autoBattles) && config.autoBattles.some(item => item && item.enabled !== false)) autoBattleGuilds.add(key);
+        if (Array.isArray(config?.banditAuto) && config.banditAuto.some(item => item && item.enabled !== false && item.channelId)) banditGuilds.add(key);
+        if (Array.isArray(config?.avaAuto) && config.avaAuto.some(item => item && item.enabled !== false && item.channelId)) avaGuilds.add(key);
+        if (String(config?.battleLinkChannelId || '').trim()) battleLinkGuilds.add(key);
+    }
+
+    const configuredGuilds = new Set([
+        ...autoBattleGuilds, ...banditGuilds, ...avaGuilds, ...battleLinkGuilds
+    ]);
+    const usageTrackingStart = Number(botUsageTrackingStartedAt) || now;
+    const effectiveWindowStart = Math.max(now - sevenDaysMs, usageTrackingStart);
+    const activeGuilds = Object.entries(botUsageStats).filter(([guildId, stats]) =>
+        joinedGuildIds.has(String(guildId)) &&
+        Number(stats?.lastUsedAt) >= effectiveWindowStart &&
+        Number(stats?.lastUsedAt) <= now
+    ).length;
+    const memberTotal = joinedGuilds.reduce((total, guild) =>
+        total + Math.max(0, Number(guild.memberCount) || guild.members?.cache?.size || 0), 0);
+    const coverageDays = Math.min(7, Math.max(0, (now - usageTrackingStart) / (24 * 60 * 60 * 1000)));
+    const trackingStartText = new Date(usageTrackingStart).toLocaleString('th-TH', {
+        timeZone: 'Asia/Bangkok', dateStyle: 'medium', timeStyle: 'short'
+    });
+    const coverageNote = coverageDays < 7
+        ? '\n⚠️ สถิติการใช้งานเพิ่งเริ่มเก็บ ยังไม่ครบ 7 วัน (' + coverageDays.toFixed(1) + ' วัน)'
+        : '';
+
+    const report =
+        '🟢 สถานะ: ' + (client.isReady() ? 'ออนไลน์' : 'ยังไม่พร้อม') + '\n' +
+        '🌐 เซิร์ฟเวอร์ที่บอทอยู่จริง: **' + joinedGuilds.length.toLocaleString() + '**\n' +
+        '👥 สมาชิกทุกเซิร์ฟเวอร์รวม: **' + memberTotal.toLocaleString() + '** (อาจนับสมาชิกคนเดิมซ้ำ)\n' +
+        '⚙️ เซิร์ฟเวอร์ที่ตั้งค่าอย่างน้อย 1 ฟังก์ชัน: **' + configuredGuilds.size.toLocaleString() + '**\n' +
+        '• Auto-Battle: ' + autoBattleGuilds.size.toLocaleString() + ' เซิร์ฟเวอร์\n' +
+        '• BANDIT: ' + banditGuilds.size.toLocaleString() + ' เซิร์ฟเวอร์\n' +
+        '• AVA: ' + avaGuilds.size.toLocaleString() + ' เซิร์ฟเวอร์\n' +
+        '• BattleLink: ' + battleLinkGuilds.size.toLocaleString() + ' เซิร์ฟเวอร์\n' +
+        '📈 เซิร์ฟเวอร์ที่มีการใช้งานในช่วงที่เก็บข้อมูล (สูงสุด 7 วัน): **' + activeGuilds + '**\n' +
+        '🗓️ เริ่มเก็บสถิติ: ' + trackingStartText + coverageNote + '\n' +
+        '⏱️ บอททำงานต่อเนื่อง: ' + formatBotStatsUptime(client.uptime || 0);
+
+    const pageSize = 10;
+    const pageCount = Math.max(1, Math.ceil(joinedGuilds.length / pageSize));
+    const page = Math.min(pageCount - 1, Math.max(0, Math.floor(Number(requestedPage) || 0)));
+    const embed = new EmbedBuilder()
+        .setColor(0x5865F2)
+        .setTitle('📊 BOT STATS — OWNER ONLY')
+        .setDescription(report);
+
+    const pageGuilds = joinedGuilds.slice(page * pageSize, (page + 1) * pageSize);
+    if (!pageGuilds.length) {
+        embed.addFields({ name: 'รายชื่อเซิร์ฟเวอร์', value: 'ไม่พบเซิร์ฟเวอร์ที่บอทเข้าร่วม' });
+    } else {
+        for (let index = 0; index < pageGuilds.length; index++) {
+            const guild = pageGuilds[index];
+            const safeName = String(guild.name || 'ไม่ทราบชื่อ')
+                .replace(/[\r\n]/g, ' ')
+                .replace(/@/g, '@\u200b')
+                .slice(0, 180);
+            embed.addFields({
+                name: (page * pageSize + index + 1) + '. ' + safeName,
+                value: 'Server ID: ' + String(guild.id),
+                inline: false
+            });
+        }
+    }
+    embed.setFooter({ text: 'หน้า ' + (page + 1) + '/' + pageCount + ' • รายชื่อทั้งหมด ' + joinedGuilds.length + ' เซิร์ฟเวอร์' });
+
+    const components = [];
+    if (pageCount > 1) {
+        components.push(new ActionRowBuilder().addComponents(
+            new ButtonBuilder()
+                .setCustomId('botstats_page:' + OWNER_ID + ':' + (page - 1))
+                .setLabel('หน้าก่อนหน้า')
+                .setStyle(ButtonStyle.Secondary)
+                .setDisabled(page <= 0),
+            new ButtonBuilder()
+                .setCustomId('botstats_page:' + OWNER_ID + ':' + (page + 1))
+                .setLabel('หน้าถัดไป')
+                .setStyle(ButtonStyle.Primary)
+                .setDisabled(page >= pageCount - 1)
+        ));
+    }
+    return { embeds: [embed], components, allowedMentions: { parse: [] } };
+}
+
 function getGuildConfig(guildId, create = true) {
     const id = String(guildId || '').trim();
     if (!id) return create ? createDefaultGuildConfig() : null;
@@ -6281,6 +6380,20 @@ client.once('ready', async () => {
 client.on('interactionCreate', async interaction => {
     const isBotStatsCommand = interaction.isChatInputCommand?.() && interaction.commandName === 'botstats';
     if (!isBotStatsCommand) recordBotUsage(interaction.guildId, interaction.user);
+    if (interaction.isButton() && String(interaction.customId || '').startsWith('botstats_page:')) {
+        const [, targetOwnerId, pageText] = String(interaction.customId).split(':');
+        if (!OWNER_ID || String(interaction.user?.id || '') !== OWNER_ID || targetOwnerId !== OWNER_ID) {
+            return interaction.reply({
+                content: '⛔ ปุ่มสถิตินี้สงวนไว้สำหรับเจ้าของบอทเท่านั้น',
+                ephemeral: true
+            });
+        }
+        const page = Number(pageText);
+        if (!Number.isInteger(page) || page < 0) {
+            return interaction.reply({ content: '❌ หมายเลขหน้าไม่ถูกต้อง', ephemeral: true });
+        }
+        return interaction.update(buildBotStatsPayload(page));
+    }
     const contextGuildId = interaction.guildId ||
         ((interaction.isButton() || interaction.isStringSelectMenu()) ? interaction.customId.split(':')[1] : null);
     return guildContext.run({ guildId: contextGuildId }, async () => {
@@ -6571,61 +6684,10 @@ client.on('interactionCreate', async interaction => {
                 ephemeral: true
             });
         }
-
-        const now = Date.now();
-        const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
-        const joinedGuilds = [...client.guilds.cache.values()];
-        const joinedGuildIds = new Set(joinedGuilds.map(guild => String(guild.id)));
-        const currentConfigs = getAllGuildConfigs().filter(({ guildId }) => joinedGuildIds.has(String(guildId)));
-        const autoBattleGuilds = new Set();
-        const banditGuilds = new Set();
-        const avaGuilds = new Set();
-        const battleLinkGuilds = new Set();
-
-        for (const { guildId, config } of currentConfigs) {
-            const key = String(guildId);
-            if (Array.isArray(config?.autoBattles) && config.autoBattles.some(item => item && item.enabled !== false)) autoBattleGuilds.add(key);
-            if (Array.isArray(config?.banditAuto) && config.banditAuto.some(item => item && item.enabled !== false && item.channelId)) banditGuilds.add(key);
-            if (Array.isArray(config?.avaAuto) && config.avaAuto.some(item => item && item.enabled !== false && item.channelId)) avaGuilds.add(key);
-            if (String(config?.battleLinkChannelId || '').trim()) battleLinkGuilds.add(key);
-        }
-
-        const configuredGuilds = new Set([
-            ...autoBattleGuilds, ...banditGuilds, ...avaGuilds, ...battleLinkGuilds
-        ]);
-        const usageTrackingStart = Number(botUsageTrackingStartedAt) || now;
-        const effectiveWindowStart = Math.max(now - sevenDaysMs, usageTrackingStart);
-        const activeGuilds = Object.entries(botUsageStats).filter(([guildId, stats]) =>
-            joinedGuildIds.has(String(guildId)) &&
-            Number(stats?.lastUsedAt) >= effectiveWindowStart &&
-            Number(stats?.lastUsedAt) <= now
-        ).length;
-        const memberTotal = joinedGuilds.reduce((total, guild) =>
-            total + Math.max(0, Number(guild.memberCount) || guild.members?.cache?.size || 0), 0);
-        const coverageDays = Math.min(7, Math.max(0, (now - usageTrackingStart) / (24 * 60 * 60 * 1000)));
-        const trackingStartText = new Date(usageTrackingStart).toLocaleString('th-TH', {
-            timeZone: 'Asia/Bangkok', dateStyle: 'medium', timeStyle: 'short'
+        return interaction.reply({
+            ...buildBotStatsPayload(0),
+            ephemeral: true
         });
-        const uptimeText = formatBotStatsUptime(client.uptime || 0);
-        const coverageNote = coverageDays < 7
-            ? '\n⚠️ สถิติการใช้งานเพิ่งเริ่มเก็บ ยังไม่ครบ 7 วัน (' + coverageDays.toFixed(1) + ' วัน)'
-            : '';
-
-        const report =
-            '📊 **BOT STATS — OWNER ONLY**\n' +
-            '🟢 สถานะ: ' + (client.isReady() ? 'ออนไลน์' : 'ยังไม่พร้อม') + '\n' +
-            '🌐 เซิร์ฟเวอร์ที่บอทอยู่จริง: **' + joinedGuilds.length.toLocaleString() + '**\n' +
-            '👥 สมาชิกทุกเซิร์ฟเวอร์รวม: **' + memberTotal.toLocaleString() + '** (อาจนับสมาชิกคนเดิมซ้ำ)\n' +
-            '⚙️ เซิร์ฟเวอร์ที่ตั้งค่าอย่างน้อย 1 ฟังก์ชัน: **' + configuredGuilds.size.toLocaleString() + '**\n' +
-            '• Auto-Battle: ' + autoBattleGuilds.size.toLocaleString() + ' เซิร์ฟเวอร์\n' +
-            '• BANDIT: ' + banditGuilds.size.toLocaleString() + ' เซิร์ฟเวอร์\n' +
-            '• AVA: ' + avaGuilds.size.toLocaleString() + ' เซิร์ฟเวอร์\n' +
-            '• BattleLink: ' + battleLinkGuilds.size.toLocaleString() + ' เซิร์ฟเวอร์\n' +
-            '📈 ใช้คำสั่ง/ปุ่ม หรือส่งข้อมูลเข้า AVA/BattleLink ในช่วงที่เก็บข้อมูล (สูงสุด 7 วัน): **' + activeGuilds + '** เซิร์ฟเวอร์\n' +
-            '🗓️ เริ่มเก็บสถิติ: ' + trackingStartText + coverageNote + '\n' +
-            '⏱️ บอททำงานต่อเนื่อง: ' + uptimeText;
-
-        return interaction.reply({ content: report, ephemeral: true });
     }
 
     if (commandName === 'check') {
