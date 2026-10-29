@@ -88,6 +88,12 @@ let githubDataSha = null;
 let githubPersistenceReady = false;
 let guildConfigs = {};
 let banditGlobalVotes = {};
+let botUsageStats = {};
+let botUsageTrackingStartedAt = Date.now();
+let botUsageDirty = false;
+let botUsageSaveTimer = null;
+const BOT_USAGE_SAVE_INTERVAL_MS = 5 * 60 * 1000;
+const BOT_USAGE_RETENTION_MS = 90 * 24 * 60 * 60 * 1000;
 let legacyMigration = null;
 let autoBattleCheckRunning = false;
 let banditSchedulerRunning = false;
@@ -140,6 +146,47 @@ function normalizeBanditGlobalVotes(raw) {
         result[String(eventStamp)] = { confirmations, notOccurred };
     }
     return result;
+}
+
+function normalizeBotUsageStats(raw) {
+    const result = {};
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return result;
+    const now = Date.now();
+    for (const [guildId, entry] of Object.entries(raw)) {
+        if (!/^\d+$/.test(String(guildId)) || !entry || typeof entry !== 'object') continue;
+        const lastUsedAt = Number(entry.lastUsedAt);
+        if (!Number.isFinite(lastUsedAt) || lastUsedAt <= 0 ||
+            lastUsedAt < now - BOT_USAGE_RETENTION_MS || lastUsedAt > now + 5 * 60 * 1000) continue;
+        result[String(guildId)] = { lastUsedAt };
+    }
+    return result;
+}
+
+function scheduleBotUsageSave() {
+    if (botUsageSaveTimer) return;
+    botUsageSaveTimer = setTimeout(() => {
+        botUsageSaveTimer = null;
+        if (!botUsageDirty) return;
+        if (!saveData()) scheduleBotUsageSave();
+    }, BOT_USAGE_SAVE_INTERVAL_MS);
+    botUsageSaveTimer.unref?.();
+}
+
+function recordBotUsage(guildId, user) {
+    const key = String(guildId || '').trim();
+    if (!/^\d+$/.test(key) || user?.bot) return;
+    const now = Date.now();
+    botUsageStats[key] = { lastUsedAt: now };
+    botUsageDirty = true;
+    scheduleBotUsageSave();
+}
+
+function formatBotStatsUptime(milliseconds) {
+    const totalMinutes = Math.max(0, Math.floor(Number(milliseconds || 0) / 60000));
+    const days = Math.floor(totalMinutes / 1440);
+    const hours = Math.floor((totalMinutes % 1440) / 60);
+    const minutes = totalMinutes % 60;
+    return (days ? days + ' วัน ' : '') + (hours ? hours + ' ชม. ' : '') + minutes + ' นาที';
 }
 
 function getGuildConfig(guildId, create = true) {
@@ -229,6 +276,8 @@ function loadData() {
         if (!fs.existsSync(DATA_FILE)) {
             guildConfigs = {};
             banditGlobalVotes = {};
+            botUsageStats = {};
+            botUsageTrackingStartedAt = Date.now();
             console.warn(`⚠️ tracking.json not found at ${DATA_FILE}.`);
             // If GitHub persistence is configured, wait for remote download before
             // creating a new file, so an empty local file cannot overwrite saved data.
@@ -237,6 +286,8 @@ function loadData() {
         }
         const data = JSON.parse(fs.readFileSync(DATA_FILE, 'utf8'));
         banditGlobalVotes = normalizeBanditGlobalVotes(data?.banditGlobalVotes);
+        botUsageStats = normalizeBotUsageStats(data?.botUsageStats);
+        botUsageTrackingStartedAt = Number(data?.botUsageTrackingStartedAt) || Date.now();
         if (data && data.version >= 3 && data.guilds && !Array.isArray(data.guilds)) {
             guildConfigs = Object.fromEntries(Object.entries(data.guilds).map(([id, cfg]) => [id, normalizeGuildConfig(cfg)]));
             console.log('📁 Tracking v3: ' + Object.keys(guildConfigs).length + ' Discord server configuration(s) loaded.');
@@ -247,21 +298,27 @@ function loadData() {
         console.log('📁 Legacy tracking format detected. Migration will run after Discord is ready.');
     } catch (err) {
         console.error('❌ tracking.json load error:', err.message);
-        guildConfigs = {}; banditGlobalVotes = {}; legacyMigration = null;
+        guildConfigs = {}; banditGlobalVotes = {}; botUsageStats = {}; botUsageTrackingStartedAt = Date.now(); legacyMigration = null;
     }
 }
 function saveData() {
     try {
         if (!ensureDataDirectory()) return false;
         guildConfigs = Object.fromEntries(Object.entries(guildConfigs).map(([id, cfg]) => [id, normalizeGuildConfig(cfg)]));
+        botUsageStats = normalizeBotUsageStats(botUsageStats);
         const payload = JSON.stringify({
             version: 3, updatedAt: new Date().toISOString(),
             banditGlobalVotes: normalizeBanditGlobalVotes(banditGlobalVotes),
+            botUsageStats,
+            botUsageTrackingStartedAt: Number(botUsageTrackingStartedAt) || Date.now(),
             guilds: Object.fromEntries(Object.entries(guildConfigs).map(([id, cfg]) => [id, { ...cfg, processedBattles: Array.isArray(cfg.processedBattles) ? cfg.processedBattles.slice(-1000) : [], avaProcessedMessages: Array.isArray(cfg.avaProcessedMessages) ? cfg.avaProcessedMessages.slice(-500) : [] }]))
         }, null, 2);
         const tempFile = `${DATA_FILE}.tmp`;
         fs.writeFileSync(tempFile, payload, 'utf8');
         fs.renameSync(tempFile, DATA_FILE);
+        botUsageDirty = false;
+        if (botUsageSaveTimer) clearTimeout(botUsageSaveTimer);
+        botUsageSaveTimer = null;
         if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY && supabasePersistenceReady) queueSupabaseTrackingSave(payload);
         if (GITHUB_DATA_TOKEN && GITHUB_DATA_REPO && githubPersistenceReady) queueGitHubTrackingSave(payload);
         return true;
@@ -6060,6 +6117,7 @@ async function checkAndSendBanditAlertsForGuild() {
 }
 
 const commands = [
+    new SlashCommandBuilder().setName('botstats').setDescription('ดูสถิติการใช้งานบอท (เจ้าของบอทเท่านั้น)'),
     ...ctaModule.commandBuilders,
     new SlashCommandBuilder().setName('check').setDescription('ระบบตรวจสอบสถิติและรายชื่อ')
         .addSubcommand(s => s.setName('battles').setDescription('เช็กสถิติไฟต์จาก Match ID หรือ ลิงก์').addStringOption(o => o.setName('link_or_id').setDescription('ลิงก์ AlbionBB หรือ Match ID').setRequired(true)))
@@ -6221,6 +6279,8 @@ client.once('ready', async () => {
 });
 
 client.on('interactionCreate', async interaction => {
+    const isBotStatsCommand = interaction.isChatInputCommand?.() && interaction.commandName === 'botstats';
+    if (!isBotStatsCommand) recordBotUsage(interaction.guildId, interaction.user);
     const contextGuildId = interaction.guildId ||
         ((interaction.isButton() || interaction.isStringSelectMenu()) ? interaction.customId.split(':')[1] : null);
     return guildContext.run({ guildId: contextGuildId }, async () => {
@@ -6503,6 +6563,70 @@ client.on('interactionCreate', async interaction => {
     }
     if (!interaction.isChatInputCommand()) return;
     const { commandName } = interaction;
+
+    if (commandName === 'botstats') {
+        if (!OWNER_ID || String(interaction.user?.id || '') !== OWNER_ID) {
+            return interaction.reply({
+                content: '⛔ คำสั่งนี้สงวนไว้สำหรับเจ้าของบอทเท่านั้น',
+                ephemeral: true
+            });
+        }
+
+        const now = Date.now();
+        const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+        const joinedGuilds = [...client.guilds.cache.values()];
+        const joinedGuildIds = new Set(joinedGuilds.map(guild => String(guild.id)));
+        const currentConfigs = getAllGuildConfigs().filter(({ guildId }) => joinedGuildIds.has(String(guildId)));
+        const autoBattleGuilds = new Set();
+        const banditGuilds = new Set();
+        const avaGuilds = new Set();
+        const battleLinkGuilds = new Set();
+
+        for (const { guildId, config } of currentConfigs) {
+            const key = String(guildId);
+            if (Array.isArray(config?.autoBattles) && config.autoBattles.some(item => item && item.enabled !== false)) autoBattleGuilds.add(key);
+            if (Array.isArray(config?.banditAuto) && config.banditAuto.some(item => item && item.enabled !== false && item.channelId)) banditGuilds.add(key);
+            if (Array.isArray(config?.avaAuto) && config.avaAuto.some(item => item && item.enabled !== false && item.channelId)) avaGuilds.add(key);
+            if (String(config?.battleLinkChannelId || '').trim()) battleLinkGuilds.add(key);
+        }
+
+        const configuredGuilds = new Set([
+            ...autoBattleGuilds, ...banditGuilds, ...avaGuilds, ...battleLinkGuilds
+        ]);
+        const usageTrackingStart = Number(botUsageTrackingStartedAt) || now;
+        const effectiveWindowStart = Math.max(now - sevenDaysMs, usageTrackingStart);
+        const activeGuilds = Object.entries(botUsageStats).filter(([guildId, stats]) =>
+            joinedGuildIds.has(String(guildId)) &&
+            Number(stats?.lastUsedAt) >= effectiveWindowStart &&
+            Number(stats?.lastUsedAt) <= now
+        ).length;
+        const memberTotal = joinedGuilds.reduce((total, guild) =>
+            total + Math.max(0, Number(guild.memberCount) || guild.members?.cache?.size || 0), 0);
+        const coverageDays = Math.min(7, Math.max(0, (now - usageTrackingStart) / (24 * 60 * 60 * 1000)));
+        const trackingStartText = new Date(usageTrackingStart).toLocaleString('th-TH', {
+            timeZone: 'Asia/Bangkok', dateStyle: 'medium', timeStyle: 'short'
+        });
+        const uptimeText = formatBotStatsUptime(client.uptime || 0);
+        const coverageNote = coverageDays < 7
+            ? '\n⚠️ สถิติการใช้งานเพิ่งเริ่มเก็บ ยังไม่ครบ 7 วัน (' + coverageDays.toFixed(1) + ' วัน)'
+            : '';
+
+        const report =
+            '📊 **BOT STATS — OWNER ONLY**\n' +
+            '🟢 สถานะ: ' + (client.isReady() ? 'ออนไลน์' : 'ยังไม่พร้อม') + '\n' +
+            '🌐 เซิร์ฟเวอร์ที่บอทอยู่จริง: **' + joinedGuilds.length.toLocaleString() + '**\n' +
+            '👥 สมาชิกทุกเซิร์ฟเวอร์รวม: **' + memberTotal.toLocaleString() + '** (อาจนับสมาชิกคนเดิมซ้ำ)\n' +
+            '⚙️ เซิร์ฟเวอร์ที่ตั้งค่าอย่างน้อย 1 ฟังก์ชัน: **' + configuredGuilds.size.toLocaleString() + '**\n' +
+            '• Auto-Battle: ' + autoBattleGuilds.size.toLocaleString() + ' เซิร์ฟเวอร์\n' +
+            '• BANDIT: ' + banditGuilds.size.toLocaleString() + ' เซิร์ฟเวอร์\n' +
+            '• AVA: ' + avaGuilds.size.toLocaleString() + ' เซิร์ฟเวอร์\n' +
+            '• BattleLink: ' + battleLinkGuilds.size.toLocaleString() + ' เซิร์ฟเวอร์\n' +
+            '📈 ใช้คำสั่ง/ปุ่ม หรือส่งข้อมูลเข้า AVA/BattleLink ในช่วงที่เก็บข้อมูล (สูงสุด 7 วัน): **' + activeGuilds + '** เซิร์ฟเวอร์\n' +
+            '🗓️ เริ่มเก็บสถิติ: ' + trackingStartText + coverageNote + '\n' +
+            '⏱️ บอททำงานต่อเนื่อง: ' + uptimeText;
+
+        return interaction.reply({ content: report, ephemeral: true });
+    }
 
     if (commandName === 'check') {
         const sub = interaction.options.getSubcommand();
@@ -6905,7 +7029,10 @@ client.on('messageCreate', async message => {
     }
     try {
         const handledAva = await processAvaImageMessage(message);
-        if (handledAva) return;
+        if (handledAva) {
+            recordBotUsage(message.guildId, message.author);
+            return;
+        }
     } catch (err) {
         console.error('❌ AVA messageCreate error:', err.message);
     }
@@ -6925,6 +7052,7 @@ client.on('messageCreate', async message => {
     for (const [key, stamp] of battleUrlRateLimit) if (now - stamp > 10 * 60 * 1000) battleUrlRateLimit.delete(key);
     if (battleUrlRateLimit.has(rateKey) && now - battleUrlRateLimit.get(rateKey) < BATTLE_URL_COOLDOWN_MS) { console.log('⏳ Battle URL rate limit: duplicate link suppressed'); return; }
     battleUrlRateLimit.set(rateKey, now);
+    recordBotUsage(message.guildId, message.author);
 
     try {
         const status = await message.reply('⏳ กำลังดึงสถิติและสร้างรายงานจาก Official Albion API...');
