@@ -897,16 +897,28 @@ async function fetchAlbionBBPageFallback(matchId) {
     return null;
 }
 
+function shouldLogAutoBattle404(matchId) {
+    const states = fetchOfficialBattleUncached._failureLogState ||
+        (fetchOfficialBattleUncached._failureLogState = new Map());
+    const key = String(matchId);
+    const count = (Number(states.get(key)) || 0) + 1;
+    states.delete(key);
+    states.set(key, count);
+    while (states.size > 1000) states.delete(states.keys().next().value);
+    return count <= 2 || count === 8 || count % 8 === 0;
+}
+
 async function fetchOfficialBattleUncached(matchId, options = {}) {
     const autoBattle = options?.autoBattle === true;
     // A 429 is generally shared across regional endpoints. Pause official requests
     // globally rather than retrying every region for every candidate battle.
-    // Auto-Battle always tries Asia first. Only after an Asia 404, the Global endpoint may
-    // be queried once, and its response is rejected unless ID, target guild, and player data match.
+    // Auto-Battle battle-detail requests use Asia only. Do not issue a second
+    // Global detail request after an Asia 404; Battle List discovery has its own fallback.
     const urls = autoBattle
         ? [`https://gameinfo-sgp.albiononline.com/api/gameinfo/battles/${encodeURIComponent(matchId)}`]
         : getApiUrls(matchId).reverse();
     let sawRateLimit = false;
+    let suppressAutoBattle404Log = false;
     if (officialApiRateLimitedUntil > Date.now()) {
         console.log('⏭️ Official battle API cooldown active for ' + Math.ceil((officialApiRateLimitedUntil - Date.now()) / 1000) + 's' + (autoBattle ? '; Auto-Battle จะลองใหม่ในรอบถัดไปสำหรับ ' : '; trying public fallbacks for ') + matchId + '.');
     } else {
@@ -925,6 +937,9 @@ async function fetchOfficialBattleUncached(matchId, options = {}) {
                     console.warn('⚠️ Official battle API returned an unexpected payload for ' + matchId + ' from ' + (url.includes('gameinfo-sgp') ? 'Asia' : 'global') + '.');
                 } catch (err) {
                     const status = err.response?.status;
+                    if (autoBattle && Number(status) === 404) {
+                        suppressAutoBattle404Log = !shouldLogAutoBattle404(matchId);
+                    }
                     if (autoBattle) {
                         autoBattleDetailFailure.set('autoBattle:' + String(matchId), {
                             status: Number(status) || 0,
@@ -932,47 +947,13 @@ async function fetchOfficialBattleUncached(matchId, options = {}) {
                             at: Date.now()
                         });
                     }
-                    // Event-only hints have already failed Battle List validation; a second regional
-                    // request adds latency without evidence of a usable Global Battle. Keep the
-                    // Global fallback for authoritative Battle List candidates only.
-                    if (autoBattle && options?.eventOnly !== true && Number(status) === 404 && String(options?.targetGuild || '').trim()) {
-                        const globalUrl = `https://gameinfo.albiononline.com/api/gameinfo/battles/${encodeURIComponent(matchId)}`;
-                        try {
-                            const globalResponse = await axios.get(globalUrl, {
-                                timeout: 5000,
-                                headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'application/json' }
-                            });
-                            if (isValidatedOfficialGlobalBattle(matchId, options.targetGuild, globalResponse.data)) {
-                                console.warn('✅ [Auto-Battle Global fallback] Asia HTTP 404; Global รายละเอียดตรง Match ID=' +
-                                    matchId + ' และกิลด์=' + options.targetGuild + ' พร้อมข้อมูลผู้เล่น จึงรับข้อมูลสำรอง');
-                                return globalResponse.data;
-                            }
-                            const globalId = globalResponse.data?.id ?? globalResponse.data?.Id ??
-                                globalResponse.data?.battleId ?? globalResponse.data?.BattleId ?? 'ไม่ระบุ';
-                            console.warn('⚠️ [Auto-Battle Global fallback] ไม่รับข้อมูลสำรอง Match ID=' + matchId +
-                                ' | Global ตอบกลับแต่ไม่ผ่านการตรวจ ID/กิลด์/รายชื่อผู้เล่น' +
-                                ' | returnedID=' + globalId);
-                        } catch (globalError) {
-                            const globalStatus = Number(globalError?.response?.status || globalError?.statusCode) || 0;
-                            if (globalStatus === 429) {
-                                const waitMs = Math.max(retryAfterMs(globalError), 60000);
-                                officialApiRateLimitedUntil = Math.max(officialApiRateLimitedUntil, Date.now() + waitMs);
-                                console.warn('⏳ [Auto-Battle Global fallback] HTTP 429 | พัก Official API ' +
-                                    Math.ceil(waitMs / 1000) + ' วินาที | Match ID=' + matchId);
-                            } else {
-                                console.warn('ℹ️ [Auto-Battle Global fallback] ไม่สำเร็จ Match ID=' + matchId +
-                                    ' | HTTP=' + (globalStatus || globalError?.code || globalError?.message || 'unknown') +
-                                    ' | คงผล Asia 404 และจะลองใหม่ตาม backoff');
-                            }
-                        }
-                    }
                     if (status === 429) {
                         sawRateLimit = true;
                         const waitMs = Math.max(retryAfterMs(err), 60000);
                         officialApiRateLimitedUntil = Math.max(officialApiRateLimitedUntil, Date.now() + waitMs);
                         console.warn('⏳ Official battle API rate-limited ' + matchId + ' (' + (url.includes('gameinfo-sgp') ? 'Asia' : 'global') + '); pausing official requests for ' + Math.ceil(waitMs / 1000) + 's' + (autoBattle ? '; Auto-Battle จะลองใหม่หลัง cooldown.' : ' and switching to fallbacks.'));
                         break;
-                    } else {
+                    } else if (Number(status) !== 404 || !suppressAutoBattle404Log) {
                         console.warn('⚠️ Official battle API endpoint ' + (endpointIndex + 1) + '/' + requestUrls.length +
                             ' failed for ' + matchId + ' (' + (url.includes('gameinfo-sgp') ? 'Asia' : 'global') + '): ' + (status || err.message) + '.');
                     }
@@ -985,9 +966,11 @@ async function fetchOfficialBattleUncached(matchId, options = {}) {
 
     if (autoBattle) {
         const failure = autoBattleDetailFailure.get('autoBattle:' + String(matchId));
-        console.warn('⚠️ [Auto-Battle] Official GameInfo Asia ยังไม่มีรายละเอียด Match ID=' + matchId +
-            (failure?.status ? ' | HTTP=' + failure.status : '') +
-            ' | จะลองใหม่ตาม backoff โดยไม่เรียก AlbionBB fallback.');
+        if (!suppressAutoBattle404Log) {
+            console.warn('⚠️ [Auto-Battle] Official GameInfo Asia ยังไม่มีรายละเอียด Match ID=' + matchId +
+                (failure?.status ? ' | HTTP=' + failure.status : '') +
+                ' | จะลองใหม่ตาม backoff โดยไม่เรียก AlbionBB fallback.');
+        }
         return null;
     }
 
@@ -2879,7 +2862,7 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
             });
         }
         for (const [id, metadata] of eventQueue.entries()) {
-            if (processedBattles.has(id) || now - (Number(metadata?.firstSeenAt) || now) > 24 * 60 * 60 * 1000) {
+            if (processedBattles.has(id) || now - (Number(metadata?.firstSeenAt) || now) > 30 * 60 * 1000) {
                 eventQueue.delete(id);
             }
         }
@@ -3131,7 +3114,7 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
                     // page and Global succeeds, keep unique IDs from both instead of discarding
                     // potentially newer matches from the successful fallback.
                     const finalIds = [...new Set([...bestPartialIds, ...endpointIdsArray])];
-                    officialCache.set(targetGuildId, { ids: finalIds, expiresAt: Date.now() + 45000 });
+                    officialCache.set(targetGuildId, { ids: finalIds, expiresAt: Date.now() + 45000, complete: true });
                     while (officialCache.size > 100) officialCache.delete(officialCache.keys().next().value);
                     publishSource(finalIds.length ? 'Official Albion API' : 'Official Albion API (ไม่พบไฟต์)');
                     console.log('✅ [Official API หลัก] รวม ' + finalIds.length +
@@ -3144,7 +3127,7 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
             }
 
             if (bestPartialIds.length) {
-                officialCache.set(targetGuildId, { ids: bestPartialIds, expiresAt: Date.now() + 15000 });
+                officialCache.set(targetGuildId, { ids: bestPartialIds, expiresAt: Date.now() + 15000, complete: false });
                 while (officialCache.size > 100) officialCache.delete(officialCache.keys().next().value);
                 publishSource('Official Albion API (partial)');
                 console.warn('⚠️ [Official API หลัก] ใช้ Partial Match IDs=' + bestPartialIds.length +
@@ -3154,7 +3137,8 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
 
             officialCache.set(targetGuildId, {
                 ids: null,
-                expiresAt: Math.max(Date.now() + 10000, officialApiRateLimitedUntil || 0)
+                expiresAt: Math.max(Date.now() + 10000, officialApiRateLimitedUntil || 0),
+                complete: false
             });
             publishSource('Official Albion API unavailable');
             console.warn('⚠️ [Official API หลัก] ค้นหาไฟต์ไม่สำเร็จ | กิลด์=' + (targetGuild || targetGuildId) +
@@ -3169,25 +3153,48 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
         }
     };
 
-    // Keep /battles as the primary discovery queue, while storing unmatched /events IDs
-    // separately for a bounded, validated /events/battle detail fallback.
-    const eventPromise = fetchRecentEventBattleIds();
+    // Battle List is authoritative when its requested pages complete successfully.
+    // Query Events only when Battle List is partial or unavailable, avoiding normal-poll 404s.
     const officialPromise = fetchOfficial({ silentSource: true }).catch(error => {
         console.warn('⚠️ [Official API หลัก] การค้นหา Battle List ล้มเหลว: ' + String(error?.message || error));
         return null;
     });
 
     const officialIds = await officialPromise;
-    const eventResult = await eventPromise;
-    if (eventResult?.valid && Array.isArray(eventResult.ids)) {
-        const provisionalCount = queueEventHints(eventResult.ids, Array.isArray(officialIds) ? officialIds : null);
-        const confirmedCount = Array.isArray(officialIds)
-            ? eventResult.ids.filter(id => officialIds.includes(String(id))).length
-            : 0;
-        console.log('ℹ️ [Auto-Battle Event Hints] Guild=' + (targetGuild || targetGuildId) +
-            ' | Events Battle IDs=' + eventResult.ids.length +
-            ' | ยืนยันใน Battle List=' + confirmedCount +
-            ' | จำนวน Event-only IDs ในคิวสำรอง=' + provisionalCount);
+    const officialCacheEntry = officialCache.get(targetGuildId);
+    const officialListComplete = Array.isArray(officialIds) &&
+        officialCacheEntry?.complete === true && officialCacheEntry.expiresAt > Date.now();
+    let eventResult = { valid: false, ids: [] };
+
+    if (officialListComplete) {
+        const existingEventQueue = pendingEventsByScope.get(queueScopeKey);
+        const discardedEventHints = existingEventQueue?.size || 0;
+        if (existingEventQueue) {
+            for (const queuedId of existingEventQueue.keys()) {
+                const queuedKey = String(queuedId);
+                checkAutoBattlesForGuild._detailRetryStates?.delete(queuedKey);
+                fetchOfficialBattleUncached._failureLogState?.delete(queuedKey);
+                battleFetchFailureUntil.delete('autoBattle:' + queuedKey);
+                autoBattleDetailFailure.delete('autoBattle:' + queuedKey);
+            }
+            existingEventQueue.clear();
+        }
+        if (discardedEventHints > 0) {
+            console.log('⏭️ [Auto-Battle] ดึง Battle List ครบทุกหน้าที่กำหนดแล้ว; ล้าง Event-only queue เก่า ' +
+                discardedEventHints + ' IDs โดยไม่ mark เป็น processed');
+        }
+    } else if (!baselineOnly) {
+        eventResult = await fetchRecentEventBattleIds();
+        if (eventResult?.valid && Array.isArray(eventResult.ids)) {
+            const provisionalCount = queueEventHints(eventResult.ids, Array.isArray(officialIds) ? officialIds : null);
+            const confirmedCount = Array.isArray(officialIds)
+                ? eventResult.ids.filter(id => officialIds.includes(String(id))).length
+                : 0;
+            console.log('ℹ️ [Auto-Battle Event Hints] Guild=' + (targetGuild || targetGuildId) +
+                ' | Events Battle IDs=' + eventResult.ids.length +
+                ' | ยืนยันใน Battle List=' + confirmedCount +
+                ' | จำนวน Event-only IDs ในคิวสำรอง=' + provisionalCount);
+        }
     }
 
     if (Array.isArray(officialIds)) {
@@ -3299,13 +3306,22 @@ function scheduleAutoBattleDetailRetry(matchId, reason) {
         ? [180000, 300000, 600000, 900000, 900000, 900000, 900000]
         : [60000, 120000, 300000, 600000, 900000, 900000, 900000];
     const hourlyRetry = previous.hourlyRetry === true || attempts >= 8;
-    const waitMs = hourlyRetry ? 60 * 60 * 1000 : delays[Math.min(attempts - 1, delays.length - 1)];
+    const baseWaitMs = hourlyRetry ? 60 * 60 * 1000 : delays[Math.min(attempts - 1, delays.length - 1)];
+    const jitterMs = Math.floor(Math.random() * 30001);
+    const retryAt = Math.max(Date.now() + baseWaitMs + jitterMs, officialApiRateLimitedUntil || 0);
+    const waitMs = Math.max(0, retryAt - Date.now());
     retryStates.delete(key);
-    retryStates.set(key, { attempts, nextRetryAt: Date.now() + waitMs, hourlyRetry });
+    retryStates.set(key, { attempts, nextRetryAt: retryAt, hourlyRetry });
+    battleFetchFailureUntil.set('autoBattle:' + key, retryAt);
     while (retryStates.size > 1000) retryStates.delete(retryStates.keys().next().value);
-    console.warn('⚠️ [Auto-Battle Retry] Match ID=' + key + ' | ' + String(reason || 'ยังดึงรายละเอียดไม่ได้') +
-        ' | ครั้งที่ ' + attempts + '/8' +
-        (hourlyRetry ? ' | ครบ 8 ครั้งแล้ว จะลองใหม่ทุก 60 นาที' : ' | ลองใหม่ใน ' + Math.ceil(waitMs / 60000) + ' นาที') + '.');
+    if (!isAsia404 || attempts <= 2 || attempts === 8) {
+        const waitMinutes = Math.floor(waitMs / 60000);
+        const waitSeconds = Math.ceil((waitMs % 60000) / 1000);
+        console.warn('⚠️ [Auto-Battle Retry] Match ID=' + key + ' | ' + String(reason || 'ยังดึงรายละเอียดไม่ได้') +
+            ' | ครั้งที่ ' + attempts + '/8' +
+            (hourlyRetry ? ' | ครบ 8 ครั้งแล้ว จะลองใหม่ทุก 60 นาที' :
+                ' | ลองใหม่ใน ' + waitMinutes + ' นาที ' + waitSeconds + ' วินาที (รวม Jitter 0–30 วินาที)') + '.');
+    }
 }
 
 async function checkAutoBattlesForGuild() {
@@ -3347,6 +3363,23 @@ async function checkAutoBattlesForGuild() {
             const candidateMeta = new Map();
             const pendingQueueScopeKey = getAutoBattleQueueScopeKey(config);
             const pendingEventQueue = fetchGuildRecentBattles._pendingEventMatchIds?.get(pendingQueueScopeKey) || new Map();
+            const eventHintTtlMs = 30 * 60 * 1000;
+            let expiredEventHints = 0;
+            for (const [queuedId, queuedMeta] of pendingEventQueue.entries()) {
+                const firstSeenAt = Number(queuedMeta?.firstSeenAt) || Date.now();
+                if (Date.now() - firstSeenAt > eventHintTtlMs) {
+                    pendingEventQueue.delete(queuedId);
+                    checkAutoBattlesForGuild._detailRetryStates?.delete(String(queuedId));
+                    fetchOfficialBattleUncached._failureLogState?.delete(String(queuedId));
+                    battleFetchFailureUntil.delete('autoBattle:' + String(queuedId));
+                    autoBattleDetailFailure.delete('autoBattle:' + String(queuedId));
+                    expiredEventHints++;
+                }
+            }
+            if (expiredEventHints > 0) {
+                console.log('⏭️ [Auto-Battle] ล้าง Event-only hints ที่อายุเกิน 30 นาที ' +
+                    expiredEventHints + ' IDs โดยไม่ mark เป็น processed');
+            }
             if ((!Array.isArray(recentMatches) || !recentMatches.length) && !pendingEventQueue.size) continue;
             for (const idValue of (Array.isArray(recentMatches) ? recentMatches : [])) {
                 const id = String(idValue || '');
@@ -3483,18 +3516,6 @@ async function checkAutoBattlesForGuild() {
                         officialBattle = await fetchOfficialBattle(detailKey, { autoBattle: true, targetGuild: config.targetGuild, eventOnly: true });
                         if (officialBattle) {
                             detectionSource += ' + Official Battle Detail from Events hint';
-                        } else {
-                            // Kill Events do not guarantee the complete battle roster or per-player Fame.
-                            // Probe them for diagnostics only; never use event aggregates to produce a report.
-                            const probe = await probeOfficialBattleEvents(detailKey, { targetGuild: config.targetGuild });
-                            if (probe) {
-                                console.log('ℹ️ [Auto-Battle Events Probe] Match ID=' + detailKey +
-                                    ' | Records ที่ API ตอบกลับ=' + probe.eventCount +
-                                    ' | Guilds ที่พบ=' + probe.guildNames.length +
-                                    ' | Players ที่ปรากฏ=' + probe.uniquePlayerNames +
-                                    ' | zero-Fame Records=' + probe.zeroFameEventCount +
-                                    ' | จำนวนนี้ไม่ยืนยันว่าเป็น Events ทั้งไฟต์ และไม่ใช้แทน Battle Detail เพื่อคำนวณ Fame/K/D');
-                            }
                         }
                         battleDetailFetchMs = Date.now() - eventCandidateStartedAt;
                     }
@@ -3505,7 +3526,10 @@ async function checkAutoBattlesForGuild() {
                         ? 'Official GameInfo Asia HTTP 404; รายละเอียด Battle/Events อาจยังไม่พร้อม'
                         : 'Official GameInfo Asia ยังไม่มีรายละเอียด Battle หรือข้อมูล Events ไม่ครบ';
                     scheduleAutoBattleDetailRetry(latestMatchId, failureSummary + ' | Source=' + detectionSource);
-                    console.warn('⚠️ ยังดึงข้อมูล Battle ' + latestMatchId + ' ไม่สำเร็จ; ยังไม่ทำเครื่องหมายว่าเสร็จ | Source=' + detectionSource + ' | detailFetch=' + battleDetailFetchMs + 'ms | firstSeenAt=' + new Date(battleListFirstSeenAt).toISOString());
+                    const retryAttemptForLog = Number(checkAutoBattlesForGuild._detailRetryStates?.get(String(latestMatchId))?.attempts) || 0;
+                    if (Number(failure?.status) !== 404 || retryAttemptForLog <= 2 || retryAttemptForLog === 8) {
+                        console.warn('⚠️ ยังดึงข้อมูล Battle ' + latestMatchId + ' ไม่สำเร็จ; ยังไม่ทำเครื่องหมายว่าเสร็จ | Source=' + detectionSource + ' | detailFetch=' + battleDetailFetchMs + 'ms | firstSeenAt=' + new Date(battleListFirstSeenAt).toISOString());
+                    }
                     continue;
                 }
 
