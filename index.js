@@ -3576,15 +3576,9 @@ async function checkAutoBattlesForGuild() {
                     eventOnly: false
                 });
             }
-            for (const [idValue, queued] of pendingEventQueue.entries()) {
-                const id = String(idValue || '');
-                if (!/^\d+$/.test(id) || candidateMeta.has(id) || processedBattles.has(id)) continue;
-                candidateMeta.set(id, {
-                    firstSeenAt: Number(queued?.firstSeenAt) || battleListObservedAt,
-                    source: queued?.source || 'Official GameInfo Events (event-only hint)',
-                    eventOnly: true
-                });
-            }
+            // Event-only IDs remain provisional hints. Do not request /battles/{id}
+            // until the authoritative Battle List confirms the Match ID. When confirmed,
+            // queueCandidates() carries forward the original Events firstSeenAt timestamp.
             const detailRetryStates = checkAutoBattlesForGuild._detailRetryStates ||
                 (checkAutoBattlesForGuild._detailRetryStates = new Map());
             const retryCheckAt = Date.now();
