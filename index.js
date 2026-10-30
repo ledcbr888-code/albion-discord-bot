@@ -143,7 +143,9 @@ function normalizeBanditGlobalVotes(raw) {
         const confirmationSet = new Set(confirmations);
         const notOccurred = [...new Set((Array.isArray(voteState.notOccurred) ? voteState.notOccurred : [])
             .map(String).filter(id => /^\d+$/.test(id) && !confirmationSet.has(id)))];
-        result[String(eventStamp)] = { confirmations, notOccurred };
+        const thresholdNotifiedGuilds = [...new Set((Array.isArray(voteState.thresholdNotifiedGuilds) ? voteState.thresholdNotifiedGuilds : [])
+            .map(String).filter(id => /^\d+$/.test(id)))];
+        result[String(eventStamp)] = { confirmations, notOccurred, thresholdNotifiedGuilds };
     }
     return result;
 }
@@ -5934,7 +5936,10 @@ const BANDIT_ASSAULT_SCHEDULE_UTC = [
     { hour: 15, chance: 60 }
 ];
 const BANDIT_ALERT_WINDOW_MINUTES = 15;
+const BANDIT_CONFIRM_THRESHOLD = 10;
+const BANDIT_THRESHOLD_WINDOW_MS = BANDIT_ALERT_WINDOW_MINUTES * 60 * 1000;
 const BANDIT_SERVER_NAMES = { asia: 'Asia (East)' };
+let banditAlertTimer = null;
 
 function getNextBanditAssault(now = new Date()) {
     const candidates = [];
@@ -5948,6 +5953,21 @@ function getNextBanditAssault(now = new Date()) {
     }
     candidates.sort((a, b) => a.start - b.start);
     return candidates[0] || null;
+}
+
+function getNextBanditAlertAt(now = new Date()) {
+    let event = getNextBanditAssault(now);
+    if (!event) return null;
+
+    let alertAt = event.start.getTime() - BANDIT_THRESHOLD_WINDOW_MS;
+    if (alertAt <= now.getTime()) {
+        // The current event is already inside its 15-minute alert window.
+        // The initial/startup check handles it immediately; schedule the next event.
+        event = getNextBanditAssault(new Date(event.start.getTime() + 1));
+        if (!event) return null;
+        alertAt = event.start.getTime() - BANDIT_THRESHOLD_WINDOW_MS;
+    }
+    return new Date(alertAt);
 }
 
 function banditCountdownText(minutes) {
@@ -5972,6 +5992,7 @@ function banditEventKey(event) {
 }
 
 const banditVoteRefreshQueues = new Map();
+const banditThresholdNoticeInFlight = new Set();
 
 function getBanditGlobalVoteState(eventStamp) {
     const key = String(eventStamp || '');
@@ -5996,7 +6017,8 @@ function getBanditGlobalVoteState(eventStamp) {
     for (const id of confirmations) notOccurred.delete(id);
     banditGlobalVotes[key] = {
         confirmations: [...confirmations].filter(id => /^\d+$/.test(id)),
-        notOccurred: [...notOccurred].filter(id => /^\d+$/.test(id))
+        notOccurred: [...notOccurred].filter(id => /^\d+$/.test(id)),
+        thresholdNotifiedGuilds: []
     };
     return banditGlobalVotes[key];
 }
@@ -6017,6 +6039,18 @@ function setBanditGlobalVote(eventStamp, userId, vote) {
 function banditGlobalVoteCounts(eventStamp) {
     const state = getBanditGlobalVoteState(eventStamp);
     return { confirmed: state.confirmations.length, notOccurred: state.notOccurred.length };
+}
+
+function resetBanditVotesForNewEvent(eventStamp) {
+    const currentKey = String(eventStamp || '');
+    for (const savedKey of Object.keys(banditGlobalVotes)) {
+        if (savedKey !== currentKey) delete banditGlobalVotes[savedKey];
+    }
+    if (!banditGlobalVotes[currentKey] || typeof banditGlobalVotes[currentKey] !== 'object') {
+        banditGlobalVotes[currentKey] = { confirmations: [], notOccurred: [], thresholdNotifiedGuilds: [] };
+    } else if (!Array.isArray(banditGlobalVotes[currentKey].thresholdNotifiedGuilds)) {
+        banditGlobalVotes[currentKey].thresholdNotifiedGuilds = [];
+    }
 }
 
 async function refreshBanditVoteMessages(eventStamp, exceptMessageId = null) {
@@ -6052,6 +6086,99 @@ async function refreshBanditVoteMessages(eventStamp, exceptMessageId = null) {
     });
     banditVoteRefreshQueues.set(key, task);
     return task;
+}
+
+async function sendBanditThresholdNotifications(eventStamp) {
+    const key = String(eventStamp || '');
+    if (!/^\d{10,13}$/.test(key)) return;
+    const eventMs = Number(key);
+    if (!Number.isFinite(eventMs) || Date.now() >= eventMs) return;
+    if (banditGlobalVoteCounts(key).confirmed < BANDIT_CONFIRM_THRESHOLD) return;
+
+    const eventKey = new Date(eventMs).toISOString();
+    const initialState = getBanditGlobalVoteState(key);
+    if (!Array.isArray(initialState.thresholdNotifiedGuilds)) initialState.thresholdNotifiedGuilds = [];
+    const alreadyNotified = new Set(initialState.thresholdNotifiedGuilds.map(String));
+    const pending = [];
+
+    for (const { guildId, config } of getAllGuildConfigs()) {
+        const banditConfigs = Array.isArray(config?.banditAuto) ? config.banditAuto : [];
+        for (const localConfig of banditConfigs) {
+            if (String(localConfig?.lastEventKey || '') !== eventKey ||
+                !localConfig?.lastMessageId || !localConfig?.channelId) continue;
+
+            const serverId = String(guildId);
+            const reservationKey = key + ':' + serverId;
+            if (alreadyNotified.has(serverId) || banditThresholdNoticeInFlight.has(reservationKey)) continue;
+
+            banditThresholdNoticeInFlight.add(reservationKey);
+            pending.push({ guildId: serverId, localConfig, reservationKey });
+            break;
+        }
+    }
+
+    await Promise.all(pending.map(async ({ guildId, localConfig, reservationKey }) => {
+        try {
+            if (Date.now() >= eventMs) return;
+            const channel = await client.channels.fetch(String(localConfig.channelId)).catch(() => null);
+            if (!channel?.messages?.fetch || Date.now() >= eventMs) return;
+
+            const alertMessage = await channel.messages.fetch(String(localConfig.lastMessageId)).catch(() => null);
+            if (!alertMessage) return;
+            const alertCreatedAt = Number(alertMessage.createdTimestamp);
+            const stillInsideWindow = () => {
+                const now = Date.now();
+                return Number.isFinite(alertCreatedAt) &&
+                    now >= alertCreatedAt &&
+                    now - alertCreatedAt <= BANDIT_THRESHOLD_WINDOW_MS &&
+                    now < eventMs;
+            };
+            if (!stillInsideWindow()) return;
+
+            const alertGuild = channel.guild || await client.guilds.fetch(guildId).catch(() => null);
+            let banditRole = null;
+            if (alertGuild && localConfig.banditRoleId) {
+                banditRole = await alertGuild.roles.fetch(localConfig.banditRoleId).catch(() => null);
+            }
+            if (!banditRole && alertGuild) {
+                banditRole = alertGuild.roles.cache.find(role => role.name.toUpperCase() === 'BANDIT') || null;
+                if (!banditRole) {
+                    const allRoles = await alertGuild.roles.fetch().catch(() => null);
+                    banditRole = allRoles?.find(role => role.name.toUpperCase() === 'BANDIT') || null;
+                }
+            }
+            if (!banditRole) {
+                console.warn('⚠️ [BANDIT threshold] ไม่พบยศ BANDIT ใน Discord Server=' + guildId);
+                return;
+            }
+            if (!stillInsideWindow()) return;
+
+            const confirmedNow = banditGlobalVoteCounts(key).confirmed;
+            if (confirmedNow < BANDIT_CONFIRM_THRESHOLD) return;
+            const ictTime = new Date(eventMs).toLocaleTimeString('th-TH', {
+                timeZone: 'Asia/Bangkok', hour: '2-digit', minute: '2-digit', hour12: false
+            });
+            await channel.send({
+                content: '<@&' + banditRole.id + '> ⚔️ **BANDIT ASSAULT — ยืนยันการเกิดครบ ' +
+                    BANDIT_CONFIRM_THRESHOLD + ' คนแล้ว!**\n' +
+                    'มีสมาชิกยืนยันการเกิดในรอบนี้แล้ว **' + confirmedNow + ' คน**\n' +
+                    '🕒 เวลา BANDIT ตามกำหนด: **' + ictTime + ' น.**',
+                allowedMentions: { parse: [], roles: [banditRole.id] }
+            });
+
+            const currentState = getBanditGlobalVoteState(key);
+            if (!Array.isArray(currentState.thresholdNotifiedGuilds)) currentState.thresholdNotifiedGuilds = [];
+            if (!currentState.thresholdNotifiedGuilds.map(String).includes(guildId)) {
+                currentState.thresholdNotifiedGuilds.push(guildId);
+                saveData();
+            }
+        } catch (err) {
+            console.warn('⚠️ [BANDIT threshold] ส่งแจ้งเตือนไม่สำเร็จใน Discord Server=' +
+                guildId + ' | ' + String(err?.message || err));
+        } finally {
+            banditThresholdNoticeInFlight.delete(reservationKey);
+        }
+    }));
 }
 
 function getBanditChanceStyle(chance) {
@@ -6204,13 +6331,49 @@ async function checkAndSendBanditAlertsForGuild() {
                 });
                 config.lastMessageId = alertMessage.id;
                 config.lastEventKey = key;
-                saveData();
                 lastBanditAlertKey[config.guildId] = key;
+                resetBanditVotesForNewEvent(eventStamp);
+                saveData();
+                if (banditGlobalVoteCounts(eventStamp).confirmed >= BANDIT_CONFIRM_THRESHOLD) {
+                    await sendBanditThresholdNotifications(eventStamp);
+                }
             } catch (err) {
                 console.error(`❌ Bandit Assault alert failed for channel ${config.channelId}:`, err.message);
             }
         }
     }
+}
+
+function scheduleNextBanditAlertCheck() {
+    if (banditAlertTimer) clearTimeout(banditAlertTimer);
+    const nowMs = Date.now();
+    const target = getNextBanditAlertAt(new Date(nowMs));
+    if (!target) return;
+
+    const delayMs = Math.max(0, target.getTime() - nowMs);
+    const targetText = target.toLocaleString('th-TH', {
+        timeZone: 'Asia/Bangkok', dateStyle: 'short', timeStyle: 'medium'
+    });
+    console.log('⏰ [BANDIT] ตั้งเวลาตรวจแจ้งเตือนรอบถัดไป: ' + targetText +
+        ' น. (อีก ' + Math.ceil(delayMs / 1000) + ' วินาที)');
+
+    banditAlertTimer = setTimeout(async () => {
+        banditAlertTimer = null;
+        const firedAt = Date.now();
+        const lateMs = Math.max(0, firedAt - target.getTime());
+        if (lateMs > 5000) {
+            console.warn('⚠️ [BANDIT] Timer ทำงานช้ากว่าเวลาที่ตั้งไว้ ' +
+                Math.round(lateMs / 1000) + ' วินาที');
+        }
+        try {
+            await checkAndSendBanditAlerts();
+        } catch (err) {
+            console.error('❌ Bandit scheduled alert check error:', err);
+        } finally {
+            scheduleNextBanditAlertCheck();
+        }
+    }, delayMs);
+    banditAlertTimer.unref?.();
 }
 
 const commands = [
@@ -6371,8 +6534,15 @@ client.once('ready', async () => {
     fetchBattleHubMapIndex()
         .then(names => console.log('🗺️ AVA canonical map cache ready: ' + names.length + ' maps'))
         .catch(err => console.warn('⚠️ AVA canonical map cache preload failed: ' + err.message));
-    setTimeout(() => checkAndSendBanditAlerts().catch(err => console.error('❌ Initial Bandit check error:', err)), 5000);
-    setInterval(() => checkAndSendBanditAlerts().catch(err => console.error('❌ Bandit scheduler error:', err)), 60 * 1000);
+    setTimeout(async () => {
+        try {
+            await checkAndSendBanditAlerts();
+        } catch (err) {
+            console.error('❌ Initial Bandit check error:', err);
+        } finally {
+            scheduleNextBanditAlertCheck();
+        }
+    }, 5000);
 });
 
 client.on('interactionCreate', async interaction => {
@@ -6622,6 +6792,9 @@ client.on('interactionCreate', async interaction => {
             saveData();
             const counts = banditGlobalVoteCounts(eventStamp);
             await interaction.update({ components: [banditAlertComponents(guildId, eventStamp, counts.confirmed, counts.notOccurred)] });
+            if (counts.confirmed >= BANDIT_CONFIRM_THRESHOLD) {
+                await sendBanditThresholdNotifications(eventStamp);
+            }
             await refreshBanditVoteMessages(eventStamp, interaction.message?.id);
             return;
         }
