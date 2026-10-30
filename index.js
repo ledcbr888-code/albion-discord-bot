@@ -5937,6 +5937,7 @@ const BANDIT_ASSAULT_SCHEDULE_UTC = [
 ];
 const BANDIT_ALERT_WINDOW_MINUTES = 15;
 const BANDIT_CONFIRM_THRESHOLD = 10;
+const BANDIT_ALERT_RETRY_MS = 30 * 1000;
 const BANDIT_THRESHOLD_WINDOW_MS = BANDIT_ALERT_WINDOW_MINUTES * 60 * 1000;
 const BANDIT_SERVER_NAMES = { asia: 'Asia (East)' };
 let banditAlertTimer = null;
@@ -5961,8 +5962,22 @@ function getNextBanditAlertAt(now = new Date()) {
 
     let alertAt = event.start.getTime() - BANDIT_THRESHOLD_WINDOW_MS;
     if (alertAt <= now.getTime()) {
-        // The current event is already inside its 15-minute alert window.
-        // The initial/startup check handles it immediately; schedule the next event.
+        // If a channel/API failure prevented the current alert, retry only its
+        // unsent destinations while there is still time before the scheduled event.
+        const currentKey = banditEventKey(event);
+        const hasPendingAlert = getAllGuildConfigs().some(({ config }) =>
+            Array.isArray(config?.banditAuto) && config.banditAuto.some(item =>
+                (item?.server || 'asia') === 'asia' &&
+                item?.enabled !== false &&
+                Boolean(item?.channelId) &&
+                String(item?.lastEventKey || '') !== currentKey
+            )
+        );
+        if (now.getTime() < event.start.getTime() && hasPendingAlert) {
+            return new Date(Math.min(now.getTime() + BANDIT_ALERT_RETRY_MS, event.start.getTime() - 1));
+        }
+
+        // The scheduled point has passed and this event was sent, so schedule the next one.
         event = getNextBanditAssault(new Date(event.start.getTime() + 1));
         if (!event) return null;
         alertAt = event.start.getTime() - BANDIT_THRESHOLD_WINDOW_MS;
