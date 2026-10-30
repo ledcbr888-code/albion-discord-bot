@@ -3064,13 +3064,21 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
             .filter(id => /^\d+$/.test(id)))];
         if (baselineOnly) return normalized;
         const pendingIds = pendingByScope.get(queueScopeKey) || new Map();
+        const pendingEventIds = pendingEventsByScope.get(queueScopeKey) || new Map();
         const next = new Map();
         for (const id of normalized) {
             if (processedBattles.has(id)) continue;
             const previous = pendingIds.get(id);
+            const eventHint = pendingEventIds.get(id);
+            const firstSeenCandidates = [
+                Number(previous?.firstSeenAt),
+                Number(eventHint?.firstSeenAt)
+            ].filter(value => Number.isFinite(value) && value > 0);
+            const wasEventHint = Boolean(eventHint) ||
+                String(previous?.source || '').includes('Official GameInfo Events');
             next.set(id, {
-                firstSeenAt: Number(previous?.firstSeenAt) || Date.now(),
-                source
+                firstSeenAt: firstSeenCandidates.length ? Math.min(...firstSeenCandidates) : Date.now(),
+                source: wasEventHint ? 'Official GameInfo Events + ' + source : source
             });
         }
         // Events-only hints are provisional, not report candidates. Drop any legacy hint-only
@@ -3171,14 +3179,20 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
                 console.warn('⚠️ [Official API Events] Server=Asia | Guild=' + (targetGuild || targetGuildId) +
                     ' | สาเหตุ=' + detail + ' | API latency=' + (Date.now() - requestStartedAt) +
                     'ms | จะใช้ Battle List ตามปกติต่อ');
+                let eventFailureCooldownMs = 15000;
                 if (Number(status) === 429) {
                     const waitMs = Math.max(retryAfterMs(error), 60000);
                     officialApiRateLimitedUntil = Math.max(officialApiRateLimitedUntil, Date.now() + waitMs);
+                    eventFailureCooldownMs = Math.max(60000, officialApiRateLimitedUntil - Date.now());
                     console.warn('⏳ [Official API Events] HTTP 429 | พักการเรียก API ' + Math.ceil(waitMs / 1000) + ' วินาที');
+                } else if (Number(status) === 401 || Number(status) === 403) {
+                    eventFailureCooldownMs = 5 * 60 * 1000;
+                    console.warn('⏸️ [Official API Events] HTTP ' + status +
+                        ' | พัก Endpoint นี้ 5 นาที เพื่อลดการเรียกซ้ำถี่; Battle List ยังทำงานตามปกติ');
                 }
                 officialEventCache.set(targetGuildId, {
                     valid: false, ids: [],
-                    expiresAt: Math.max(Date.now() + 5000, officialApiRateLimitedUntil || 0)
+                    expiresAt: Math.max(Date.now() + eventFailureCooldownMs, officialApiRateLimitedUntil || 0)
                 });
                 return { valid: false, ids: [] };
             }
@@ -3332,62 +3346,52 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
         }
     };
 
-    // Battle List is authoritative when its requested pages complete successfully.
-    // Query Events only when Battle List is partial or unavailable, avoiding normal-poll 404s.
+    // Battle List and Events are checked concurrently on every normal poll.
+    // Events-only IDs are provisional: reporting still requires Official Battle Detail
+    // and the existing exact guild validation below.
     const officialPromise = fetchOfficial({ silentSource: true }).catch(error => {
         console.warn('⚠️ [Official API หลัก] การค้นหา Battle List ล้มเหลว: ' + String(error?.message || error));
         return null;
     });
+    const eventPromise = baselineOnly
+        ? Promise.resolve({ valid: false, ids: [] })
+        : fetchRecentEventBattleIds().catch(error => {
+            console.warn('⚠️ [Official API Events] การค้นหา Event hints ล้มเหลว: ' +
+                String(error?.message || error));
+            return { valid: false, ids: [] };
+        });
+    const [officialIds, eventResult] = await Promise.all([officialPromise, eventPromise]);
 
-    const officialIds = await officialPromise;
-    const officialCacheEntry = officialCache.get(targetGuildId);
-    const officialListComplete = Array.isArray(officialIds) &&
-        officialCacheEntry?.complete === true && officialCacheEntry.expiresAt > Date.now();
-    let eventResult = { valid: false, ids: [] };
-
-    if (officialListComplete) {
-        const existingEventQueue = pendingEventsByScope.get(queueScopeKey);
-        const discardedEventHints = existingEventQueue?.size || 0;
-        if (existingEventQueue) {
-            for (const queuedId of existingEventQueue.keys()) {
-                const queuedKey = String(queuedId);
-                checkAutoBattlesForGuild._detailRetryStates?.delete(queuedKey);
-                fetchOfficialBattleUncached._failureLogState?.delete(queuedKey);
-                battleFetchFailureUntil.delete('autoBattle:' + queuedKey);
-                autoBattleDetailFailure.delete('autoBattle:' + queuedKey);
-            }
-            existingEventQueue.clear();
-        }
-        if (discardedEventHints > 0) {
-            console.log('⏭️ [Auto-Battle] ดึง Battle List ครบทุกหน้าที่กำหนดแล้ว; ล้าง Event-only queue เก่า ' +
-                discardedEventHints + ' IDs โดยไม่ mark เป็น processed');
-        }
-    } else if (!baselineOnly) {
-        eventResult = await fetchRecentEventBattleIds();
-        if (eventResult?.valid && Array.isArray(eventResult.ids)) {
-            const provisionalCount = queueEventHints(eventResult.ids, Array.isArray(officialIds) ? officialIds : null);
-            const confirmedCount = Array.isArray(officialIds)
-                ? eventResult.ids.filter(id => officialIds.includes(String(id))).length
-                : 0;
-            console.log('ℹ️ [Auto-Battle Event Hints] Guild=' + (targetGuild || targetGuildId) +
-                ' | Events Battle IDs=' + eventResult.ids.length +
-                ' | ยืนยันใน Battle List=' + confirmedCount +
-                ' | จำนวน Event-only IDs ในคิวสำรอง=' + provisionalCount);
-        }
-    }
-
+    let officialCandidates = null;
     if (Array.isArray(officialIds)) {
-        const source = officialIds.length
+        const officialSource = officialIds.length
             ? 'Official GameInfo Battle List'
             : 'Official GameInfo Battle List (ไม่พบไฟต์ที่ตรงกิลด์)';
-        setSource(source);
-        return queueCandidates(officialIds, source);
+        // Merge any previous Event firstSeenAt before confirmed IDs leave the hint queue.
+        officialCandidates = queueCandidates(officialIds, officialSource);
     }
+
+    if (!baselineOnly && eventResult?.valid && Array.isArray(eventResult.ids)) {
+        const provisionalCount = queueEventHints(
+            eventResult.ids,
+            Array.isArray(officialIds) ? officialIds : null
+        );
+        const confirmedCount = Array.isArray(officialIds)
+            ? eventResult.ids.filter(id => officialIds.includes(String(id))).length
+            : 0;
+        console.log('ℹ️ [Official API Events] ตรวจควบคู่ Battle List | Guild=' +
+            (targetGuild || targetGuildId) +
+            ' | Events Battle IDs=' + eventResult.ids.length +
+            ' | ยืนยันใน Battle List=' + confirmedCount +
+            ' | Event-only IDs ที่รอยืนยันรายละเอียด=' + provisionalCount);
+    }
+
+    if (Array.isArray(officialIds)) return officialCandidates;
 
     if (eventResult?.valid && Array.isArray(eventResult.ids) && eventResult.ids.length) {
         const source = 'Official Albion API unavailable; Events-only queue active';
         setSource(source);
-        console.warn('⚠️ [Auto-Battle] Battle List ใช้งานไม่ได้; เก็บ Event-only IDs ในคิวสำรองเพื่อทดลองดึง Events Battle แบบจำกัดและตรวจความครบถ้วน');
+        console.warn('⚠️ [Auto-Battle] Battle List ใช้งานไม่ได้; เก็บ Event-only IDs ในคิวสำรองเพื่อทดลองดึง Official Battle Detail');
         return baselineOnly ? null : queueCandidates([], source);
     }
 
