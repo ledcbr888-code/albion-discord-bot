@@ -672,8 +672,8 @@ async function renderRosterBatches(event, deps) {
     try { rosterImg = await buildRosterSmallIconImage(event); } catch (e) { console.error('small roster img error', e.message); }
     const embed = new EmbedBuilder()
         .setColor(0x2b2d31)
-        .setTitle(safeText(event.title, 80))
-        .setDescription('Date: ' + dateStr + '\nTime (UTC): ' + timeUTCStr + '\nTime (Local): ' + timeLocalStr + ' (<t:' + unix + ':R>)\n\n⚔️ Party 1\n' + lines.join('\n') + '\n\nEvent ID: ' + event.id)
+        .setTitle('📣 ' + safeText(event.title, 80))
+        .setDescription('📆 Date: ' + dateStr + '\n🕒 Time (UTC): ' + timeUTCStr + '\n🕔 Time (Local): ' + timeLocalStr + ' (<t:' + unix + ':R>)\n\n⚔️ Party 1\n' + lines.join('\n') + '\n\nEvent ID: ' + event.id)
         .setFooter({ text: 'Albion Online • CTA Roster' });
     const files = [];
     if (rosterImg) { const attName = 'cta-party-' + event.id + '.png'; files.push(new AttachmentBuilder(rosterImg, { name: attName })); embed.setImage('attachment://' + attName); }
