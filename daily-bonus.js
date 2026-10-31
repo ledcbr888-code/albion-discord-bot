@@ -273,6 +273,12 @@ function parseDailyBonusMessage(message) {
     }
     const hasAnyContent = parsed.seasonal.length || parsed.activities.length || parsed.gathering.length || parsed.production.length;
     if (!hasAnyContent) return { complete: false, reason: 'All bonus sections were empty.', rawText };
+    const untimed = Object.entries(parsed).flatMap(([section, entries]) =>
+        entries.filter(entry => !entry.countdown?.timestamp).map(entry => section + ': ' + (entry.title || 'unnamed entry'))
+    );
+    if (untimed.length) {
+        return { complete: false, reason: 'Missing countdown values: ' + untimed.join('; '), rawText };
+    }
     return { complete: true, parsed, rawText, baseTimestamp };
 }
 
@@ -620,6 +626,15 @@ async function processSourceMessage(message, deps) {
 
 function scheduleDeliveryRetry(message, deps, dayKey) {
     if (retryTimer || !isInsideDailyWindow()) return;
+    const dayState = getDailyState(deps).days[dayKey];
+    if (!dayState) return;
+    const retryCount = Number(dayState.processingRetryCount) || 0;
+    if (retryCount >= DAILY_BONUS_MAX_RETRIES) {
+        console.warn('⚠️ Daily Bonus processing retry limit reached for ' + dayKey);
+        return;
+    }
+    dayState.processingRetryCount = retryCount + 1;
+    deps.saveData();
     retryTimer = setTimeout(async () => {
         retryTimer = null;
         if (!isInsideDailyWindow() || getBangkokDayKey() !== dayKey) return;
