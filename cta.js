@@ -11,11 +11,11 @@ const crypto = require('crypto');
 const axios = require('axios');
 
 const WEAPONS = {
-    Caller: ['Mace','Golem','HOJ','MorningStar','Dreadstorm','Incubus','Witchwork','GA','Perma','Soulscythe'],
-    Tank: ['Mace','Golem','HOJ','MorningStar','Dreadstorm','Incubus','Bedrock','HeavyMace','Hammer','Polehammer','Grovekeeper','GA','BlackMonk','Soulscythe','StaffofBalance'],
-    DPS: ['Realmbreaker','Longbow','EnergyShaper','Siegebow','Rotcaller','Demonfang','BridledFury','Bloodletter','Dawnsong','Blazing','Brimstone','Perma','Spiked','BattleBracers','Hellfire','Ravenstrike','Ursine','Lightcaller','RiftGlaive','Spirithunter','HeronSpear','InfinityBlade','Galatine','Carving','Kingmaker','ClarentBlade','Mistpiercer'],
-    Support: ['Lifecurse','Shadowcaller','Damnation','Rotcaller','Locus','Occult','Oathkeepers','Rootbound','Enigmatic'],
-    Heal: ['Hallowfall','Fallen','Exalted','Blight','WildStaff','Rampant','Forgebark']
+    Caller: ['Mace', 'Golem', 'HOJ', 'MorningStar', 'Dreadstorm', 'Incubus', 'Witchwork', 'GA', 'Perma', 'Soulscythe', 'Polehammer', 'Primal Staff'],
+    Tank: ['Mace', 'Golem', 'HOJ', 'MorningStar', 'Dreadstorm', 'Incubus', 'Bedrock', 'HeavyMace', 'Hammer', 'Polehammer', 'Grovekeeper', 'GA', 'BlackMonk', 'Soulscythe', 'StaffofBalance', 'Forge Hammers', 'Great Hammer', 'Stillgaze Staff'],
+    DPS: ['Realmbreaker', 'Longbow', 'EnergyShaper', 'Siegebow', 'Rotcaller', 'Demonfang', 'BridledFury', 'Bloodletter', 'Dawnsong', 'Blazing', 'Brimstone', 'Perma', 'Spiked', 'BattleBracers', 'Hellfire', 'Ravenstrike', 'Ursine', 'Lightcaller', 'RiftGlaive', 'Spirithunter', 'HeronSpear', 'InfinityBlade', 'Galatine', 'Carving', 'Kingmaker', 'ClarentBlade', 'Mistpiercer', 'Hellspawn Staff', 'Great Frost Staff', 'Arctic Staff', 'Infernal Staff', 'Dagger', 'Dagger Pair', 'Bow of Badon', 'Crystal Reaper', 'Carrioncaller', 'Bear Paws'],
+    Support: ['Lifecurse', 'Shadowcaller', 'Damnation', 'Rotcaller', 'Locus', 'Occult', 'Oathkeepers', 'Rootbound', 'Enigmatic'],
+    Heal: ['Hallowfall', 'Fallen', 'Exalted', 'Blight', 'WildStaff', 'Rampant', 'Forgebark', 'Redemption Staff', 'Holy Staff', 'Divine Staff', 'Lifetouch Staff', 'Great Holy Staff', 'Great Nature Staff', 'Nature Staff', 'Ironroot Staff']
 };
 const ROLE_ORDER = ['Tank', 'DPS', 'Support', 'Heal'];
 const ROLE_LABELS = { Caller: '📣 Caller', Tank: '🛡️ Tank', DPS: '⚔️ DPS', Support: '🔮 Support', Heal: '💚 Heal' };
