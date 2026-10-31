@@ -3803,25 +3803,79 @@ async function checkAutoBattlesForGuild() {
                         `➕ Kills + Deaths: \`${(Number(result.totalKills) + Number(result.totalDeaths)).toLocaleString()}\`\n` +
                         `🔗 Battle Link: <${result.battleUrl}>`;
                     const reportFiles = Array.isArray(result.payload.files) ? result.payload.files : [];
+                    const totalDeliveryParts = Math.max(1, reportFiles.length);
+                    const sendStartedAt = Date.now();
+                    let sentDeliveryParts = 0;
+
+                    const formatBattleDelayAt = (atMs, label) => {
+                        if (Number.isFinite(battleTimeMs) && battleTimeMs > 0) {
+                            const diffSec = Math.max(0, Math.floor((atMs - battleTimeMs) / 1000));
+                            const mins = Math.floor(diffSec / 60);
+                            const secs = diffSec % 60;
+                            return label + '=' + mins + 'นาที ' + secs + 'วิ' +
+                                ' (เวลาเริ่มไฟต์=' + new Date(battleTimeMs).toISOString() + ')' +
+                                (mins >= 10 ? ' ⚠️ ช้า' : '');
+                        }
+                        return label + '=ไม่ทราบ (Official API ไม่มีเวลาเริ่มไฟต์)';
+                    };
+
+                    // Log the delay before sending, so a later attachment failure cannot hide the battle age.
+                    console.log('⏱️ [Auto-Battle Delivery] MatchID=' + latestMatchId +
+                        ' | ผลลัพธ์=เริ่มส่งรายงาน' +
+                        ' | จำนวนข้อความ/รูป=' + totalDeliveryParts +
+                        ' | ' + formatBattleDelayAt(sendStartedAt, 'ดีเลย์ก่อนเริ่มส่ง') + '.');
+
+                    const sendReportPart = async (payload, partLabel, partNumber) => {
+                        const partStartedAt = Date.now();
+                        try {
+                            await channel.send(payload);
+                            sentDeliveryParts++;
+                            console.log('📨 [Auto-Battle Delivery] MatchID=' + latestMatchId +
+                                ' | ส่วนที่=' + partLabel +
+                                ' | ผลลัพธ์=ส่งสำเร็จ' +
+                                ' | สำเร็จ=' + sentDeliveryParts + '/' + totalDeliveryParts +
+                                ' | Discord send=' + (Date.now() - partStartedAt) + 'ms' +
+                                ' | ' + formatBattleDelayAt(Date.now(), 'ดีเลย์ขณะส่ง') + '.');
+                        } catch (sendError) {
+                            const failedAt = Date.now();
+                            console.error('❌ [Auto-Battle Delivery] MatchID=' + latestMatchId +
+                                ' | ผลลัพธ์=' + (sentDeliveryParts > 0 ? 'ส่งได้บางส่วน' : 'ส่งไม่สำเร็จ') +
+                                ' | สำเร็จ=' + sentDeliveryParts + '/' + totalDeliveryParts +
+                                ' | ล้มเหลวที่=' + partLabel +
+                                ' | ลำดับ=' + partNumber + '/' + totalDeliveryParts +
+                                ' | ' + formatBattleDelayAt(failedAt, 'ดีเลย์ ณ จุดส่งล้มเหลว') +
+                                ' | Error=' + String(sendError?.message || sendError) + '.');
+                            throw sendError;
+                        }
+                    };
+
                     if (reportFiles.length > 0) {
-                        // Discord displays multiple image attachments side-by-side in one message.
-                        // Send each report image in its own message so they stack vertically.
-                        await channel.send({ content: alertText, files: [reportFiles[0]] });
-                        for (const reportFile of reportFiles.slice(1)) {
-                            await channel.send({ files: [reportFile] });
+                        // Keep the existing delivery order: alert + first image, then remaining images.
+                        await sendReportPart(
+                            { content: alertText, files: [reportFiles[0]] },
+                            'ข้อความแจ้งเตือน + รูปที่ 1',
+                            1
+                        );
+                        for (let i = 1; i < reportFiles.length; i++) {
+                            await sendReportPart(
+                                { files: [reportFiles[i]] },
+                                'รูปที่ ' + (i + 1),
+                                i + 1
+                            );
                         }
                     } else {
-                        await channel.send({ content: alertText + '\n' + (result.payload.content || '') });
+                        await sendReportPart(
+                            { content: alertText + '\n' + (result.payload.content || '') },
+                            'ข้อความแจ้งเตือน',
+                            1
+                        );
                     }
+
+                    const reportSentAtMs = Date.now();
                     let delayText = '';
                     if (Number.isFinite(battleTimeMs) && battleTimeMs > 0) {
-                        const sentAtMs = Date.now();
-                        const diffSec = Math.max(0, Math.floor((sentAtMs - battleTimeMs) / 1000));
-                        const mins = Math.floor(diffSec / 60);
-                        const secs = diffSec % 60;
-                        delayText = ' | ⏱️ ดีเลย์รวมตั้งแต่เริ่มไฟต์จนส่งรายงาน=' + mins + 'นาที ' + secs + 'วิ' +
-                            ' (เวลาเริ่มไฟต์=' + new Date(battleTimeMs).toISOString() + ')';
-                        if (mins >= 10) delayText += ' ⚠️ ช้า';
+                        delayText = ' | ⏱️ ดีเลย์รวมตั้งแต่เริ่มไฟต์จนส่งรายงาน=' +
+                            formatBattleDelayAt(reportSentAtMs, '').replace(/^=/, '');
                     } else {
                         delayText = ' | ⏱️ ดีเลย์รวมตั้งแต่เริ่มไฟต์จนส่งรายงาน=ไม่ทราบ (Official API ไม่มีเวลาเริ่มไฟต์)';
                     }
@@ -3829,8 +3883,9 @@ async function checkAutoBattlesForGuild() {
                     console.log('✅ ส่งรายงาน Auto-Battle สำเร็จ | Match ID=' + latestMatchId +
                         ' | ห้อง=' + config.channelId +
                         ' | แหล่งที่พบก่อน=' + detectionSource +
-                        ' | เวลาจากพบ Match ID จนส่งรายงาน=' + Math.max(0, Date.now() - battleListFirstSeenAt) + 'ms' +
+                        ' | เวลาจากพบ Match ID จนส่งรายงาน=' + Math.max(0, reportSentAtMs - battleListFirstSeenAt) + 'ms' +
                         ' | detailFetch=' + (battleDetailFetchMs === null ? 'unknown' : battleDetailFetchMs + 'ms') +
+                        ' | ส่งครบ=' + sentDeliveryParts + '/' + totalDeliveryParts +
                         delayText + '.');
                 } else {
                     const decisionAt = Date.now();
