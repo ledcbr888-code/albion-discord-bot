@@ -29,6 +29,35 @@ const PRESETS = {
 };
 
 const sessions = new Map();
+// Serialize UI updates per CTA session and acknowledge component interactions immediately.
+const sessionInteractionQueues = new Map();
+function queueSessionInteractionUpdate(session, interaction, task) {
+    const key = String(session.id);
+    const action = String(interaction.customId || '').split(':')[1] || 'unknown';
+    // Begin acknowledgement immediately, even if an earlier UI update is still queued.
+    const acknowledgement = interaction.deferUpdate().then(() => true).catch(err => {
+        console.warn('⚠️ [CTA] Interaction acknowledgement failed: action=' + action +
+            ' code=' + String(err?.code || 'unknown') + ' message=' + String(err?.message || err));
+        return false;
+    });
+    const previous = sessionInteractionQueues.get(key) || Promise.resolve();
+    let current;
+    current = previous.catch(() => {}).then(async () => {
+        if (!(await acknowledgement)) return;
+        if (sessions.get(key) !== session && action !== 'cancel') {
+            await interaction.followUp({
+                content: '⏰ CTA นี้ถูกยกเลิกหรือหมดอายุแล้ว กรุณาเริ่มตั้งค่าใหม่',
+                flags: MessageFlags.Ephemeral
+            }).catch(() => {});
+            return;
+        }
+        await task();
+    }).finally(() => {
+        if (sessionInteractionQueues.get(key) === current) sessionInteractionQueues.delete(key);
+    });
+    sessionInteractionQueues.set(key, current);
+    return current;
+}
 const MAX_TEMPLATES = 25;
 const MAX_EVENTS = 20;
 const WEAPON_DIR = path.join(__dirname, 'weapon');
@@ -711,56 +740,95 @@ async function handleInteraction(interaction, deps) {
     if (!session) { await interaction.reply({ content: '⏰ หมดอายุ', flags: MessageFlags.Ephemeral }); return true; }
     if (!ownerOnly(interaction, session)) { await interaction.reply({ content: '🔒 เฉพาะผู้สร้าง', flags: MessageFlags.Ephemeral }); return true; }
     if (action === 'presetmenu') {
-        await interaction.update({
-            content: '📌 **เลือก Preset สำหรับ CTA**\nเลือกชุดตำแหน่งที่ต้องการ หรือกลับไปปรับจำนวนเอง',
-            components: [
-                ...buildPresetRows(session.id),
-                new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('cta:presetback:' + session.id).setLabel('กลับไปเลือกจำนวนเอง').setStyle(ButtonStyle.Secondary))
-            ]
-        });
-        return true;
+        return queueSessionInteractionUpdate(session, interaction, async () => {
+            await interaction.editReply({
+                content: '📌 **เลือก Preset สำหรับ CTA**\nเลือกชุดตำแหน่งที่ต้องการ หรือกลับไปปรับจำนวนเอง',
+                components: [
+                    ...buildPresetRows(session.id),
+                    new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('cta:presetback:' + session.id).setLabel('กลับไปเลือกจำนวนเอง').setStyle(ButtonStyle.Secondary))
+                ]
+            });
+        }).then(() => true);
     }
     if (action === 'preset') {
         const presetKey = parts[3];
-        if (presetKey === 'clear') { session.counts = { Tank: 0, DPS: 0, Support: 0, Heal: 0 }; await interaction.update(countPanel(session)); return true; }
-        const preset = PRESETS[presetKey];
-        if (!preset) { await interaction.reply({ content: '❌ ไม่พบ preset', flags: MessageFlags.Ephemeral }); return true; }
-        session.counts = { ...preset.counts };
-        await interaction.update(countPanel(session));
-        return true;
+        if (presetKey !== 'clear' && !PRESETS[presetKey]) {
+            await interaction.reply({ content: '❌ ไม่พบ preset', flags: MessageFlags.Ephemeral });
+            return true;
+        }
+        return queueSessionInteractionUpdate(session, interaction, async () => {
+            session.counts = presetKey === 'clear'
+                ? { Tank: 0, DPS: 0, Support: 0, Heal: 0 }
+                : { ...PRESETS[presetKey].counts };
+            await interaction.editReply(countPanel(session));
+        }).then(() => true);
     }
-    if (action === 'presetback') { await interaction.update(countPanel(session)); return true; }
+    if (action === 'presetback') {
+        return queueSessionInteractionUpdate(session, interaction, async () => {
+            await interaction.editReply(countPanel(session));
+        }).then(() => true);
+    }
     if (action === 'count') {
-        const role = parts[3]; const value = Number(interaction.values[0]);
-        session.counts[role] = value;
-        await interaction.update(countPanel(session));
-        return true;
+        const role = parts[3];
+        const value = Number(interaction.values?.[0]);
+        if (!ROLE_ORDER.includes(role) || !Number.isInteger(value) || value < 0 ||
+            value > Math.max(0, session.maxPlayers - 1)) {
+            await interaction.reply({ content: '❌ จำนวนตำแหน่งไม่ถูกต้อง กรุณาเลือกใหม่', flags: MessageFlags.Ephemeral });
+            return true;
+        }
+        return queueSessionInteractionUpdate(session, interaction, async () => {
+            session.counts[role] = value;
+            await interaction.editReply(countPanel(session));
+        }).then(() => true);
     }
     if (action === 'countnext') {
-        const total = 1 + ROLE_ORDER.reduce((s, r) => s + (Number(session.counts[r]) || 0), 0);
-        if (total <= 1) { await interaction.reply({ content: '❌ ต้องมีอย่างน้อย 2 คน (Caller + 1)', flags: MessageFlags.Ephemeral }); return true; }
-        if (total > session.maxPlayers) { await interaction.reply({ content: '❌ เกินจำนวนสูงสุด ' + session.maxPlayers + ' คน', flags: MessageFlags.Ephemeral }); return true; }
-        session.slots = [{ role: 'Caller', weapon: null }];
-        for (const role of ROLE_ORDER) { const c = Number(session.counts[role]) || 0; for (let i = 0; i < c; i++) session.slots.push({ role, weapon: null }); }
-        session.slotIndex = 0; session.page = 0; session.search = '';
-        await interaction.update(await weaponPanelPayload(session));
-        return true;
+        return queueSessionInteractionUpdate(session, interaction, async () => {
+            const total = 1 + ROLE_ORDER.reduce((s, r) => s + (Number(session.counts[r]) || 0), 0);
+            if (total <= 1) {
+                await interaction.followUp({ content: '❌ ต้องมีอย่างน้อย 2 คน (Caller + 1)', flags: MessageFlags.Ephemeral });
+                return;
+            }
+            if (total > session.maxPlayers) {
+                await interaction.followUp({ content: '❌ เกินจำนวนสูงสุด ' + session.maxPlayers + ' คน', flags: MessageFlags.Ephemeral });
+                return;
+            }
+            session.slots = [{ role: 'Caller', weapon: null }];
+            for (const role of ROLE_ORDER) {
+                const count = Number(session.counts[role]) || 0;
+                for (let i = 0; i < count; i++) session.slots.push({ role, weapon: null });
+            }
+            session.slotIndex = 0; session.page = 0; session.search = ''; session.gridPage = 0;
+            // The Interaction is already deferred; only now build potentially slow weapon artwork.
+            await interaction.editReply(await weaponPanelPayload(session));
+        }).then(() => true);
     }
     if (action === 'gridpage') {
-        session.gridPage = Number(parts[3]) || 0;
-        await interaction.update(await weaponPanelPayload(session));
-        return true;
+        return queueSessionInteractionUpdate(session, interaction, async () => {
+            session.gridPage = Number(parts[3]) || 0;
+            await interaction.editReply(await weaponPanelPayload(session));
+        }).then(() => true);
     }
     if (action === 'weapon') {
-        const slotIndex = Number(parts[3]); const page = Number(parts[4]) || 0;
-        const weapon = interaction.values[0];
-        if (slotIndex !== session.slotIndex) { await interaction.reply({ content: 'ไม่ตรง', flags: MessageFlags.Ephemeral }); return true; }
-        session.slots[slotIndex].weapon = weapon;
-        session.slotIndex++;
-        session.page = 0; session.gridPage = 0; session.search = '';
-        if (session.slotIndex >= session.slots.length) { await interaction.update(savePrompt(session)); return true; }
-        await interaction.update(await weaponPanelPayload(session));
-        return true;
+        const slotIndex = Number(parts[3]);
+        const weapon = interaction.values?.[0];
+        return queueSessionInteractionUpdate(session, interaction, async () => {
+            if (slotIndex !== session.slotIndex) {
+                await interaction.followUp({ content: 'การเลือกอาวุธนี้ล้าสมัยแล้ว กรุณาเลือกจากหน้าปัจจุบัน', flags: MessageFlags.Ephemeral });
+                return;
+            }
+            if (!session.slots[slotIndex] || !WEAPONS[session.slots[slotIndex].role]?.includes(weapon)) {
+                await interaction.followUp({ content: '❌ อาวุธที่เลือกไม่ถูกต้อง กรุณาเลือกใหม่', flags: MessageFlags.Ephemeral });
+                return;
+            }
+            session.slots[slotIndex].weapon = weapon;
+            session.slotIndex++;
+            session.page = 0; session.gridPage = 0; session.search = '';
+            if (session.slotIndex >= session.slots.length) {
+                await interaction.editReply(savePrompt(session));
+                return;
+            }
+            await interaction.editReply(await weaponPanelPayload(session));
+        }).then(() => true);
     }
     if (action === 'search') {
         const index = Number(parts[3]);
@@ -770,14 +838,35 @@ async function handleInteraction(interaction, deps) {
     }
     if (action === 'searchsubmit') {
         const index = Number(parts[3]);
-        if (index !== session.slotIndex) { await interaction.reply({ content: 'ไม่ตรง', flags: MessageFlags.Ephemeral }); return true; }
-        session.search = safeText(interaction.fields.getTextInputValue('query'), 40); session.page = 0; session.gridPage = 0;
-        await interaction.update(await weaponPanelPayload(session));
-        return true;
+        return queueSessionInteractionUpdate(session, interaction, async () => {
+            if (index !== session.slotIndex) {
+                await interaction.followUp({ content: 'คำค้นหานี้ล้าสมัยแล้ว กรุณาเปิดค้นหาใหม่', flags: MessageFlags.Ephemeral });
+                return;
+            }
+            session.search = safeText(interaction.fields.getTextInputValue('query'), 40);
+            session.page = 0; session.gridPage = 0;
+            await interaction.editReply(await weaponPanelPayload(session));
+        }).then(() => true);
     }
-    if (action === 'page') { session.page = Number(parts[3]) || 0; session.gridPage = 0; await interaction.update(await weaponPanelPayload(session)); return true; }
-    if (action === 'prev') { session.slotIndex = Math.max(0, session.slotIndex - 1); session.page = 0; session.search = ''; await interaction.update(await weaponPanelPayload(session)); return true; }
-    if (action === 'cancel') { sessions.delete(id); await interaction.update({ content: 'ยกเลิกแล้ว', components: [], embeds: [], attachments: [] }); return true; }
+    if (action === 'page') {
+        return queueSessionInteractionUpdate(session, interaction, async () => {
+            session.page = Number(parts[3]) || 0; session.gridPage = 0;
+            await interaction.editReply(await weaponPanelPayload(session));
+        }).then(() => true);
+    }
+    if (action === 'prev') {
+        return queueSessionInteractionUpdate(session, interaction, async () => {
+            session.slotIndex = Math.max(0, session.slotIndex - 1);
+            session.page = 0; session.gridPage = 0; session.search = '';
+            await interaction.editReply(await weaponPanelPayload(session));
+        }).then(() => true);
+    }
+    if (action === 'cancel') {
+        return queueSessionInteractionUpdate(session, interaction, async () => {
+            sessions.delete(id);
+            await interaction.editReply({ content: 'ยกเลิกแล้ว', components: [], embeds: [], attachments: [] });
+        }).then(() => true);
+    }
     if (action === 'saveyes') { await interaction.showModal(saveModal(id)); return true; }
     if (action === 'saveno') {
         await interaction.deferUpdate();
@@ -837,15 +926,29 @@ async function handleInteraction(interaction, deps) {
     if (action === 'deletetemplate') {
         const cfg = getConfig(session.guildId, deps), template = cfg.ctaTemplates.find(t => String(t.id) === String(interaction.values[0]));
         if (!template) { await interaction.reply({ content: 'ไม่พบ', flags: MessageFlags.Ephemeral }); return true; }
-        session.pendingDeleteTemplateId = String(template.id);
-        await interaction.update({ content: 'ยืนยันลบชุดแผน **' + safeText(template.name, 60) + '**?', components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('cta:confirmdelete:' + id).setLabel('ยืนยันลบ').setStyle(ButtonStyle.Danger), new ButtonBuilder().setCustomId('cta:cancel:' + id).setLabel('ยกเลิก').setStyle(ButtonStyle.Secondary))] });
-        return true;
+        return queueSessionInteractionUpdate(session, interaction, async () => {
+            session.pendingDeleteTemplateId = String(template.id);
+            await interaction.editReply({
+                content: 'ยืนยันลบชุดแผน **' + safeText(template.name, 60) + '**?',
+                components: [new ActionRowBuilder().addComponents(
+                    new ButtonBuilder().setCustomId('cta:confirmdelete:' + id).setLabel('ยืนยันลบ').setStyle(ButtonStyle.Danger),
+                    new ButtonBuilder().setCustomId('cta:cancel:' + id).setLabel('ยกเลิก').setStyle(ButtonStyle.Secondary)
+                )]
+            });
+        }).then(() => true);
     }
     if (action === 'confirmdelete') {
-        const cfg = getConfig(session.guildId, deps), before = cfg.ctaTemplates.length;
-        cfg.ctaTemplates = cfg.ctaTemplates.filter(t => String(t.id) !== String(session.pendingDeleteTemplateId || ''));
-        if (cfg.ctaTemplates.length === before) { await interaction.update({ content: 'ไม่พบแผนเดิม', components: [] }); return true; }
-        deps.saveData(); await interaction.update({ content: '🗑️ ลบแล้ว', components: [] }); sessions.delete(id); return true;
+        return queueSessionInteractionUpdate(session, interaction, async () => {
+            const cfg = getConfig(session.guildId, deps), before = cfg.ctaTemplates.length;
+            cfg.ctaTemplates = cfg.ctaTemplates.filter(t => String(t.id) !== String(session.pendingDeleteTemplateId || ''));
+            if (cfg.ctaTemplates.length === before) {
+                await interaction.editReply({ content: 'ไม่พบแผนเดิม', components: [] });
+                return;
+            }
+            deps.saveData();
+            await interaction.editReply({ content: '🗑️ ลบแล้ว', components: [] });
+            sessions.delete(id);
+        }).then(() => true);
     }
     return false;
 }
