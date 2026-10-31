@@ -130,12 +130,12 @@ function collectMessageText(message) {
 }
 
 function getSectionMarker(line) {
-    const text = String(line || '').trim();
-    if (/^seasonal\s+events\b/i.test(text)) return { key: 'seasonal', remainder: text.replace(/^seasonal\s+events\b/i, '').trim() };
-    if (/^activities\b/i.test(text)) return { key: 'activities', remainder: text.replace(/^activities\b/i, '').trim() };
+    const text = String(line || '').trim().replace(/^[^\p{L}\p{N}]+/u, '');
+    if (/^seasonal\s+events\b/i.test(text)) return { key: 'seasonal', remainder: text.replace(/^seasonal\s+events\b/i, '').replace(/^[:\-\s]+/, '').trim() };
+    if (/^activities\b/i.test(text)) return { key: 'activities', remainder: text.replace(/^activities\b/i, '').replace(/^[:\-\s]+/, '').trim() };
     const gathering = text.match(/^gathering\s+bonus\s*:?\s*(.*)$/i);
-    if (gathering) return { key: 'gathering', remainder: gathering[1].trim() };
-    if (/^production\s+bonuses\b/i.test(text)) return { key: 'production', remainder: text.replace(/^production\s+bonuses\b/i, '').trim() };
+    if (gathering) return { key: 'gathering', remainder: gathering[1].replace(/^[:\-\s]+/, '').trim() };
+    if (/^production\s+bonuses\b/i.test(text)) return { key: 'production', remainder: text.replace(/^production\s+bonuses\b/i, '').replace(/^[:\-\s]+/, '').trim() };
     return null;
 }
 
@@ -331,14 +331,14 @@ function roundedRect(ctx, x, y, width, height, radius, fill, stroke) {
 
 function findDailyItemImage(itemName) {
     if (!fs.existsSync(DAILY_ASSET_DIR)) return null;
-    const target = String(itemName || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const target = String(itemName || '').toLowerCase().replace(/^t\d+/, '').replace(/[^a-z0-9]/g, '');
     if (!target) return null;
     const files = fs.readdirSync(DAILY_ASSET_DIR).filter(file => /\.png$/i.test(file));
     const exact = files.find(file => file.replace(/\.png$/i, '').toLowerCase().replace(/[^a-z0-9]/g, '') === target);
     if (exact) return path.join(DAILY_ASSET_DIR, exact);
     const partial = files.find(file => {
         const name = file.replace(/\.png$/i, '').toLowerCase().replace(/[^a-z0-9]/g, '');
-        return name === target || name.startsWith(target) || target.startsWith(name);
+        return name === target || name.startsWith(target) || target.startsWith(name) || target.includes(name) || name.includes(target);
     });
     return partial ? path.join(DAILY_ASSET_DIR, partial) : null;
 }
@@ -542,6 +542,7 @@ async function processSourceMessage(message, deps) {
     if (state.completedDate === dayKey) return 'complete';
     const messageId = String(message?.id || '');
     if (!messageId || processingMessageIds.has(messageId)) return 'busy';
+    if (state.processedSourceMessageIds.includes(messageId)) return 'duplicate';
     const previousDayState = state.days[dayKey];
     if (previousDayState?.sourceMessageId && previousDayState.sourceMessageId !== messageId) {
         return previousDayState.status === 'complete' ? 'complete' : 'pending';
@@ -782,6 +783,11 @@ async function handleInteraction(interaction, deps) {
         }
 
         config.dailyBonusReportChannelId = String(channel.id);
+        const currentDayState = getDailyState(deps).days[getBangkokDayKey()];
+        if (currentDayState?.deliveryAttemptsByGuild) delete currentDayState.deliveryAttemptsByGuild[String(interaction.guildId)];
+        if (currentDayState?.sentByGuild && !currentDayState.sentByGuild[String(interaction.guildId)]) {
+            currentDayState.processingRetryCount = 0;
+        }
         deps.saveData();
         await interaction.reply({
             content: '✅ Daily Bonus reporting is enabled. Reports will be posted in <#' + channel.id + '> during 06:00–07:10 Asia/Bangkok. The inbox channel is configured internally.',
