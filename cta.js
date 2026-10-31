@@ -29,6 +29,13 @@ const PRESETS = {
 };
 
 const sessions = new Map();
+const SESSION_TTL_MS = 30 * 60 * 1000;
+const SIGNUP_GRACE_MS = 2 * 60 * 60 * 1000;
+const EVENT_CLEANUP_MS = 12 * 60 * 60 * 1000;
+const LIFECYCLE_SWEEP_INTERVAL_MS = 60 * 1000;
+const eventLifecycleTimers = new Map();
+let lifecycleSweepTimer = null;
+let lifecycleDeps = null;
 // Serialize UI updates per CTA session and acknowledge component interactions immediately.
 const sessionInteractionQueues = new Map();
 function queueSessionInteractionUpdate(session, interaction, task) {
@@ -69,6 +76,121 @@ const weaponIconPathCache = new Map(); // name -> path or null
 const weaponImageCache = new Map(); // name -> loaded Image (canvas)
 const gridCache = new Map(); // key -> Buffer
 const rosterCache = new Map(); // eventId+hash -> Buffer
+
+function touchSession(session) {
+    if (session) session.lastActivityAt = Date.now();
+}
+function isEventSignupClosed(event, now = Date.now()) {
+    return !!event?.signupClosedAt || now >= Number(event?.startAt || 0) + SIGNUP_GRACE_MS;
+}
+function clearEventLifecycleTimers(id) {
+    const timers = eventLifecycleTimers.get(String(id));
+    if (!timers) return;
+    if (timers.close) clearTimeout(timers.close);
+    if (timers.cleanup) clearTimeout(timers.cleanup);
+    eventLifecycleTimers.delete(String(id));
+}
+function markEventSignupClosed(event, deps) {
+    if (!event.signupClosedAt) {
+        event.signupClosedAt = new Date().toISOString();
+        try { deps.saveData(); } catch (err) {
+            console.error('[CTA] ไม่สามารถบันทึกสถานะปิดรับสมัคร:', err.message);
+        }
+    }
+}
+async function closeEventSignup(event, deps) {
+    if (!event) return;
+    markEventSignupClosed(event, deps);
+    await refreshEvent(event, deps);
+}
+async function cleanupEventData(event, deps) {
+    if (!event) return;
+    clearEventLifecycleTimers(event.id);
+
+    // Remove only the controls. The original CTA message, embed and roster image stay in Discord.
+    try {
+        const channel = await deps.client.channels.fetch(event.channelId).catch(() => null);
+        if (channel && event.messageId) {
+            const message = await channel.messages.fetch(event.messageId).catch(() => null);
+            if (message) await message.edit({ components: [] }).catch(err => {
+                console.warn('[CTA] ปิดปุ่มกิจกรรมเก่าไม่สำเร็จ:', err.message);
+            });
+        }
+    } catch (err) {
+        console.warn('[CTA] ไม่สามารถปิดปุ่มกิจกรรมเก่า:', err.message);
+    }
+
+    const cfg = deps.getGuildConfig(event.guildId, false);
+    if (cfg && Array.isArray(cfg.ctaEvents)) {
+        const before = cfg.ctaEvents.length;
+        cfg.ctaEvents = cfg.ctaEvents.filter(item => String(item.id) !== String(event.id));
+        if (cfg.ctaEvents.length !== before) {
+            try { deps.saveData(); } catch (err) {
+                console.error('[CTA] ไม่สามารถบันทึกการล้างกิจกรรมเก่า:', err.message);
+            }
+        }
+    }
+    const cachePrefix = String(event.id) + ':';
+    for (const key of rosterCache.keys()) {
+        if (String(key).startsWith(cachePrefix)) rosterCache.delete(key);
+    }
+}
+function scheduleEventLifecycle(event, deps) {
+    if (!event || !event.id || !Number.isFinite(Number(event.startAt))) return;
+    const key = String(event.id);
+    if (eventLifecycleTimers.has(key)) return;
+
+    const now = Date.now();
+    const closeAt = Number(event.startAt) + SIGNUP_GRACE_MS;
+    const cleanupAt = Number(event.startAt) + EVENT_CLEANUP_MS;
+    const timers = { close: null, cleanup: null };
+
+    if (cleanupAt <= now) {
+        timers.cleanup = setTimeout(() => {
+            cleanupEventData(event, deps).catch(err => console.error('[CTA] cleanup error:', err.message));
+        }, 0);
+    } else {
+        timers.close = setTimeout(() => {
+            closeEventSignup(event, deps).catch(err => console.error('[CTA] auto-close error:', err.message));
+        }, Math.max(0, closeAt - now));
+        timers.cleanup = setTimeout(() => {
+            cleanupEventData(event, deps).catch(err => console.error('[CTA] cleanup error:', err.message));
+        }, Math.max(0, cleanupAt - now));
+    }
+    timers.close?.unref?.();
+    timers.cleanup?.unref?.();
+    eventLifecycleTimers.set(key, timers);
+}
+function sweepCtaLifecycle(deps) {
+    const now = Date.now();
+    for (const [id, session] of sessions) {
+        const lastActivity = Number(session.lastActivityAt || session.createdAt || now);
+        if (now - lastActivity >= SESSION_TTL_MS && !sessionInteractionQueues.has(String(id))) {
+            sessions.delete(id);
+        }
+    }
+
+    const guildCache = deps?.client?.guilds?.cache;
+    if (!guildCache || typeof guildCache.values !== 'function') return;
+    for (const guild of guildCache.values()) {
+        const cfg = deps.getGuildConfig(guild.id, false);
+        if (!cfg || !Array.isArray(cfg.ctaEvents)) continue;
+        for (const event of cfg.ctaEvents) scheduleEventLifecycle(event, deps);
+    }
+}
+function ensureLifecycleRunner(deps) {
+    lifecycleDeps = deps;
+    if (lifecycleSweepTimer) return;
+    const runSweep = () => {
+        if (!lifecycleDeps) return;
+        try { sweepCtaLifecycle(lifecycleDeps); } catch (err) {
+            console.error('[CTA] lifecycle sweep error:', err.message);
+        }
+    };
+    runSweep();
+    lifecycleSweepTimer = setInterval(runSweep, LIFECYCLE_SWEEP_INTERVAL_MS);
+    lifecycleSweepTimer.unref?.();
+}
 
 const commandBuilders = [
     new SlashCommandBuilder()
@@ -594,9 +716,10 @@ function eventEmbed(event) {
     return new EmbedBuilder().setColor(0xd99a3d).setTitle('⚔️ CTA — ' + event.title).setDescription('🕒 เวลาเริ่ม: **' + new Date(event.startAt).toISOString().slice(11, 16) + ' UTC**\n⏳ นับถอยหลัง: <t:' + unix + ':R>\n👥 ผู้ลงชื่อ: **' + joined + '/' + event.maxPlayers + '** คน\n📌 หัวหน้า CTA: <@' + event.ownerId + '>').setFooter({ text: 'Albion Online • CTA Roster' });
 }
 function eventButtons(event) {
+    const signupClosed = isEventSignupClosed(event);
     return [new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('cta:join:' + event.id).setLabel('Join').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('cta:leave:' + event.id).setLabel('Leave').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('cta:join:' + event.id).setLabel('Join').setStyle(ButtonStyle.Primary).setDisabled(signupClosed),
+        new ButtonBuilder().setCustomId('cta:leave:' + event.id).setLabel('Leave').setStyle(ButtonStyle.Secondary).setDisabled(signupClosed),
         new ButtonBuilder().setCustomId('cta:ping:' + event.id).setLabel('⚔️ Ping').setStyle(ButtonStyle.Danger)
     )];
 }
@@ -632,6 +755,7 @@ async function publishEvent(session, deps) {
     cfg.ctaEvents.push(event);
     cfg.ctaEvents = cfg.ctaEvents.slice(-MAX_EVENTS);
     deps.saveData();
+    scheduleEventLifecycle(event, deps);
     return event;
 }
 function ownerOnly(interaction, session) { return String(interaction.user.id) === String(session.userId); }
@@ -652,6 +776,7 @@ function reuseModal(id) {
     return modal;
 }
 async function handleInteraction(interaction, deps) {
+    ensureLifecycleRunner(deps);
     if (interaction.isChatInputCommand && interaction.isChatInputCommand()) {
         const { commandName } = interaction;
         if (commandName === 'cta') {
@@ -662,7 +787,7 @@ async function handleInteraction(interaction, deps) {
             if (!title) { await interaction.reply({ content: '❌ กรุณาระบุชื่อ CTA', flags: MessageFlags.Ephemeral }); return true; }
             if (!startAt) { await interaction.reply({ content: '❌ เวลา UTC ไม่ถูกต้อง', flags: MessageFlags.Ephemeral }); return true; }
             const id = token();
-            const session = { id, guildId: interaction.guildId, userId: interaction.user.id, channelId: interaction.channelId, title, startAt, maxPlayers, counts: { Tank: 0, DPS: 0, Support: 0, Heal: 0 }, slots: [], slotIndex: 0, page: 0, search: '' };
+            const session = { id, guildId: interaction.guildId, userId: interaction.user.id, channelId: interaction.channelId, title, startAt, maxPlayers, counts: { Tank: 0, DPS: 0, Support: 0, Heal: 0 }, slots: [], slotIndex: 0, page: 0, search: '', lastActivityAt: Date.now() };
             sessions.set(id, session);
             await interaction.reply({ ...countPanel(session), flags: MessageFlags.Ephemeral });
             return true;
@@ -672,7 +797,7 @@ async function handleInteraction(interaction, deps) {
             const templates = cfg.ctaTemplates.slice(0, MAX_TEMPLATES);
             if (!templates.length) { await interaction.reply({ content: 'ยังไม่มีชุดแผน', flags: MessageFlags.Ephemeral }); return true; }
             const id = token();
-            sessions.set(id, { id, guildId: interaction.guildId, userId: interaction.user.id, channelId: interaction.channelId, mode: 'reuse' });
+            sessions.set(id, { id, guildId: interaction.guildId, userId: interaction.user.id, channelId: interaction.channelId, mode: 'reuse', lastActivityAt: Date.now() });
             const options = templates.map(t => ({ label: safeText(t.name, 100) || 'แผน CTA', value: String(t.id), description: 'Party 1 · ' + t.slots.length + ' ช่อง' }));
             await interaction.reply({ content: '📚 เลือกชุดแผน', components: [
                 new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('cta:template:' + id).setPlaceholder('เลือกชุดแผน CTA').addOptions(options)),
@@ -704,6 +829,12 @@ async function handleInteraction(interaction, deps) {
     if (action === 'join' || action === 'leave') {
         const event = getEvent(interaction.guildId, id, deps);
         if (!event) { await interaction.reply({ content: '❌ ไม่พบ CTA', flags: MessageFlags.Ephemeral }); return true; }
+        if (isEventSignupClosed(event)) {
+            markEventSignupClosed(event, deps);
+            await interaction.reply({ content: '⏰ CTA เริ่มไปแล้ว 2 ชั่วโมง ปิดรับสมัครและถอนชื่อแล้ว', flags: MessageFlags.Ephemeral });
+            refreshEvent(event, deps).catch(() => {});
+            return true;
+        }
         if (action === 'join') {
             const existing = event.slots.find(s => s.userId === interaction.user.id);
             if (existing) { await interaction.reply({ content: 'คุณลงชื่อแล้วช่อง ' + (event.slots.indexOf(existing) + 1), flags: MessageFlags.Ephemeral }); return true; }
@@ -726,6 +857,12 @@ async function handleInteraction(interaction, deps) {
     if (action === 'signup') {
         const event = getEvent(interaction.guildId, id, deps);
         if (!event) { await interaction.reply({ content: '❌ ไม่พบ CTA', flags: MessageFlags.Ephemeral }); return true; }
+        if (isEventSignupClosed(event)) {
+            markEventSignupClosed(event, deps);
+            await interaction.reply({ content: '⏰ CTA เริ่มไปแล้ว 2 ชั่วโมง ปิดรับสมัครแล้ว ไม่สามารถลงชื่อได้', flags: MessageFlags.Ephemeral });
+            refreshEvent(event, deps).catch(() => {});
+            return true;
+        }
         const index = Number(interaction.values[0]), slot = event.slots[index];
         if (!slot || slot.userId) { await interaction.reply({ content: 'ช่องนี้ถูกเลือกแล้ว', flags: MessageFlags.Ephemeral }); return true; }
         if (event.slots.some(s => s.userId === interaction.user.id)) { await interaction.reply({ content: 'คุณลงชื่อแล้ว', flags: MessageFlags.Ephemeral }); return true; }
@@ -737,7 +874,12 @@ async function handleInteraction(interaction, deps) {
         return true;
     }
     const session = sessions.get(id);
-    if (!session) { await interaction.reply({ content: '⏰ หมดอายุ', flags: MessageFlags.Ephemeral }); return true; }
+    if (!session || Date.now() - Number(session.lastActivityAt || Date.now()) >= SESSION_TTL_MS) {
+        sessions.delete(id);
+        await interaction.reply({ content: '⏰ Session ตั้งค่า CTA หมดอายุแล้ว เนื่องจากไม่มีการใช้งานเกิน 30 นาที กรุณาเริ่มใหม่', flags: MessageFlags.Ephemeral });
+        return true;
+    }
+    touchSession(session);
     if (!ownerOnly(interaction, session)) { await interaction.reply({ content: '🔒 เฉพาะผู้สร้าง', flags: MessageFlags.Ephemeral }); return true; }
     if (action === 'presetmenu') {
         return queueSessionInteractionUpdate(session, interaction, async () => {
@@ -870,7 +1012,13 @@ async function handleInteraction(interaction, deps) {
     if (action === 'saveyes') { await interaction.showModal(saveModal(id)); return true; }
     if (action === 'saveno') {
         await interaction.deferUpdate();
-        try { const event = await publishEvent(session, deps); await interaction.editReply({ content: '✅ เผยแพร่ CTA **' + event.title + '** แล้ว', components: [] }); } catch (err) { await interaction.followUp({ content: '❌ ' + err.message, flags: MessageFlags.Ephemeral }); }
+        try {
+            const event = await publishEvent(session, deps);
+            sessions.delete(id);
+            await interaction.editReply({ content: '✅ เผยแพร่ CTA **' + event.title + '** แล้ว', components: [] });
+        } catch (err) {
+            await interaction.followUp({ content: '❌ ' + err.message, flags: MessageFlags.Ephemeral });
+        }
         return true;
     }
     if (action === 'savesubmit') {
@@ -882,7 +1030,13 @@ async function handleInteraction(interaction, deps) {
         const duplicate = cfg.ctaTemplates.findIndex(t => String(t.name).toLowerCase() === name.toLowerCase());
         if (duplicate >= 0) cfg.ctaTemplates[duplicate] = template; else cfg.ctaTemplates.push(template);
         cfg.ctaTemplates = cfg.ctaTemplates.slice(-MAX_TEMPLATES); deps.saveData();
-        try { const event = await publishEvent(session, deps); await interaction.editReply({ content: '✅ บันทึก **' + name + '** และเผยแพร่ CTA **' + event.title + '** แล้ว' }); } catch (err) { await interaction.editReply({ content: '⚠️ บันทึกแล้วแต่เผยแพร่ไม่สำเร็จ: ' + err.message }); }
+        try {
+            const event = await publishEvent(session, deps);
+            sessions.delete(id);
+            await interaction.editReply({ content: '✅ บันทึก **' + name + '** และเผยแพร่ CTA **' + event.title + '** แล้ว' });
+        } catch (err) {
+            await interaction.editReply({ content: '⚠️ บันทึกแล้วแต่เผยแพร่ไม่สำเร็จ: ' + err.message });
+        }
         return true;
     }
     if (action === 'template') {
@@ -907,7 +1061,14 @@ async function handleInteraction(interaction, deps) {
         if (!startAt || !session.template || !session.title) { await interaction.reply({ content: '❌ ไม่ถูกต้อง', flags: MessageFlags.Ephemeral }); return true; }
         session.startAt = startAt;
         await interaction.deferUpdate();
-        try { const event = await publishEvent(session, deps); await interaction.editReply({ content: '✅ เรียกใช้ชุดแผนแล้ว **' + event.title + '**', components: [] }); } catch (err) { await interaction.editReply({ content: '❌ ' + err.message, components: [] }); }
+        try {
+            const event = await publishEvent(session, deps);
+            sessions.delete(id);
+            await interaction.editReply({ content: '✅ เรียกใช้ชุดแผนแล้ว **' + event.title + '**', components: [] });
+        } catch (err) {
+            await interaction.editReply({ content: '❌ ' + err.message, components: [] });
+            sessions.delete(id);
+        }
         return true;
     }
     if (action === 'deletetemplates') {
