@@ -614,7 +614,7 @@ function weaponPanel(session) {
         const nextGridPage = (currentGridPage + 1) % totalImagePages;
         controls.unshift(new ButtonBuilder()
             .setCustomId('cta:gridpage:' + session.id + ':' + nextGridPage)
-            .setLabel('รูปอาวุธหน้าถัดไป ' + (nextGridPage + 1) + '/' + totalImagePages)
+            .setLabel('รูปอาวุธ ' + (currentGridPage + 1) + '/' + totalImagePages + ' · ถัดไป')
             .setStyle(ButtonStyle.Primary));
     }
     rows.push(new ActionRowBuilder().addComponents(controls));
