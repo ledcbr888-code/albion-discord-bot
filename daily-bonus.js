@@ -46,7 +46,6 @@ const commandBuilders = [
         .addSubcommand(sub => sub
             .setName('remove')
             .setDescription('Disable daily bonus reports in this server'))
-        .toJSON()
 ];
 
 function getBangkokParts(value = Date.now()) {
