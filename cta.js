@@ -717,8 +717,9 @@ function eventEmbed(event) {
 }
 function eventButtons(event) {
     const signupClosed = isEventSignupClosed(event);
+    const joinedCount = event.slots.filter(slot => slot.userId).length;
     return [new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('cta:join:' + event.id).setLabel('Join').setStyle(ButtonStyle.Primary).setDisabled(signupClosed),
+        new ButtonBuilder().setCustomId('cta:join:' + event.id).setLabel('Join (' + joinedCount + '/' + event.maxPlayers + ')').setStyle(ButtonStyle.Primary).setDisabled(signupClosed),
         new ButtonBuilder().setCustomId('cta:leave:' + event.id).setLabel('Leave').setStyle(ButtonStyle.Secondary).setDisabled(signupClosed),
         new ButtonBuilder().setCustomId('cta:ping:' + event.id).setLabel('⚔️ Ping').setStyle(ButtonStyle.Danger)
     )];
