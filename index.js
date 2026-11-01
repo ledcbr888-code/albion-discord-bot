@@ -28,7 +28,6 @@ const path = require('path');
 const express = require('express');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const ctaModule = require('./cta');
-const dailyBonusModule = require('./daily-bonus');
 let Fuse; try { Fuse = require('fuse.js'); } catch(e) { console.warn('fuse.js not installed, using fallback'); }
 
 const BANDIT_SERIF_FONT = '/usr/share/fonts/truetype/noto/NotoSerifDisplay-Black.ttf';
@@ -6450,7 +6449,6 @@ function scheduleNextBanditAlertCheck() {
 const commands = [
     new SlashCommandBuilder().setName('botstats').setDescription('ดูสถิติการใช้งานบอท (เจ้าของบอทเท่านั้น)'),
     ...ctaModule.commandBuilders,
-    ...dailyBonusModule.commandBuilders,
     new SlashCommandBuilder().setName('check').setDescription('ระบบตรวจสอบสถิติและรายชื่อ')
         .addSubcommand(s => s.setName('battles').setDescription('เช็กสถิติไฟต์จาก Match ID หรือ ลิงก์').addStringOption(o => o.setName('link_or_id').setDescription('ลิงก์ AlbionBB หรือ Match ID').setRequired(true)))
         .addSubcommand(s => s.setName('guilds').setDescription('แสดงรายชื่อกิลด์ที่ติดตาม'))
@@ -6563,8 +6561,6 @@ async function pollAvaConfiguredChannels() {
 client.once('ready', async () => {
     console.log(`✅ Logged in as ${client.user.tag}`);
     await migrateLegacyDataAfterReady();
-    await dailyBonusModule.onReady({ getGuildConfig, getAllGuildConfigs, saveData, client })
-        .catch(err => console.error('❌ Daily Bonus startup error:', err.message));
     const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
     try {
         await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
@@ -6640,7 +6636,6 @@ client.on('interactionCreate', async interaction => {
         ((interaction.isButton() || interaction.isStringSelectMenu()) ? interaction.customId.split(':')[1] : null);
     return guildContext.run({ guildId: contextGuildId }, async () => {
     try { if (await ctaModule.handleInteraction(interaction, { getGuildConfig, saveData, client })) return; } catch (ctaErr) { console.error('❌ CTA handler error:', ctaErr); try { if (!interaction.replied && !interaction.deferred) await interaction.reply({ content: '❌ เกิดข้อผิดพลาดใน CTA: ' + (ctaErr.message || ctaErr), flags: 64 }); else if (interaction.deferred) await interaction.editReply({ content: '❌ เกิดข้อผิดพลาดใน CTA: ' + (ctaErr.message || ctaErr) }); } catch {} return; }
-    try { if (await dailyBonusModule.handleInteraction(interaction, { getGuildConfig, getAllGuildConfigs, saveData, client })) return; } catch (dailyBonusErr) { console.error('❌ Daily Bonus interaction error:', dailyBonusErr); try { if (!interaction.replied && !interaction.deferred) await interaction.reply({ content: '❌ Daily Bonus command failed: ' + (dailyBonusErr.message || dailyBonusErr), ephemeral: true }); } catch {} return; }
     if (interaction.isStringSelectMenu() || interaction.isButton()) {
         const parts = String(interaction.customId || '').split(':');
         const action = parts[0];
@@ -7324,13 +7319,6 @@ client.on('raw', async packet => {
 
 client.on('messageCreate', async message => {
     return guildContext.run({ guildId: message.guildId }, async () => {
-    try {
-        const handledDailyBonus = await dailyBonusModule.handleMessage(message, { getGuildConfig, getAllGuildConfigs, saveData, client });
-        if (handledDailyBonus) return;
-    } catch (dailyBonusErr) {
-        console.error('❌ Daily Bonus message handler error:', dailyBonusErr.message);
-        if (String(message.channelId || '') === '1508107671662886964') return;
-    }
     if (message.author.bot) return;
     console.log('📨 Discord messageCreate: guild=' + (message.guildId || 'DM') +
         ' channel=' + (message.channelId || message.channel?.id || 'unknown') +
