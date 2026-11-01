@@ -777,23 +777,25 @@ function reuseModal(id) {
     return modal;
 }
 async function handleInteraction(interaction, deps) {
-    ensureLifecycleRunner(deps);
     if (interaction.isChatInputCommand && interaction.isChatInputCommand()) {
         const { commandName } = interaction;
         if (commandName === 'cta') {
+            await interaction.deferReply({ flags: MessageFlags.Ephemeral });
+            ensureLifecycleRunner(deps);
             const title = safeText(interaction.options.getString('title'), 80);
             const timeUtc = interaction.options.getString('time_utc');
             const maxPlayers = interaction.options.getInteger('max_players');
             const startAt = parseUtc(timeUtc);
-            if (!title) { await interaction.reply({ content: '❌ กรุณาระบุชื่อ CTA', flags: MessageFlags.Ephemeral }); return true; }
-            if (!startAt) { await interaction.reply({ content: '❌ เวลา UTC ไม่ถูกต้อง', flags: MessageFlags.Ephemeral }); return true; }
+            if (!title) { await interaction.editReply({ content: '❌ กรุณาระบุชื่อ CTA' }); return true; }
+            if (!startAt) { await interaction.editReply({ content: '❌ เวลา UTC ไม่ถูกต้อง' }); return true; }
             const id = token();
             const session = { id, guildId: interaction.guildId, userId: interaction.user.id, channelId: interaction.channelId, title, startAt, maxPlayers, counts: { Tank: 0, DPS: 0, Support: 0, Heal: 0 }, slots: [], slotIndex: 0, page: 0, search: '', lastActivityAt: Date.now() };
             sessions.set(id, session);
-            await interaction.reply({ ...countPanel(session), flags: MessageFlags.Ephemeral });
+            await interaction.editReply(countPanel(session));
             return true;
         }
         if (commandName === 'ctaup') {
+            ensureLifecycleRunner(deps);
             const cfg = getConfig(interaction.guildId, deps);
             const templates = cfg.ctaTemplates.slice(0, MAX_TEMPLATES);
             if (!templates.length) { await interaction.reply({ content: 'ยังไม่มีชุดแผน', flags: MessageFlags.Ephemeral }); return true; }
@@ -808,6 +810,7 @@ async function handleInteraction(interaction, deps) {
         }
         return false;
     }
+    ensureLifecycleRunner(deps);
     if (!(interaction.isButton?.() || interaction.isStringSelectMenu?.() || interaction.isModalSubmit?.())) return false;
     const customId = String(interaction.customId || '');
     if (!customId.startsWith('cta:')) return false;
