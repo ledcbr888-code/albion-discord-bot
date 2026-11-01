@@ -85,7 +85,7 @@ client.rest.on('restDebug', info => {
     if (!gatewayStartupDiagnosticsActive) return;
     const safeInfo = String(info || '')
         .replace(BOT_TOKEN, '[REDACTED]')
-        .replace(/(authorization\\s*[:=]\\s*)[^\\s]+/gi, '$1[REDACTED]')
+        .replace(/(authorization\s*[:=]\s*)[^\s]+/gi, '$1[REDACTED]')
         .slice(0, 500);
     console.log('🔎 Discord REST debug:', safeInfo);
 });
@@ -7553,7 +7553,7 @@ initializeTrackingPersistence()
             } else {
                 console.error('⚠️ ไม่พบเวลาปลดจำกัดในข้อผิดพลาดนี้ ให้ตรวจค่า Retry-After จาก Log ของ Discord');
             }
-        } else if (/timed out|timeout/i.test(message)) {
+        } else if (/timed out|timeout|aborted|aborterror/i.test(message) || String(err?.name || '') === 'AbortError') {
             console.error('⏱️ Discord เชื่อมต่อไม่สำเร็จภายในเวลาที่กำหนด (Timeout)');
             console.error('ℹ️ Timeout อย่างเดียวไม่ใช่หลักฐานว่าโดน HTTP 429 และไม่มีเวลาปลดจำกัดให้คำนวณ');
             console.error('🔎 ตรวจ Log ของ Gateway/REST ก่อนหน้านี้เพื่อดูสถานะ HTTP, รหัสข้อผิดพลาด และ Retry-After หาก Discord ส่งมา');
