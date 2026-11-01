@@ -67,6 +67,35 @@ const client = new Client({
     ]
 });
 
+const discordRestDefaults = {
+    timeout: client.rest.options.timeout,
+    retries: client.rest.options.retries
+};
+let gatewayStartupDiagnosticsActive = false;
+
+function restoreGatewayStartupRestOptions() {
+    if (!gatewayStartupDiagnosticsActive) return;
+    gatewayStartupDiagnosticsActive = false;
+    client.rest.options.timeout = discordRestDefaults.timeout;
+    client.rest.options.retries = discordRestDefaults.retries;
+    console.log('🔎 Gateway startup diagnostics closed; restored normal Discord REST settings.');
+}
+
+client.rest.on('restDebug', info => {
+    if (!gatewayStartupDiagnosticsActive) return;
+    const safeInfo = String(info || '')
+        .replace(BOT_TOKEN, '[REDACTED]')
+        .replace(/(authorization\s*[:=]\s*)[^\s]+/gi, '$1[REDACTED]')
+        .slice(0, 500);
+    console.log('🔎 Discord REST debug:', safeInfo);
+});
+
+client.rest.on('response', (_request, response) => {
+    if (!gatewayStartupDiagnosticsActive) return;
+    console.log('📡 Discord REST response during Gateway startup: HTTP ' +
+        (Number(response?.status) || 'unknown'));
+});
+
 const DATA_DIR = String(process.env.DATA_DIR || __dirname).trim();
 const DATA_FILE = String(process.env.TRACKING_FILE || path.join(DATA_DIR, 'tracking.json')).trim();
 // GitHub persistence must point to a PRIVATE repository; never store tracking data
@@ -7450,6 +7479,11 @@ initializeTrackingPersistence()
         // Do not call unauthenticated /gateway discovery on every deploy.
         // Render's shared IP can be rate-limited (HTTP 429); discord.js already
         // knows the Gateway endpoint and should connect directly.
+        gatewayStartupDiagnosticsActive = true;
+        client.rest.options.timeout = Math.min(Number(discordRestDefaults.timeout) || 15000, 15000);
+        client.rest.options.retries = 0;
+        console.log('🔎 Gateway startup REST settings: timeout=' + client.rest.options.timeout +
+            ' ms; retries=0 for the initial login request only.');
         console.log('🔐 Connecting to Discord Gateway via discord.js (token is not logged)...');
 
         // A watchdog reports the connection state once if login/READY is still pending.
@@ -7480,12 +7514,22 @@ initializeTrackingPersistence()
         });
         try {
             await Promise.race([client.login(BOT_TOKEN), loginTimeout]);
+            restoreGatewayStartupRestOptions();
             console.log('ℹ️ Discord login() resolved; waiting for Gateway READY event if it has not appeared yet.');
         } finally {
             clearTimeout(loginTimer);
         }
     })
     .catch(err => {
+        restoreGatewayStartupRestOptions();
+        const safeErrorMessage = String(err?.message || err || 'ไม่ทราบสาเหตุ')
+            .replace(BOT_TOKEN, '[REDACTED]')
+            .slice(0, 500);
+        const safeCauseMessage = String(err?.cause?.message || '').replace(BOT_TOKEN, '[REDACTED]').slice(0, 300);
+        console.error('🔎 Gateway login error detail: name=' + String(err?.name || 'Error') +
+            ' | code=' + String(err?.code ?? 'none') +
+            ' | message=' + safeErrorMessage +
+            (safeCauseMessage ? ' | cause=' + safeCauseMessage : ''));
         const status = Number(err?.status ?? err?.statusCode ?? err?.response?.status);
         const code = err?.code;
         const message = String(err?.message || err || 'ไม่ทราบสาเหตุ');
@@ -7509,11 +7553,11 @@ initializeTrackingPersistence()
             } else {
                 console.error('⚠️ ไม่พบเวลาปลดจำกัดในข้อผิดพลาดนี้ ให้ตรวจค่า Retry-After จาก Log ของ Discord');
             }
-        } else if (/timed out|timeout/i.test(message)) {
+        } else if (/timed out|timeout|aborted|aborterror/i.test(message) || String(err?.name || '') === 'AbortError') {
             console.error('⏱️ Discord เชื่อมต่อไม่สำเร็จภายในเวลาที่กำหนด (Timeout)');
             console.error('ℹ️ Timeout อย่างเดียวไม่ใช่หลักฐานว่าโดน HTTP 429 และไม่มีเวลาปลดจำกัดให้คำนวณ');
             console.error('🔎 ตรวจ Log ของ Gateway/REST ก่อนหน้านี้เพื่อดูสถานะ HTTP, รหัสข้อผิดพลาด และ Retry-After หาก Discord ส่งมา');
-            console.error('⚠️ ระบบจะไม่เดาเวลารอหรือส่งคำขอซ้ำเพื่อทดสอบโดยอัตโนมัติ');
+            console.error('ℹ️ ช่วง Login กำหนดให้คำขอ Gateway REST มีการลองครั้งเดียว เพื่อให้เห็นข้อผิดพลาดต้นทางโดยไม่ซ่อนด้วยการ Retry');
         } else {
             console.error('❌ เกิดข้อผิดพลาดระหว่างเริ่ม Discord:', message);
         }
