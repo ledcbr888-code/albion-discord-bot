@@ -31,7 +31,8 @@ const PRESETS = {
 const sessions = new Map();
 const SESSION_TTL_MS = 30 * 60 * 1000;
 const SIGNUP_GRACE_MS = 2 * 60 * 60 * 1000;
-const EVENT_CLEANUP_MS = 12 * 60 * 60 * 1000;
+// Delete the CTA post and its tracked roster posts 20 hours after the scheduled start.
+const EVENT_CLEANUP_MS = 20 * 60 * 60 * 1000;
 const LIFECYCLE_SWEEP_INTERVAL_MS = 60 * 1000;
 const eventLifecycleTimers = new Map();
 let lifecycleSweepTimer = null;
@@ -107,17 +108,54 @@ async function cleanupEventData(event, deps) {
     if (!event) return;
     clearEventLifecycleTimers(event.id);
 
-    // Remove only the controls. The original CTA message, embed and roster image stay in Discord.
-    try {
-        const channel = await deps.client.channels.fetch(event.channelId).catch(() => null);
-        if (channel && event.messageId) {
-            const message = await channel.messages.fetch(event.messageId).catch(() => null);
-            if (message) await message.edit({ components: [] }).catch(err => {
-                console.warn('[CTA] ปิดปุ่มกิจกรรมเก่าไม่สำเร็จ:', err.message);
-            });
+    // Delete only messages explicitly recorded for this CTA; never scan/delete channel history.
+    const messageIds = [...new Set([
+        event.messageId,
+        ...(Array.isArray(event.rosterMessageIds) ? event.rosterMessageIds : [])
+    ].map(id => String(id || '').trim()).filter(Boolean))];
+
+    let deletionComplete = true;
+    if (messageIds.length) {
+        const channel = await deps.client.channels.fetch(event.channelId).catch(err => {
+            console.warn('[CTA] ไม่สามารถเข้าถึงห้องเพื่อลบ CTA:', err.message);
+            return null;
+        });
+
+        if (!channel || !channel.messages || typeof channel.messages.fetch !== 'function') {
+            console.warn('[CTA] ยังไม่สามารถเข้าถึงข้อความ CTA ได้ จะลองลบใหม่ในรอบตรวจสอบถัดไป:', event.id);
+            deletionComplete = false;
+        } else {
+            for (const messageId of messageIds) {
+                let message;
+                try {
+                    message = await channel.messages.fetch(messageId);
+                } catch (err) {
+                    // Unknown Message means the post was already deleted; this is a completed cleanup.
+                    if (Number(err?.code) === 10008 || Number(err?.status) === 404) continue;
+                    console.warn('[CTA] ดึงข้อความ CTA เพื่อลบไม่สำเร็จ:', messageId, err.message);
+                    deletionComplete = false;
+                    continue;
+                }
+
+                if (!message) continue;
+                try {
+                    await message.delete();
+                    console.log('[CTA] ลบโพสต์ CTA ครบกำหนด 20 ชั่วโมงแล้ว:', event.id, messageId);
+                } catch (err) {
+                    // A concurrent/manual deletion is also considered complete.
+                    if (Number(err?.code) === 10008 || Number(err?.status) === 404) continue;
+                    console.warn('[CTA] ลบโพสต์ CTA ไม่สำเร็จ จะลองใหม่:', messageId, err.message);
+                    deletionComplete = false;
+                }
+            }
         }
-    } catch (err) {
-        console.warn('[CTA] ไม่สามารถปิดปุ่มกิจกรรมเก่า:', err.message);
+    }
+
+    // Keep the event record until all tracked posts are deleted (or already absent).
+    // The lifecycle sweep retries failed deletions on its next run.
+    if (!deletionComplete) {
+        console.warn('[CTA] ยังเก็บข้อมูลกิจกรรมไว้เพื่อลองลบ CTA ซ้ำ:', event.id);
+        return;
     }
 
     const cfg = deps.getGuildConfig(event.guildId, false);
