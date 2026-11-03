@@ -116,12 +116,19 @@ async function cleanupEventData(event, deps) {
 
     let deletionComplete = true;
     if (messageIds.length) {
+        let channelFetchError = null;
         const channel = await deps.client.channels.fetch(event.channelId).catch(err => {
+            channelFetchError = err;
             console.warn('[CTA] ไม่สามารถเข้าถึงห้องเพื่อลบ CTA:', err.message);
             return null;
         });
 
-        if (!channel || !channel.messages || typeof channel.messages.fetch !== 'function') {
+        // If the channel itself no longer exists, its messages are already gone.
+        const channelIsGone = Number(channelFetchError?.code) === 10003 ||
+            Number(channelFetchError?.status) === 404;
+        if (!channel && channelIsGone) {
+            console.log('[CTA] ห้องเดิมถูกลบแล้ว ถือว่าโพสต์ CTA ถูกลบเรียบร้อย:', event.id);
+        } else if (!channel || !channel.messages || typeof channel.messages.fetch !== 'function') {
             console.warn('[CTA] ยังไม่สามารถเข้าถึงข้อความ CTA ได้ จะลองลบใหม่ในรอบตรวจสอบถัดไป:', event.id);
             deletionComplete = false;
         } else {
@@ -1156,4 +1163,4 @@ async function handleInteraction(interaction, deps) {
     return false;
 }
 
-module.exports = { commandBuilders, handleInteraction, WEAPONS, PRESETS };
+module.exports = { commandBuilders, handleInteraction, WEAPONS, PRESETS, startLifecycle: ensureLifecycleRunner };
