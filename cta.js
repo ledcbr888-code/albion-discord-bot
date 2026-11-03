@@ -67,7 +67,6 @@ function queueSessionInteractionUpdate(session, interaction, task) {
     return current;
 }
 const MAX_TEMPLATES = 25;
-const MAX_EVENTS = 20;
 const WEAPON_DIR = path.join(__dirname, 'weapon');
 const WEAPON_CDN_BASE = 'https://cdn.jsdelivr.net/gh/ledcbr888-code/albion-discord-bot@main/weapon';
 const WEAPON_RAW_BASE = 'https://raw.githubusercontent.com/ledcbr888-code/albion-discord-bot/main/weapon';
@@ -799,7 +798,6 @@ async function publishEvent(session, deps) {
     const message = await channel.send({ ...payload, components: eventButtons(event) });
     event.messageId = message.id;
     cfg.ctaEvents.push(event);
-    cfg.ctaEvents = cfg.ctaEvents.slice(-MAX_EVENTS);
     deps.saveData();
     scheduleEventLifecycle(event, deps);
     return event;
