@@ -6590,6 +6590,13 @@ async function pollAvaConfiguredChannels() {
 client.once('ready', async () => {
     console.log(`✅ Logged in as ${client.user.tag}`);
     await migrateLegacyDataAfterReady();
+    // Resume CTA lifecycle timers after every bot restart so pending close/delete jobs are restored.
+    try {
+        ctaModule.startLifecycle({ getGuildConfig, saveData, client });
+        console.log('🧹 [CTA] Lifecycle scheduler restored after Discord READY.');
+    } catch (err) {
+        console.error('❌ [CTA] Lifecycle scheduler startup failed:', err.message);
+    }
     const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
     try {
         await rest.put(Routes.applicationCommands(client.user.id), { body: commands });
