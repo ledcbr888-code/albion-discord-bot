@@ -3342,7 +3342,7 @@ async function primeAutoBattleHistoryForGuild(configs = autoBattleConfigs) {
             if (!Array.isArray(recentMatches)) {
                 console.warn('⚠️ Auto-Battle baseline pending for ' +
                     String(config.targetGuild || config.targetGuildId || 'unknown') +
-                    '; Official API unavailable, will retry without marking the tracker initialized.');
+                    '; Battleboard API unavailable, will retry without marking the tracker initialized.');
                 continue;
             }
             for (const id of recentMatches) {
@@ -3488,7 +3488,7 @@ async function checkAutoBattlesForGuild() {
                     firstSeenAt: Number(queued?.firstSeenAt) || battleListObservedAt,
                     source: queued?.source ||
                         fetchGuildRecentBattles._lastSourceByScope?.get(pendingQueueScopeKey) ||
-                        'Official GameInfo Battle List',
+                        'BOSS BOT Battleboard API',
                     eventOnly: false
                 });
             }
@@ -3557,7 +3557,7 @@ async function checkAutoBattlesForGuild() {
 
             // Process distinct Match IDs from both sources; the shared set prevents a second report.
             for (const latestMatchId of newMatchIds.slice(0, 1000)) {
-                const candidateMetaForId = candidateMeta.get(String(latestMatchId)) || { firstSeenAt: battleListObservedAt, source: 'Official GameInfo Battle API' };
+                const candidateMetaForId = candidateMeta.get(String(latestMatchId)) || { firstSeenAt: battleListObservedAt, source: 'BOSS BOT Battleboard API' };
                 const battleListFirstSeenAt = candidateMetaForId.firstSeenAt;
                 let detectionSource = candidateMetaForId.source;
                 const isEventOnlyCandidate = candidateMetaForId.eventOnly === true;
@@ -3608,7 +3608,7 @@ async function checkAutoBattlesForGuild() {
                         // Events-only IDs may still have a valid canonical Battle Detail. Try that first.
                         officialBattle = await fetchOfficialBattle(detailKey, { autoBattle: true, targetGuild: config.targetGuild, eventOnly: true });
                         if (officialBattle) {
-                            detectionSource += ' + Official Battle Detail from Events hint';
+                            detectionSource += ' + Battleboard cached detail';
                         }
                         battleDetailFetchMs = Date.now() - eventCandidateStartedAt;
                     }
@@ -3619,7 +3619,7 @@ async function checkAutoBattlesForGuild() {
                         ? 'Battleboard API ยังไม่พร้อม (HTTP ' + Number(failure?.status || 0) + ')'
                         : Number(failure?.status) === 404
                             ? 'Official GameInfo Asia HTTP 404; รายละเอียด Battle/Events อาจยังไม่พร้อม'
-                            : 'Official GameInfo Asia ยังไม่มีรายละเอียด Battle หรือข้อมูล Events ไม่ครบ';
+                            : 'Battleboard API ยังไม่มีรายละเอียด Battle ที่ complete=true';
                     scheduleAutoBattleDetailRetry(latestMatchId, failureSummary + ' | Source=' + detectionSource);
                     const retryAttemptForLog = Number(checkAutoBattlesForGuild._detailRetryStates?.get(String(latestMatchId))?.attempts) || 0;
                     const shouldLogDetailFailure = failure?.endpoint === 'Battleboard API'
@@ -3672,8 +3672,8 @@ async function checkAutoBattlesForGuild() {
                     : [];
 
                 if (config.targetGuild && !officialGuildNames.length) {
-                    scheduleAutoBattleDetailRetry(latestMatchId, 'Official Battle Detail ไม่มีรายชื่อ Guild; อาจเป็นข้อมูลยังไม่ครบ');
-                    console.warn('⚠️ [Auto-Battle] Match ID=' + latestMatchId + ' ไม่มีข้อมูล Guild จาก Official API; ยังไม่ mark handled และจะลองใหม่ตาม backoff');
+                    scheduleAutoBattleDetailRetry(latestMatchId, 'Battleboard Detail ไม่มีรายชื่อ Guild; อาจเป็นข้อมูลยังไม่ครบ');
+                    console.warn('⚠️ [Auto-Battle] Match ID=' + latestMatchId + ' ไม่มีข้อมูล Guild จาก Battleboard Detail; ยังไม่ mark handled และจะลองใหม่ตาม backoff');
                     continue;
                 }
 
@@ -6995,7 +6995,7 @@ client.on('interactionCreate', async interaction => {
                         const recentMatches = await fetchGuildRecentBattles(configData, { baselineOnly: true });
                         if (!Array.isArray(recentMatches)) {
                             console.warn('⚠️ Auto-Battle baseline pending for ' + guildLabel +
-                                '; Official API unavailable. The tracker will retry initialization on the next poll.');
+                                '; Battleboard API unavailable. The tracker will retry initialization on the next poll.');
                             return;
                         }
                         const existingIds = [...new Set(
