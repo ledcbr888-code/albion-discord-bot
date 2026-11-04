@@ -116,7 +116,7 @@ const BATTLEBOARD_API_KEY = String(process.env.BOT_API_KEY || process.env.BATTLE
 const BATTLEBOARD_API_TIMEOUT_MS = 12000;
 const BATTLEBOARD_LIST_PAGE_SIZE = 100;
 const BATTLEBOARD_LIST_MAX_PAGES = 10;
-const battleboardBattleListState = { expiresAt: 0, items: null, inFlight: null };
+const battleboardBattleListState = { expiresAt: 0, items: null, inFlight: null, failedUntil: 0, lastError: '' };
 const battleboardDetailLogState = new Map();
 let battleboardKeyWarningLogged = false;
 let supabasePersistenceReady = false;
@@ -1177,6 +1177,10 @@ async function fetchBattleboardRecentBattles() {
         return battleboardBattleListState.items;
     }
     if (battleboardBattleListState.inFlight) return await battleboardBattleListState.inFlight;
+    if (battleboardBattleListState.failedUntil > now) {
+        const waitSeconds = Math.ceil((battleboardBattleListState.failedUntil - now) / 1000);
+        throw new Error('Battleboard Battle List retry cooldown ' + waitSeconds + 's (' + battleboardBattleListState.lastError + ')');
+    }
 
     const task = (async () => {
         const items = [];
@@ -1208,12 +1212,18 @@ async function fetchBattleboardRecentBattles() {
         }
         battleboardBattleListState.items = items;
         battleboardBattleListState.expiresAt = Date.now() + 20000;
+        battleboardBattleListState.failedUntil = 0;
+        battleboardBattleListState.lastError = '';
         return items;
     })();
 
     battleboardBattleListState.inFlight = task;
     try {
         return await task;
+    } catch (error) {
+        battleboardBattleListState.failedUntil = Date.now() + 30000;
+        battleboardBattleListState.lastError = String(error?.message || 'request failed').slice(0, 160);
+        throw error;
     } finally {
         if (battleboardBattleListState.inFlight === task) battleboardBattleListState.inFlight = null;
     }
@@ -3400,7 +3410,10 @@ function scheduleAutoBattleDetailRetry(matchId, reason) {
     retryStates.set(key, { attempts, nextRetryAt: boundedRetryAt, hourlyRetry });
     battleFetchFailureUntil.set('autoBattle:' + key, boundedRetryAt);
     while (retryStates.size > 1000) retryStates.delete(retryStates.keys().next().value);
-    if (!isAsia404 || attempts <= 2 || attempts === 8) {
+    const shouldLogRetry = isBattleboardPending
+        ? (attempts <= 2 || (attempts === 8 && previous.attempts < 8))
+        : (!isAsia404 || attempts <= 2 || attempts === 8);
+    if (shouldLogRetry) {
         const waitMinutes = Math.floor(waitMs / 60000);
         const waitSeconds = Math.ceil((waitMs % 60000) / 1000);
         console.warn('⚠️ [Auto-Battle Retry] Match ID=' + key + ' | ' + String(reason || 'ยังดึงรายละเอียดไม่ได้') +
@@ -3609,7 +3622,10 @@ async function checkAutoBattlesForGuild() {
                             : 'Official GameInfo Asia ยังไม่มีรายละเอียด Battle หรือข้อมูล Events ไม่ครบ';
                     scheduleAutoBattleDetailRetry(latestMatchId, failureSummary + ' | Source=' + detectionSource);
                     const retryAttemptForLog = Number(checkAutoBattlesForGuild._detailRetryStates?.get(String(latestMatchId))?.attempts) || 0;
-                    if (Number(failure?.status) !== 404 || retryAttemptForLog <= 2 || retryAttemptForLog === 8) {
+                    const shouldLogDetailFailure = failure?.endpoint === 'Battleboard API'
+                        ? retryAttemptForLog <= 2
+                        : Number(failure?.status) !== 404 || retryAttemptForLog <= 2 || retryAttemptForLog === 8;
+                    if (shouldLogDetailFailure) {
                         console.warn('⚠️ ยังดึงข้อมูล Battle ' + latestMatchId + ' จาก ' + (failure?.endpoint === 'Battleboard API' ? 'BOSS BOT Battleboard' : 'Official GameInfo') + ' ไม่สำเร็จ; ยังไม่ทำเครื่องหมายว่าเสร็จ | Source=' + detectionSource + ' | detailFetch=' + battleDetailFetchMs + 'ms | firstSeenAt=' + new Date(battleListFirstSeenAt).toISOString());
                     }
                     continue;
