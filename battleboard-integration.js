@@ -121,6 +121,7 @@ function createEmptyLatencySummary(now = Date.now()) {
     reportsSent: 0,
     belowFame: 0,
     detailPending: 0,
+    detailRetryAttempts: 0,
     noRoute: 0,
     fileUploadAttempts: 0,
     fileUploadSuccesses: 0,
@@ -159,22 +160,23 @@ function flushLatencySummary(state, serverId, now = Date.now()) {
   const fastest = summary.fastestBattleToDiscordMs == null ? 'ไม่มีข้อมูล' : formatElapsedMs(summary.fastestBattleToDiscordMs);
   const slowest = summary.slowestBattleToDiscordMs == null ? 'ไม่มีข้อมูล' : formatElapsedMs(summary.slowestBattleToDiscordMs);
   console.log('📊 [Battleboard สรุปทุก 30 นาที]' +
-    ' | Discord=' + serverId +
+    ' | เซิร์ฟเวอร์ Discord=' + serverId +
     ' | ช่วงเวลา=' + (Number.isFinite(startedAt) ? new Date(startedAt).toISOString() : 'ไม่ทราบ') + ' ถึง ' + new Date(now).toISOString() +
     ' | รายงานส่งครบ=' + (summary.reportsSent || 0) +
     ' | ต่ำกว่าเกณฑ์ Fame=' + (summary.belowFame || 0) +
-    ' | รายละเอียดรอครบ=' + (summary.detailPending || 0) +
+    ' | จำนวนรอบที่รายละเอียดยังไม่ครบ=' + (summary.detailPending || 0) +
+    ' | จำนวนครั้งที่ลองตรวจรายละเอียดซ้ำ=' + (summary.detailRetryAttempts || 0) +
     ' | ไม่มีห้องตรงเงื่อนไข=' + (summary.noRoute || 0) +
-    ' | อัปโหลดไฟล์สำเร็จ=' + (summary.fileUploadSuccesses || 0) + '/' + (summary.fileUploadAttempts || 0) +
+    ' | ส่งข้อความ/ไฟล์สำเร็จ=' + (summary.fileUploadSuccesses || 0) + '/' + (summary.fileUploadAttempts || 0) +
     ' (' + uploadRate + ')' +
-    ' | อัปโหลดล้มเหลว=' + (summary.fileUploadFailures || 0) +
-    ' | API ผิดพลาด=' + (summary.apiFailures || 0) +
-    ' | Poll ผิดพลาดอื่น=' + (summary.otherPollFailures || 0) +
+    ' | ส่งข้อความ/ไฟล์ไม่สำเร็จ=' + (summary.fileUploadFailures || 0) +
+    ' | คำขอ API ผิดพลาด=' + (summary.apiFailures || 0) +
+    ' | รอบตรวจผิดพลาดอื่น=' + (summary.otherPollFailures || 0) +
     ' | เฉลี่ยเริ่มไฟต์ถึง Discord=' + average(summary.totalBattleToDiscordMs, summary.battleToDiscordSamples) +
     ' | เร็วสุด=' + fastest +
     ' | ช้าสุด=' + slowest +
     ' | เฉลี่ยสร้างรายงาน=' + average(summary.totalReportGenerationMs, summary.reportGenerationSamples) +
-    ' | เฉลี่ยส่งไฟล์=' + average(summary.totalDiscordSendMs, summary.discordSendSamples) + '.');
+    ' | เวลาเฉลี่ยที่ Discord รับข้อความ/ไฟล์=' + average(summary.totalDiscordSendMs, summary.discordSendSamples) + '.');
   state.latencySummary = createEmptyLatencySummary(now);
   return true;
 }
@@ -435,7 +437,7 @@ function createBattleboardIntegration(deps = {}) {
         ' | ขนาด=' + formatAttachmentSize(fileSizeBytes) +
         ' | เริ่มไฟต์ถึง Discord รับข้อความ=' + elapsedFrom(battleStartedAtMs, discordMessageAtMs) +
         ' | เว็บพบไฟต์ถึง Discord=' + elapsedFrom(firstSeenAtMs, discordMessageAtMs) +
-        ' | เว็บสร้าง Event ถึง Discord=' + elapsedFrom(eventCheckedAtMs, discordMessageAtMs) +
+        ' | เว็บสร้างเหตุการณ์ถึง Discord=' + elapsedFrom(eventCheckedAtMs, discordMessageAtMs) +
         ' | บอทได้รับ Event ถึง Discord=' + elapsedFrom(eventReceivedAtMs, discordMessageAtMs) +
         ' | เวลาที่ Discord รับไฟล์=' + sendRoundTripMs + 'ms' +
         ' | เวลาข้อความใน Discord=' + new Date(discordMessageAtMs).toISOString() + '.');
@@ -523,8 +525,8 @@ function createBattleboardIntegration(deps = {}) {
       ' | เซิร์ฟเวอร์ Discord=' + serverId +
       ' | ไฟต์=' + battleId +
       ' | เริ่มไฟต์ถึงเว็บพบไฟต์=' + elapsedFrom(battleStartedAtMs, firstSeenAtMs) +
-      ' | เว็บพบไฟต์ถึงตรวจครบและสร้าง Event=' + elapsedFrom(firstSeenAtMs, eventCheckedAtMs) +
-      ' | สร้าง Event ถึงบอทได้รับ=' + elapsedFrom(eventCheckedAtMs, eventReceivedAtMs) +
+      ' | เว็บพบไฟต์ถึงตรวจรายละเอียดครบและสร้างเหตุการณ์=' + elapsedFrom(firstSeenAtMs, eventCheckedAtMs) +
+      ' | สร้างเหตุการณ์ถึงบอทได้รับ=' + elapsedFrom(eventCheckedAtMs, eventReceivedAtMs) +
       ' | เวลาบอทได้รับ=' + new Date(eventReceivedAtMs).toISOString() + '.');
 
     const detailFetchStartedAtMs = Date.now();
@@ -538,7 +540,9 @@ function createBattleboardIntegration(deps = {}) {
     if (detailResponse.ready !== true || !detailResponse.detail || Number(detailResponse.detailSchemaVersion || 0) < 4) {
       const attempts = Math.max(0, Number(state.pendingDetailAttempts[battleId]) || 0) + 1;
       state.pendingDetailAttempts[battleId] = attempts;
-      getLatencySummary(state).detailPending = (Number(getLatencySummary(state).detailPending) || 0) + 1;
+      const pendingSummary = getLatencySummary(state);
+      pendingSummary.detailPending = (Number(pendingSummary.detailPending) || 0) + 1;
+      if (attempts > 1) pendingSummary.detailRetryAttempts = (Number(pendingSummary.detailRetryAttempts) || 0) + 1;
       if (Object.keys(state.pendingDetailAttempts).length > 500) {
         const oldestKey = Object.keys(state.pendingDetailAttempts)[0];
         delete state.pendingDetailAttempts[oldestKey];
@@ -546,9 +550,9 @@ function createBattleboardIntegration(deps = {}) {
       persist();
       console.log('⏳ [Battleboard รอรายละเอียดไฟต์] | เซิร์ฟเวอร์ Discord=' + serverId +
         ' | ไฟต์=' + battleId +
-        ' | สถานะ=' + String(detailResponse.status || detailResponse.statusCode || 'ยังไม่สมบูรณ์') +
+        ' | รหัสสถานะ=' + String(detailResponse.status || detailResponse.statusCode || 'ยังไม่สมบูรณ์') +
         ' | เวลาเรียก API=' + detailFetchMs + 'ms' +
-        ' | ลองตรวจซ้ำครั้งที่=' + attempts +
+        ' | จำนวนครั้งที่ตรวจ=' + attempts +
         ' | ระบบจะรอตรวจใหม่ ไม่ข้ามไฟต์นี้');
       return false;
     }
@@ -556,10 +560,10 @@ function createBattleboardIntegration(deps = {}) {
     persist();
     console.log('📚 [Battleboard ได้รายละเอียดครบ]' +
       ' | ไฟต์=' + battleId +
-      ' | จำนวนเหตุการณ์=' + Number(detailResponse.eventCount || 0) +
+      ' | จำนวนเหตุการณ์ใน Battle=' + Number(detailResponse.eventCount || 0) +
       ' | จำนวนหน้ารายละเอียด=' + Number(detailResponse.eventsPageCount || 0) +
       ' | เวลาดึงรายละเอียด=' + detailFetchMs + 'ms' +
-      ' | สร้าง Event ถึงรายละเอียดพร้อม=' + elapsedFrom(eventCheckedAtMs, detailFetchedAtMs) + '.');
+      ' | สร้างเหตุการณ์ถึงรายละเอียดพร้อม=' + elapsedFrom(eventCheckedAtMs, detailFetchedAtMs) + '.');
 
     const detail = detailResponse.detail;
     const routes = getRoutes(guildConfig, detail, event);
@@ -591,6 +595,7 @@ function createBattleboardIntegration(deps = {}) {
     console.log('🧰 [Battleboard สร้างรายงานเสร็จ]' +
       ' | เซิร์ฟเวอร์ Discord=' + serverId +
       ' | ไฟต์=' + battleId +
+      ' | บอทได้รับเหตุการณ์ถึงสร้างรายงานเสร็จ=' + elapsedFrom(eventReceivedAtMs, reportGeneratedAtMs) +
       ' | เวลาประมวลผลและสร้างภาพ=' + reportGenerationMs + 'ms' +
       ' | จำนวนรูป=' + (Array.isArray(report.payload && report.payload.files) ? report.payload.files.length : 0) +
       ' | เริ่มไฟต์ถึงสร้างรายงานเสร็จ=' + elapsedFrom(battleStartedAtMs, reportGeneratedAtMs) + '.');
@@ -699,7 +704,7 @@ function createBattleboardIntegration(deps = {}) {
           if (Number(error && error.status) >= 400) summary.apiFailures = (Number(summary.apiFailures) || 0) + 1;
           else summary.otherPollFailures = (Number(summary.otherPollFailures) || 0) + 1;
           persist();
-          console.error('❌ [Battleboard] ตรวจข้อมูลไม่สำเร็จ | เซิร์ฟเวอร์ Discord=' + serverId +
+          console.error('❌ [Battleboard] ตรวจข้อมูลจากเว็บไซต์ไม่สำเร็จ | เซิร์ฟเวอร์ Discord=' + serverId +
             ' | รอตรวจซ้ำอีก=' + Math.ceil(delay / 1000) + 'วินาที | สาเหตุ=' + String(error && error.message || error).slice(0, 260));
           flushLatencySummary(state, serverId);
         }
@@ -716,7 +721,7 @@ function createBattleboardIntegration(deps = {}) {
       console.log('ℹ️ [Battleboard] ยังไม่ได้ตั้งค่า API จึงใช้ระบบ Auto-Battle เดิมต่อไป');
       return false;
     }
-    console.log('🌐 [Battleboard] เปิดระบบเชื่อมต่อ API แล้ว | เซิร์ฟเวอร์=Asia | ตรวจทุก=30วินาที');
+    console.log('🌐 [Battleboard] เปิดระบบเชื่อมต่อเว็บไซต์แล้ว | เซิร์ฟเวอร์=Asia | ตรวจทุก=30วินาที');
     timer = setTimeout(tick, 2000);
     return true;
   }
