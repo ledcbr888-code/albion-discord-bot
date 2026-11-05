@@ -1,0 +1,33 @@
+name: Bot integration checks
+
+on:
+  pull_request:
+    paths:
+      - 'index.js'
+      - 'battleboard-integration.js'
+      - 'test/**'
+      - '.github/workflows/battleboard-integration.yml'
+  push:
+    branches:
+      - main
+    paths:
+      - 'index.js'
+      - 'battleboard-integration.js'
+      - 'test/**'
+      - '.github/workflows/battleboard-integration.yml'
+
+jobs:
+  node-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - name: Check JavaScript syntax
+        run: |
+          node --check index.js
+          node --check battleboard-integration.js
+          node --check test/battleboard-integration.test.js
+      - name: Run isolated integration tests
+        run: node --test test/battleboard-integration.test.js
