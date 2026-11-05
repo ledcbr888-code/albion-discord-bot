@@ -5,6 +5,9 @@ const SNAPSHOT_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 const RETRY_BASE_MS = 30 * 1000;
 const RETRY_MAX_MS = 5 * 60 * 1000;
 const MAX_DELIVERIES = 2000;
+const LATENCY_SUMMARY_INTERVAL_MS = 30 * 60 * 1000;
+const SLOW_REPORT_MS = 5 * 60 * 1000;
+const VERY_SLOW_REPORT_MS = 10 * 60 * 1000;
 function normalizeName(value) {
   return String(value == null ? '' : value).normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
 }
@@ -91,6 +94,90 @@ function getAttachmentName(file, fallback) {
   const name = file && (file.name || (file.attachment && file.attachment.name));
   return String(name || fallback || 'unknown').replace(/\s+/g, ' ').slice(0, 120);
 }
+function getAttachmentSizeBytes(file) {
+  const attachment = file && (file.attachment ?? file);
+  if (Buffer.isBuffer(attachment)) return attachment.length;
+  if (attachment instanceof Uint8Array) return attachment.byteLength;
+  if (Number.isFinite(Number(file && file.size)) && Number(file.size) >= 0) return Number(file.size);
+  return null;
+}
+function formatAttachmentSize(bytes) {
+  if (bytes == null || !Number.isFinite(Number(bytes))) return 'ไม่ทราบขนาด';
+  const size = Number(bytes);
+  if (size < 1024) return size + ' ไบต์';
+  if (size < 1024 * 1024) return (size / 1024).toFixed(1) + ' KB';
+  return (size / (1024 * 1024)).toFixed(2) + ' MB';
+}
+function classifyLatency(value) {
+  if (value == null || !Number.isFinite(Number(value))) return 'ยังวัดไม่ได้';
+  const ms = Math.max(0, Number(value));
+  if (ms >= VERY_SLOW_REPORT_MS) return 'ช้าผิดปกติ';
+  if (ms >= SLOW_REPORT_MS) return 'เริ่มช้า';
+  return 'เร็ว';
+}
+function createEmptyLatencySummary(now = Date.now()) {
+  return {
+    windowStartedAt: new Date(now).toISOString(),
+    reportsSent: 0,
+    belowFame: 0,
+    detailPending: 0,
+    noRoute: 0,
+    fileUploadAttempts: 0,
+    fileUploadSuccesses: 0,
+    fileUploadFailures: 0,
+    apiFailures: 0,
+    otherPollFailures: 0,
+    totalBattleToDiscordMs: 0,
+    battleToDiscordSamples: 0,
+    fastestBattleToDiscordMs: null,
+    slowestBattleToDiscordMs: null,
+    totalReportGenerationMs: 0,
+    reportGenerationSamples: 0,
+    totalDiscordSendMs: 0,
+    discordSendSamples: 0,
+  };
+}
+function getLatencySummary(state, now = Date.now()) {
+  if (!state.latencySummary || typeof state.latencySummary !== 'object') {
+    state.latencySummary = createEmptyLatencySummary(now);
+  }
+  return state.latencySummary;
+}
+function addLatencyValue(summary, totalKey, samplesKey, value) {
+  if (value == null || !Number.isFinite(Number(value))) return;
+  summary[totalKey] = (Number(summary[totalKey]) || 0) + Math.max(0, Number(value));
+  summary[samplesKey] = (Number(summary[samplesKey]) || 0) + 1;
+}
+function flushLatencySummary(state, serverId, now = Date.now()) {
+  const summary = getLatencySummary(state, now);
+  const startedAt = Date.parse(summary.windowStartedAt || '');
+  if (Number.isFinite(startedAt) && now - startedAt < LATENCY_SUMMARY_INTERVAL_MS) return false;
+  const average = (total, samples) => samples > 0 ? formatElapsedMs(total / samples) : 'ไม่มีข้อมูล';
+  const uploadRate = summary.fileUploadAttempts > 0
+    ? (summary.fileUploadSuccesses / summary.fileUploadAttempts * 100).toFixed(1) + '%'
+    : 'ไม่มีข้อมูล';
+  const fastest = summary.fastestBattleToDiscordMs == null ? 'ไม่มีข้อมูล' : formatElapsedMs(summary.fastestBattleToDiscordMs);
+  const slowest = summary.slowestBattleToDiscordMs == null ? 'ไม่มีข้อมูล' : formatElapsedMs(summary.slowestBattleToDiscordMs);
+  console.log('📊 [Battleboard สรุปทุก 30 นาที]' +
+    ' | Discord=' + serverId +
+    ' | ช่วงเวลา=' + (Number.isFinite(startedAt) ? new Date(startedAt).toISOString() : 'ไม่ทราบ') + ' ถึง ' + new Date(now).toISOString() +
+    ' | รายงานส่งครบ=' + (summary.reportsSent || 0) +
+    ' | ต่ำกว่าเกณฑ์ Fame=' + (summary.belowFame || 0) +
+    ' | รายละเอียดรอครบ=' + (summary.detailPending || 0) +
+    ' | ไม่มีห้องตรงเงื่อนไข=' + (summary.noRoute || 0) +
+    ' | อัปโหลดไฟล์สำเร็จ=' + (summary.fileUploadSuccesses || 0) + '/' + (summary.fileUploadAttempts || 0) +
+    ' (' + uploadRate + ')' +
+    ' | อัปโหลดล้มเหลว=' + (summary.fileUploadFailures || 0) +
+    ' | API ผิดพลาด=' + (summary.apiFailures || 0) +
+    ' | Poll ผิดพลาดอื่น=' + (summary.otherPollFailures || 0) +
+    ' | เฉลี่ยเริ่มไฟต์ถึง Discord=' + average(summary.totalBattleToDiscordMs, summary.battleToDiscordSamples) +
+    ' | เร็วสุด=' + fastest +
+    ' | ช้าสุด=' + slowest +
+    ' | เฉลี่ยสร้างรายงาน=' + average(summary.totalReportGenerationMs, summary.reportGenerationSamples) +
+    ' | เฉลี่ยส่งไฟล์=' + average(summary.totalDiscordSendMs, summary.discordSendSamples) + '.');
+  state.latencySummary = createEmptyLatencySummary(now);
+  return true;
+}
 function snapshotFingerprint(items) {
   return JSON.stringify((Array.isArray(items) ? items : []).map(item => [
     String(item && item.type || ''),
@@ -163,6 +250,10 @@ function createBattleboardIntegration(deps = {}) {
   function getState(config) {
     if (!config.battleboardState || typeof config.battleboardState !== 'object') config.battleboardState = {};
     if (!Array.isArray(config.battleboardState.delivered)) config.battleboardState.delivered = [];
+    if (!config.battleboardState.pendingDetailAttempts || typeof config.battleboardState.pendingDetailAttempts !== 'object') {
+      config.battleboardState.pendingDetailAttempts = {};
+    }
+    getLatencySummary(config.battleboardState);
     return config.battleboardState;
   }
   function findDelivery(state, key) { return state.delivered.find(item => item && item.key === key) || null; }
