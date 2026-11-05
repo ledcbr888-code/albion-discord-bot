@@ -745,5 +745,5 @@ function createBattleboardIntegration(deps = {}) {
 }
 module.exports = {
   createBattleboardIntegration,
-  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, deliveryKey, toTimestampMs, formatElapsedMs, getAttachmentName, getAttachmentSizeBytes, formatAttachmentSize, classifyLatency, createEmptyLatencySummary, snapshotFingerprint, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup },
+  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, deliveryKey, toTimestampMs, formatElapsedMs, getAttachmentName, getAttachmentSizeBytes, formatAttachmentSize, classifyLatency, createEmptyLatencySummary, formatThaiDateTime, flushLatencySummary, snapshotFingerprint, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup },
 };
