@@ -70,7 +70,7 @@ function toTimestampMs(value) {
   }
   const text = String(value).trim();
   if (!text) return null;
-  if (/^\\d{10,13}$/.test(text)) {
+  if (/^\d{10,13}$/.test(text)) {
     const numeric = Number(text);
     const dateMs = numeric < 1e12 ? numeric * 1000 : numeric;
     return Number.isFinite(dateMs) && dateMs > 0 ? dateMs : null;
@@ -79,7 +79,7 @@ function toTimestampMs(value) {
   return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
 }
 function formatElapsedMs(value) {
-  if (!Number.isFinite(Number(value))) return 'ไม่ทราบ';
+  if (value == null || value === '' || !Number.isFinite(Number(value))) return 'ไม่ทราบ';
   const totalSeconds = Math.floor(Math.max(0, Number(value)) / 1000);
   const hours = Math.floor(totalSeconds / 3600);
   const minutes = Math.floor((totalSeconds % 3600) / 60);
@@ -89,7 +89,7 @@ function formatElapsedMs(value) {
 }
 function getAttachmentName(file, fallback) {
   const name = file && (file.name || (file.attachment && file.attachment.name));
-  return String(name || fallback || 'unknown').replace(/\\s+/g, ' ').slice(0, 120);
+  return String(name || fallback || 'unknown').replace(/\s+/g, ' ').slice(0, 120);
 }
 function snapshotFingerprint(items) {
   return JSON.stringify((Array.isArray(items) ? items : []).map(item => [
