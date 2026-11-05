@@ -99,6 +99,7 @@ function formatThaiDateTime(value) {
   if (timestamp == null) return 'ไม่ทราบเวลา';
   return new Date(timestamp).toLocaleString('th-TH', {
     timeZone: 'Asia/Bangkok',
+    calendar: 'gregory',
     year: 'numeric',
     month: '2-digit',
     day: '2-digit',
@@ -112,7 +113,7 @@ function getAttachmentSizeBytes(file) {
   const attachment = file && (file.attachment ?? file);
   if (Buffer.isBuffer(attachment)) return attachment.length;
   if (attachment instanceof Uint8Array) return attachment.byteLength;
-  if (Number.isFinite(Number(file && file.size)) && Number(file.size) >= 0) return Number(file.size);
+  if (file && file.size != null && Number.isFinite(Number(file.size)) && Number(file.size) >= 0) return Number(file.size);
   return null;
 }
 function formatAttachmentSize(bytes) {
@@ -253,7 +254,7 @@ function createBattleboardIntegration(deps = {}) {
       try { data = JSON.parse(bodyText); } catch { data = { error: 'Invalid JSON response.' }; }
     }
     if (!response.ok) {
-      const error = new Error('Battleboard API HTTP ' + response.status + (data.error ? ': ' + String(data.error).slice(0, 160) : ''));
+      const error = new Error('เว็บไซต์ Battleboard ตอบกลับ HTTP ' + response.status + (data.error ? ': ' + String(data.error).slice(0, 160) : ''));
       error.status = response.status;
       throw error;
     }
@@ -356,9 +357,11 @@ function createBattleboardIntegration(deps = {}) {
       channelId: String(channelId),
       status: 'sending',
       partsSent: 0,
+      deliveryAttempts: 0,
       partTimings: [],
     };
     if (!Array.isArray(record.partTimings)) record.partTimings = [];
+    record.deliveryAttempts = (Number(record.deliveryAttempts) || 0) + 1;
     if (!record.firstDeliveryAttemptAt) record.firstDeliveryAttemptAt = new Date(attemptStartedAtMs).toISOString();
     record.status = 'sending';
     record.partsTotal = partsTotal;
@@ -402,6 +405,8 @@ function createBattleboardIntegration(deps = {}) {
           ' | ไฟต์=' + battleId +
           ' | ห้อง=' + channelId +
           ' | ไฟล์ลำดับ=' + partNumber + '/' + partsTotal +
+          ' | จำนวนไฟล์ที่ส่งสำเร็จก่อนหน้า=' + (Number(record.partsSent) || 0) +
+          ' | ครั้งที่พยายามส่งรายงาน=' + record.deliveryAttempts +
           ' | รายการ=' + partLabel +
           ' | ชื่อไฟล์=' + fileName +
           ' | ขนาด=' + formatAttachmentSize(fileSizeBytes) +
@@ -514,6 +519,7 @@ function createBattleboardIntegration(deps = {}) {
       ' | เซิร์ฟเวอร์ Discord=' + serverId +
       ' | ไฟต์=' + battleId +
       ' | ห้อง=' + channelId +
+      ' | ครั้งที่พยายามส่งรายงาน=' + record.deliveryAttempts +
       ' | ส่งสำเร็จ=' + (Number(record.partsSent) || 0) + '/' + partsTotal + ' ไฟล์' +
       ' | เริ่มไฟต์ถึง Discord รับไฟล์สุดท้าย=' + elapsedFrom(battleStartedAtMs, finalDiscordAtMs) +
       ' | ระดับความเร็ว=' + classifyLatency(battleToDiscordMs) +
