@@ -166,7 +166,12 @@ function createBattleboardIntegration(deps = {}) {
   }
   async function fetchDetail(battleId) {
     const params = new URLSearchParams({ server: 'asia', id: String(battleId) });
-    return request('/api/bot-battle-detail?' + params.toString());
+    try {
+      return await request('/api/bot-battle-detail?' + params.toString());
+    } catch (error) {
+      if (Number(error && error.status) === 404) return { status: 404 };
+      throw error;
+    }
   }
   async function deliver(channel, channelId, battleId, report, targets, state, serverId) {
     const key = deliveryKey(battleId, channelId);
