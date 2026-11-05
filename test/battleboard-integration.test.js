@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, deliveryKey, toTimestampMs, formatElapsedMs, getAttachmentName },
+  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, deliveryKey, toTimestampMs, formatElapsedMs, getAttachmentName, getAttachmentSizeBytes, formatAttachmentSize, classifyLatency, createEmptyLatencySummary },
 } = require('../battleboard-integration');
 
 test('normalizes names consistently', () => {
@@ -108,4 +108,33 @@ test('uses the actual attachment name in delivery timing logs', () => {
   const { getAttachmentName } = require('../battleboard-integration').__test;
   assert.equal(getAttachmentName({ name: 'guild-summary.png' }, 'fallback.png'), 'guild-summary.png');
   assert.equal(getAttachmentName({}, 'report-image-1'), 'report-image-1');
+});
+
+
+test('formats report attachment sizes when the source is a Buffer or exposes size', () => {
+  const { getAttachmentSizeBytes, formatAttachmentSize } = require('../battleboard-integration').__test;
+  assert.equal(getAttachmentSizeBytes({ attachment: Buffer.alloc(2048) }), 2048);
+  assert.equal(getAttachmentSizeBytes({ size: 1048576 }), 1048576);
+  assert.equal(getAttachmentSizeBytes({ attachment: 'local-file-path.png' }), null);
+  assert.equal(formatAttachmentSize(1536), '1.5 KB');
+  assert.equal(formatAttachmentSize(1572864), '1.50 MB');
+  assert.equal(formatAttachmentSize(null), 'ไม่ทราบขนาด');
+});
+
+test('classifies Battle-to-Discord latency using the agreed five and ten minute levels', () => {
+  const { classifyLatency } = require('../battleboard-integration').__test;
+  assert.equal(classifyLatency(4 * 60 * 1000), 'เร็ว');
+  assert.equal(classifyLatency(5 * 60 * 1000), 'เริ่มช้า');
+  assert.equal(classifyLatency(10 * 60 * 1000), 'ช้าผิดปกติ');
+  assert.equal(classifyLatency(null), 'ยังวัดไม่ได้');
+});
+
+test('initializes an isolated 30-minute summary window per tracked Discord server', () => {
+  const { createEmptyLatencySummary } = require('../battleboard-integration').__test;
+  const summary = createEmptyLatencySummary(Date.parse('2026-11-06T00:00:00.000Z'));
+  assert.equal(summary.windowStartedAt, '2026-11-06T00:00:00.000Z');
+  assert.equal(summary.reportsSent, 0);
+  assert.equal(summary.fileUploadAttempts, 0);
+  assert.equal(summary.fastestBattleToDiscordMs, null);
+  assert.equal(summary.slowestBattleToDiscordMs, null);
 });
