@@ -8,6 +8,11 @@ const MAX_DELIVERIES = 2000;
 const LATENCY_SUMMARY_INTERVAL_MS = 30 * 60 * 1000;
 const SLOW_REPORT_MS = 5 * 60 * 1000;
 const VERY_SLOW_REPORT_MS = 10 * 60 * 1000;
+function buildBattleboardDetailUrl(battleId) {
+  const id = String(battleId == null ? '' : battleId).trim();
+  if (!/^\d+$/.test(id)) return 'https://albion-battleboard-clone-1.vercel.app/';
+  return 'https://albion-battleboard-clone-1.vercel.app/?battle=' + encodeURIComponent(id) + '&server=asia#battle-detail-panel';
+}
 function normalizeName(value) {
   return String(value == null ? '' : value).normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
 }
@@ -381,7 +386,7 @@ function createBattleboardIntegration(deps = {}) {
       '⚔️ Kills: ' + Number(report.totalKills || 0).toLocaleString() + '\n' +
       '☠️ Deaths: ' + Number(report.totalDeaths || 0).toLocaleString() + '\n' +
       '➕ Kills + Deaths: ' + (Number(report.totalKills || 0) + Number(report.totalDeaths || 0)).toLocaleString() + '\n' +
-      '🔗 Battle Link: <' + report.battleUrl + '>';
+      '🔗 Battle Link: <' + buildBattleboardDetailUrl(battleId) + '>';
 
     const elapsedFrom = (startMs, endMs) =>
       startMs ? formatElapsedMs(endMs - startMs) : 'ไม่ทราบ';
@@ -756,5 +761,5 @@ function createBattleboardIntegration(deps = {}) {
 }
 module.exports = {
   createBattleboardIntegration,
-  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, deliveryKey, toTimestampMs, formatElapsedMs, getAttachmentName, getAttachmentSizeBytes, formatAttachmentSize, classifyLatency, createEmptyLatencySummary, formatThaiDateTime, flushLatencySummary, snapshotFingerprint, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup },
+  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, deliveryKey, toTimestampMs, formatElapsedMs, getAttachmentName, getAttachmentSizeBytes, formatAttachmentSize, classifyLatency, createEmptyLatencySummary, formatThaiDateTime, flushLatencySummary, snapshotFingerprint, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup, buildBattleboardDetailUrl },
 };
