@@ -94,6 +94,20 @@ function getAttachmentName(file, fallback) {
   const name = file && (file.name || (file.attachment && file.attachment.name));
   return String(name || fallback || 'unknown').replace(/\s+/g, ' ').slice(0, 120);
 }
+function formatThaiDateTime(value) {
+  const timestamp = toTimestampMs(value);
+  if (timestamp == null) return 'ไม่ทราบเวลา';
+  return new Date(timestamp).toLocaleString('th-TH', {
+    timeZone: 'Asia/Bangkok',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+    hour12: false,
+  }) + ' น.';
+}
 function getAttachmentSizeBytes(file) {
   const attachment = file && (file.attachment ?? file);
   if (Buffer.isBuffer(attachment)) return attachment.length;
@@ -161,7 +175,7 @@ function flushLatencySummary(state, serverId, now = Date.now()) {
   const slowest = summary.slowestBattleToDiscordMs == null ? 'ไม่มีข้อมูล' : formatElapsedMs(summary.slowestBattleToDiscordMs);
   console.log('📊 [Battleboard สรุปทุก 30 นาที]' +
     ' | เซิร์ฟเวอร์ Discord=' + serverId +
-    ' | ช่วงเวลา=' + (Number.isFinite(startedAt) ? new Date(startedAt).toISOString() : 'ไม่ทราบ') + ' ถึง ' + new Date(now).toISOString() +
+    ' | ช่วงเวลา=' + (Number.isFinite(startedAt) ? formatThaiDateTime(startedAt) : 'ไม่ทราบ') + ' ถึง ' + formatThaiDateTime(now) +
     ' | รายงานส่งครบ=' + (summary.reportsSent || 0) +
     ' | ต่ำกว่าเกณฑ์ Fame=' + (summary.belowFame || 0) +
     ' | จำนวนรอบที่รายละเอียดยังไม่ครบ=' + (summary.detailPending || 0) +
@@ -372,7 +386,6 @@ function createBattleboardIntegration(deps = {}) {
       const sendStartedAtMs = Date.now();
       const summary = getLatencySummary(state);
       summary.fileUploadAttempts = (Number(summary.fileUploadAttempts) || 0) + 1;
-      persist();
       let discordMessage = null;
       try {
         discordMessage = await channel.send(payload);
@@ -382,10 +395,8 @@ function createBattleboardIntegration(deps = {}) {
         record.lastFailedPart = partNumber;
         record.lastFailureAt = new Date(failedAtMs).toISOString();
         record.lastFailure = String(sendError && sendError.message || sendError).slice(0, 200);
-        saveDelivery(state, record);
-        persist();
         summary.fileUploadFailures = (Number(summary.fileUploadFailures) || 0) + 1;
-        persist();
+        saveDelivery(state, record);
         console.error('❌ [Battleboard ส่งไฟล์ไม่สำเร็จ]' +
           ' | เซิร์ฟเวอร์ Discord=' + serverId +
           ' | ไฟต์=' + battleId +
@@ -412,6 +423,7 @@ function createBattleboardIntegration(deps = {}) {
         fileSizeBytes: fileSizeBytes == null ? null : Number(fileSizeBytes),
         sendStartedAt: new Date(sendStartedAtMs).toISOString(),
         discordMessageAt: new Date(discordMessageAtMs).toISOString(),
+        discordMessageId: String(discordMessage && discordMessage.id || ''),
         sendRoundTripMs,
         battleToDiscordMs: battleStartedAtMs ? Math.max(0, discordMessageAtMs - battleStartedAtMs) : null,
         websiteFirstSeenToDiscordMs: firstSeenAtMs ? Math.max(0, discordMessageAtMs - firstSeenAtMs) : null,
@@ -425,7 +437,6 @@ function createBattleboardIntegration(deps = {}) {
       summary.fileUploadSuccesses = (Number(summary.fileUploadSuccesses) || 0) + 1;
       addLatencyValue(summary, 'totalDiscordSendMs', 'discordSendSamples', sendRoundTripMs);
       saveDelivery(state, record);
-      persist();
 
       console.log('📨 [Battleboard ส่งไฟล์สำเร็จ]' +
         ' | เซิร์ฟเวอร์ Discord=' + serverId +
@@ -440,7 +451,8 @@ function createBattleboardIntegration(deps = {}) {
         ' | เว็บสร้างเหตุการณ์ถึง Discord=' + elapsedFrom(eventCheckedAtMs, discordMessageAtMs) +
         ' | บอทได้รับ Event ถึง Discord=' + elapsedFrom(eventReceivedAtMs, discordMessageAtMs) +
         ' | เวลาที่ Discord รับไฟล์=' + sendRoundTripMs + 'ms' +
-        ' | เวลาข้อความใน Discord=' + new Date(discordMessageAtMs).toISOString() + '.');
+        ' | รหัสข้อความ Discord=' + String(discordMessage && discordMessage.id || 'ไม่ทราบ') +
+        ' | เวลาข้อความใน Discord=' + formatThaiDateTime(discordMessageAtMs) + '.');
     };
 
     if (files.length) {
@@ -510,7 +522,7 @@ function createBattleboardIntegration(deps = {}) {
       ' | บอทได้รับ Event ถึง Discord=' + elapsedFrom(eventReceivedAtMs, finalDiscordAtMs) +
       ' | เวลาสร้างรายงาน=' + (reportGenerationMs == null ? 'ไม่ทราบ' : reportGenerationMs + 'ms') +
       ' | เวลาส่งรายงานตั้งแต่ครั้งแรก=' + record.deliveryWindowMs + 'ms' +
-      ' | เวลารับข้อความสุดท้าย=' + new Date(finalDiscordAtMs).toISOString() + '.');
+      ' | เวลารับข้อความสุดท้าย=' + formatThaiDateTime(finalDiscordAtMs) + '.');
   }
   async function processEvent(serverId, guildConfig, state, event) {
     const battleId = String(event && event.battle_id || '').trim();
@@ -527,7 +539,7 @@ function createBattleboardIntegration(deps = {}) {
       ' | เริ่มไฟต์ถึงเว็บพบไฟต์=' + elapsedFrom(battleStartedAtMs, firstSeenAtMs) +
       ' | เว็บพบไฟต์ถึงตรวจรายละเอียดครบและสร้างเหตุการณ์=' + elapsedFrom(firstSeenAtMs, eventCheckedAtMs) +
       ' | สร้างเหตุการณ์ถึงบอทได้รับ=' + elapsedFrom(eventCheckedAtMs, eventReceivedAtMs) +
-      ' | เวลาบอทได้รับ=' + new Date(eventReceivedAtMs).toISOString() + '.');
+      ' | เวลาบอทได้รับ=' + formatThaiDateTime(eventReceivedAtMs) + '.');
 
     const detailFetchStartedAtMs = Date.now();
     const detailResponse = await fetchDetail(battleId);
@@ -615,12 +627,11 @@ function createBattleboardIntegration(deps = {}) {
       const prior = findDelivery(state, key);
       if (prior && (prior.status === 'sent' || prior.status === 'below-threshold')) continue;
       if (Number(report.totalFame || 0) < route.minFame) {
+        getLatencySummary(state).belowFame = (Number(getLatencySummary(state).belowFame) || 0) + 1;
         saveDelivery(state, {
           key, battleId, channelId, status: 'below-threshold',
           totalFame: Number(report.totalFame || 0), minFame: route.minFame, checkedAt: new Date().toISOString(),
         });
-        getLatencySummary(state).belowFame = (Number(getLatencySummary(state).belowFame) || 0) + 1;
-        persist();
         console.log('ℹ️ [Battleboard ต่ำกว่าเกณฑ์ Fame]' +
           ' | ไฟต์=' + battleId +
           ' | ห้อง=' + channelId +
