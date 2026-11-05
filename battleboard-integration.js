@@ -542,6 +542,9 @@ function createBattleboardIntegration(deps = {}) {
     console.log('🛰️ [Battleboard รับ Event]' +
       ' | เซิร์ฟเวอร์ Discord=' + serverId +
       ' | ไฟต์=' + battleId +
+      ' | เวลาเริ่มไฟต์=' + formatThaiDateTime(battleStartedAtMs) +
+      ' | เวลาเว็บไซต์พบไฟต์=' + formatThaiDateTime(firstSeenAtMs) +
+      ' | เวลาสร้างเหตุการณ์บนเว็บไซต์=' + formatThaiDateTime(eventCheckedAtMs) +
       ' | เริ่มไฟต์ถึงเว็บพบไฟต์=' + elapsedFrom(battleStartedAtMs, firstSeenAtMs) +
       ' | เว็บพบไฟต์ถึงตรวจรายละเอียดครบและสร้างเหตุการณ์=' + elapsedFrom(firstSeenAtMs, eventCheckedAtMs) +
       ' | สร้างเหตุการณ์ถึงบอทได้รับ=' + elapsedFrom(eventCheckedAtMs, eventReceivedAtMs) +
@@ -581,7 +584,8 @@ function createBattleboardIntegration(deps = {}) {
       ' | จำนวนเหตุการณ์ใน Battle=' + Number(detailResponse.eventCount || 0) +
       ' | จำนวนหน้ารายละเอียด=' + Number(detailResponse.eventsPageCount || 0) +
       ' | เวลาดึงรายละเอียด=' + detailFetchMs + 'ms' +
-      ' | สร้างเหตุการณ์ถึงรายละเอียดพร้อม=' + elapsedFrom(eventCheckedAtMs, detailFetchedAtMs) + '.');
+      ' | สร้างเหตุการณ์ถึงบอทดึงรายละเอียดครบ=' + elapsedFrom(eventCheckedAtMs, detailFetchedAtMs) +
+      ' | เวลาที่บอทดึงรายละเอียดครบ=' + formatThaiDateTime(detailFetchedAtMs) + '.');
 
     const detail = detailResponse.detail;
     const routes = getRoutes(guildConfig, detail, event);
@@ -615,6 +619,7 @@ function createBattleboardIntegration(deps = {}) {
       ' | ไฟต์=' + battleId +
       ' | บอทได้รับเหตุการณ์ถึงสร้างรายงานเสร็จ=' + elapsedFrom(eventReceivedAtMs, reportGeneratedAtMs) +
       ' | เวลาประมวลผลและสร้างภาพ=' + reportGenerationMs + 'ms' +
+      ' | เวลาสร้างรายงานเสร็จ=' + formatThaiDateTime(reportGeneratedAtMs) +
       ' | จำนวนรูป=' + (Array.isArray(report.payload && report.payload.files) ? report.payload.files.length : 0) +
       ' | เริ่มไฟต์ถึงสร้างรายงานเสร็จ=' + elapsedFrom(battleStartedAtMs, reportGeneratedAtMs) + '.');
 
