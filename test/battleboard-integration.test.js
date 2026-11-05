@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, deliveryKey },
+  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, deliveryKey, toTimestampMs, formatElapsedMs, getAttachmentName },
 } = require('../battleboard-integration');
 
 test('normalizes names consistently', () => {
@@ -86,4 +86,26 @@ test('only clears a previous website snapshot when the local tracking list becom
   assert.equal(needsEmptySnapshotCleanup({ snapshotInitialized: false }), false);
   assert.equal(needsEmptySnapshotCleanup({ snapshotInitialized: true, snapshotFingerprint: '[]' }), false);
   assert.equal(needsEmptySnapshotCleanup({ snapshotInitialized: true, snapshotFingerprint: '[["guild","plac","id"]]' }), true);
+});
+
+
+test('parses battle and Discord timestamps in ISO, Unix seconds, and milliseconds', () => {
+  const { toTimestampMs } = require('../battleboard-integration').__test;
+  assert.equal(toTimestampMs('2026-11-06T00:00:00.000Z'), Date.parse('2026-11-06T00:00:00.000Z'));
+  assert.equal(toTimestampMs(1793923200), 1793923200000);
+  assert.equal(toTimestampMs(1793923200000), 1793923200000);
+  assert.equal(toTimestampMs('not-a-date'), null);
+});
+
+test('formats delivery delays as readable Thai durations', () => {
+  const { formatElapsedMs } = require('../battleboard-integration').__test;
+  assert.equal(formatElapsedMs(252000), '4 นาที 12 วินาที');
+  assert.equal(formatElapsedMs(3723000), '1 ชม. 2 นาที 3 วินาที');
+  assert.equal(formatElapsedMs(null), 'ไม่ทราบ');
+});
+
+test('uses the actual attachment name in delivery timing logs', () => {
+  const { getAttachmentName } = require('../battleboard-integration').__test;
+  assert.equal(getAttachmentName({ name: 'guild-summary.png' }, 'fallback.png'), 'guild-summary.png');
+  assert.equal(getAttachmentName({}, 'report-image-1'), 'report-image-1');
 });
