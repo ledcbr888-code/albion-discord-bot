@@ -1,6 +1,9 @@
 'use strict';
 const POLL_MS = 30000;
-const TIMEOUT_MS = 12000;
+const TIMEOUT_MS = 8000;
+const SNAPSHOT_SYNC_INTERVAL_MS = 5 * 60 * 1000;
+const RETRY_BASE_MS = 30 * 1000;
+const RETRY_MAX_MS = 5 * 60 * 1000;
 const MAX_DELIVERIES = 2000;
 function normalizeName(value) {
   return String(value == null ? '' : value).normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
@@ -55,6 +58,26 @@ function targetGuildMatches(config, detail, event) {
     (targetId && guild.id === targetId) || (targetName && normalizeName(guild.name) === targetName));
 }
 function deliveryKey(battleId, channelId) { return String(battleId) + ':' + String(channelId); }
+function snapshotFingerprint(items) {
+  return JSON.stringify((Array.isArray(items) ? items : []).map(item => [
+    String(item && item.type || ''),
+    normalizeName(item && item.name),
+    item && item.id ? String(item.id) : null,
+  ]));
+}
+function isSnapshotSyncDue(state = {}, items = [], now = Date.now()) {
+  const fingerprint = snapshotFingerprint(items);
+  if (state.snapshotInitialized !== true || state.snapshotFingerprint !== fingerprint) return true;
+  const lastSync = Date.parse(state.lastSnapshotSyncAt || '');
+  return !Number.isFinite(lastSync) || now - lastSync >= SNAPSHOT_SYNC_INTERVAL_MS;
+}
+function retryDelayMs(failureCount) {
+  const count = Math.max(1, Math.min(10, Number(failureCount) || 1));
+  return Math.min(RETRY_MAX_MS, RETRY_BASE_MS * (2 ** (count - 1)));
+}
+function needsEmptySnapshotCleanup(state = {}) {
+  return state.snapshotInitialized === true && state.snapshotFingerprint !== snapshotFingerprint([]);
+}
 
 function createBattleboardIntegration(deps = {}) {
   const client = deps.client;
@@ -117,23 +140,21 @@ function createBattleboardIntegration(deps = {}) {
     if (state.delivered.length > MAX_DELIVERIES) state.delivered.splice(0, state.delivered.length - MAX_DELIVERIES);
     persist();
   }
-  async function syncSnapshot(serverId, guildConfig, state) {
-    const items = buildTrackedItems(guildConfig);
-    if (!items.length && state.snapshotInitialized !== true) {
-      console.log('ℹ️ [Battleboard] No tracked entities for Discord=' + serverId + '; keeping website snapshot unchanged.');
-      return;
-    }
+  async function syncSnapshot(serverId, state, items) {
+    if (!isSnapshotSyncDue(state, items)) return false;
     const params = new URLSearchParams({ server: 'asia', discordServerId: serverId });
     const result = await request('/api/bot-tracked-entities?' + params.toString(), {
       method: 'PUT',
       body: { server: 'asia', discordServerId: serverId, items, confirmEmpty: items.length === 0 },
     });
     state.snapshotInitialized = true;
+    state.snapshotFingerprint = snapshotFingerprint(items);
     state.lastSnapshotSyncAt = new Date().toISOString();
     persist();
     console.log('🔁 [Battleboard] Tracking synced | Discord=' + serverId +
       ' | Guilds=' + Number(result.counts && result.counts.guilds || 0) +
       ' | Players=' + Number(result.counts && result.counts.players || 0));
+    return true;
   }
   function eventsPath(serverId, cursor, limit) {
     const params = new URLSearchParams({ server: 'asia', discordServerId: serverId, mode: 'events', limit: String(limit || 50) });
@@ -267,7 +288,19 @@ function createBattleboardIntegration(deps = {}) {
   async function pollServer(serverId, guildConfig) {
     if (!validDiscordServerId(serverId) || !guildConfig) return;
     const state = getState(guildConfig);
-    await syncSnapshot(serverId, guildConfig, state);
+    const items = buildTrackedItems(guildConfig);
+
+    // A Discord server with no tracking should not consume Vercel/Supabase
+    // requests every 30 seconds. If tracking was removed entirely, clear the
+    // previous website snapshot once; never send an accidental empty baseline.
+    if (!items.length) {
+      if (needsEmptySnapshotCleanup(state)) await syncSnapshot(serverId, state, items);
+      return;
+    }
+
+    // Upsert the snapshot only when it changes or as a five-minute safety refresh.
+    // The Events feed remains at 30 seconds, but avoids needless multi-query PUTs.
+    await syncSnapshot(serverId, state, items);
     if (state.cursorInitialized !== true || !state.eventCursor) {
       await initialiseCursor(serverId, state);
       return;
@@ -295,10 +328,24 @@ function createBattleboardIntegration(deps = {}) {
           ? item.config
           : (typeof getGuildConfig === 'function' ? getGuildConfig(serverId, false) : null);
         if (!config) continue;
-        try { await pollServer(serverId, config); }
-        catch (error) {
+        const state = getState(config);
+        const retryAfter = Date.parse(state.retryAfterAt || '');
+        if (Number.isFinite(retryAfter) && retryAfter > Date.now()) continue;
+        try {
+          await pollServer(serverId, config);
+          if (Number(state.consecutiveFailures) > 0 || state.retryAfterAt) {
+            delete state.consecutiveFailures;
+            delete state.retryAfterAt;
+            persist();
+          }
+        } catch (error) {
+          const failures = Math.max(0, Number(state.consecutiveFailures) || 0) + 1;
+          const delay = retryDelayMs(failures);
+          state.consecutiveFailures = failures;
+          state.retryAfterAt = new Date(Date.now() + delay).toISOString();
+          persist();
           console.error('❌ [Battleboard] Poll failed | Discord=' + serverId +
-            ' | Error=' + String(error && error.message || error).slice(0, 260));
+            ' | RetryIn=' + Math.ceil(delay / 1000) + 's | Error=' + String(error && error.message || error).slice(0, 260));
         }
       }
     } finally {
@@ -326,5 +373,5 @@ function createBattleboardIntegration(deps = {}) {
 }
 module.exports = {
   createBattleboardIntegration,
-  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, deliveryKey },
+  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, deliveryKey, snapshotFingerprint, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup },
 };
