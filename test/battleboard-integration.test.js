@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, deliveryKey, toTimestampMs, formatElapsedMs, getAttachmentName, getAttachmentSizeBytes, formatAttachmentSize, classifyLatency, createEmptyLatencySummary },
+  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, deliveryKey, toTimestampMs, formatElapsedMs, getAttachmentName, getAttachmentSizeBytes, formatAttachmentSize, classifyLatency, createEmptyLatencySummary, formatThaiDateTime, flushLatencySummary },
 } = require('../battleboard-integration');
 
 test('normalizes names consistently', () => {
@@ -137,4 +137,56 @@ test('initializes an isolated 30-minute summary window per tracked Discord serve
   assert.equal(summary.fileUploadAttempts, 0);
   assert.equal(summary.fastestBattleToDiscordMs, null);
   assert.equal(summary.slowestBattleToDiscordMs, null);
+});
+
+
+test('formats report timestamps in Thailand time', () => {
+  const { formatThaiDateTime } = require('../battleboard-integration').__test;
+  const formatted = formatThaiDateTime('2026-11-06T00:00:00.000Z');
+  assert.match(formatted, /06\/11\/2026/);
+  assert.match(formatted, /07:00:00/);
+  assert.match(formatted, /น\./);
+});
+
+test('emits and resets the per-server 30-minute Thai summary window', () => {
+  const { flushLatencySummary } = require('../battleboard-integration').__test;
+  const state = {
+    latencySummary: {
+      windowStartedAt: '2026-11-06T00:00:00.000Z',
+      reportsSent: 2,
+      belowFame: 1,
+      detailPending: 3,
+      detailRetryAttempts: 1,
+      noRoute: 0,
+      fileUploadAttempts: 4,
+      fileUploadSuccesses: 3,
+      fileUploadFailures: 1,
+      apiFailures: 0,
+      otherPollFailures: 0,
+      totalBattleToDiscordMs: 600000,
+      battleToDiscordSamples: 2,
+      fastestBattleToDiscordMs: 120000,
+      slowestBattleToDiscordMs: 480000,
+      totalReportGenerationMs: 5000,
+      reportGenerationSamples: 2,
+      totalDiscordSendMs: 1000,
+      discordSendSamples: 3,
+    },
+  };
+  const originalLog = console.log;
+  const captured = [];
+  console.log = (...args) => captured.push(args.join(' '));
+  try {
+    assert.equal(flushLatencySummary(state, '1165745441120452638', Date.parse('2026-11-06T00:29:59.000Z')), false);
+    assert.equal(flushLatencySummary(state, '1165745441120452638', Date.parse('2026-11-06T00:30:00.000Z')), true);
+  } finally {
+    console.log = originalLog;
+  }
+  assert.equal(captured.length, 1);
+  assert.match(captured[0], /สรุปทุก 30 นาที/);
+  assert.match(captured[0], /รายงานส่งครบ=2/);
+  assert.match(captured[0], /ต่ำกว่าเกณฑ์ Fame=1/);
+  assert.match(captured[0], /75\.0%/);
+  assert.equal(state.latencySummary.reportsSent, 0);
+  assert.equal(state.latencySummary.fileUploadAttempts, 0);
 });
