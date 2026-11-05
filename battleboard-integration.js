@@ -58,6 +58,39 @@ function targetGuildMatches(config, detail, event) {
     (targetId && guild.id === targetId) || (targetName && normalizeName(guild.name) === targetName));
 }
 function deliveryKey(battleId, channelId) { return String(battleId) + ':' + String(channelId); }
+function toTimestampMs(value) {
+  if (value == null || value === '') return null;
+  if (value instanceof Date) {
+    const dateMs = value.getTime();
+    return Number.isFinite(dateMs) && dateMs > 0 ? dateMs : null;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const dateMs = value < 1e12 ? value * 1000 : value;
+    return dateMs > 0 ? dateMs : null;
+  }
+  const text = String(value).trim();
+  if (!text) return null;
+  if (/^\\d{10,13}$/.test(text)) {
+    const numeric = Number(text);
+    const dateMs = numeric < 1e12 ? numeric * 1000 : numeric;
+    return Number.isFinite(dateMs) && dateMs > 0 ? dateMs : null;
+  }
+  const parsed = Date.parse(text);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : null;
+}
+function formatElapsedMs(value) {
+  if (!Number.isFinite(Number(value))) return 'ไม่ทราบ';
+  const totalSeconds = Math.floor(Math.max(0, Number(value)) / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+  if (hours > 0) return hours + ' ชม. ' + minutes + ' นาที ' + seconds + ' วินาที';
+  return minutes + ' นาที ' + seconds + ' วินาที';
+}
+function getAttachmentName(file, fallback) {
+  const name = file && (file.name || (file.attachment && file.attachment.name));
+  return String(name || fallback || 'unknown').replace(/\\s+/g, ' ').slice(0, 120);
+}
 function snapshotFingerprint(items) {
   return JSON.stringify((Array.isArray(items) ? items : []).map(item => [
     String(item && item.type || ''),
@@ -194,14 +227,33 @@ function createBattleboardIntegration(deps = {}) {
       throw error;
     }
   }
-  async function deliver(channel, channelId, battleId, report, targets, state, serverId) {
+  async function deliver(channel, channelId, battleId, report, targets, state, serverId, event) {
     const key = deliveryKey(battleId, channelId);
     const prior = findDelivery(state, key);
     if (prior && prior.status === 'sent') return;
+
     const files = Array.isArray(report.payload && report.payload.files) ? report.payload.files : [];
     const partsTotal = Math.max(1, files.length);
-    const record = prior || { key, battleId: String(battleId), channelId: String(channelId), status: 'sending', partsSent: 0 };
-    if (!prior) saveDelivery(state, record);
+    const attemptStartedAtMs = Date.now();
+    const battleStartedAtMs = toTimestampMs(report && report.battleTime);
+    const eventCheckedAtMs = toTimestampMs(event && event.checked_at);
+    const record = prior || {
+      key,
+      battleId: String(battleId),
+      channelId: String(channelId),
+      status: 'sending',
+      partsSent: 0,
+      partTimings: [],
+    };
+    if (!Array.isArray(record.partTimings)) record.partTimings = [];
+    if (!record.firstDeliveryAttemptAt) record.firstDeliveryAttemptAt = new Date(attemptStartedAtMs).toISOString();
+    record.status = 'sending';
+    record.partsTotal = partsTotal;
+    record.battleStartedAt = battleStartedAtMs ? new Date(battleStartedAtMs).toISOString() : null;
+    record.eventCheckedAt = eventCheckedAtMs ? new Date(eventCheckedAtMs).toISOString() : null;
+    record.lastDeliveryAttemptAt = new Date(attemptStartedAtMs).toISOString();
+    saveDelivery(state, record);
+
     const alertText =
       '🚨 **BOSS BOT Battleboard Alert!** ตรวจพบไฟต์ใหม่ของ **' + targets.join(', ') + '**\n' +
       '💰 Fame รวมของผู้ที่ติดตาม: ' + formatFame(report.totalFame) + '\n' +
@@ -209,31 +261,113 @@ function createBattleboardIntegration(deps = {}) {
       '☠️ Deaths: ' + Number(report.totalDeaths || 0).toLocaleString() + '\n' +
       '➕ Kills + Deaths: ' + (Number(report.totalKills || 0) + Number(report.totalDeaths || 0)).toLocaleString() + '\n' +
       '🔗 Battle Link: <' + report.battleUrl + '>';
+
+    const elapsedFrom = (startMs, endMs) =>
+      startMs ? formatElapsedMs(endMs - startMs) : 'ไม่ทราบ';
+    const sendPart = async (payload, partLabel, partNumber, fileName) => {
+      const sendStartedAtMs = Date.now();
+      let discordMessage = null;
+      try {
+        discordMessage = await channel.send(payload);
+      } catch (sendError) {
+        const failedAtMs = Date.now();
+        const sendRoundTripMs = Math.max(0, failedAtMs - sendStartedAtMs);
+        record.lastFailedPart = partNumber;
+        record.lastFailureAt = new Date(failedAtMs).toISOString();
+        record.lastFailure = String(sendError && sendError.message || sendError).slice(0, 200);
+        saveDelivery(state, record);
+        console.error('❌ [Battleboard Delivery] Result=FAILED' +
+          ' | Discord=' + serverId +
+          ' | Battle=' + battleId +
+          ' | Channel=' + channelId +
+          ' | Part=' + partNumber + '/' + partsTotal +
+          ' | Item=' + partLabel +
+          ' | File=' + fileName +
+          ' | BattleToFailure=' + elapsedFrom(battleStartedAtMs, failedAtMs) +
+          ' | EventCheckToFailure=' + elapsedFrom(eventCheckedAtMs, failedAtMs) +
+          ' | channel.send=' + sendRoundTripMs + 'ms' +
+          ' | Error=' + String(sendError && sendError.message || sendError).slice(0, 200));
+        throw sendError;
+      }
+
+      const sendResolvedAtMs = Date.now();
+      const discordMessageAtMs = toTimestampMs(discordMessage && discordMessage.createdTimestamp) || sendResolvedAtMs;
+      const sendRoundTripMs = Math.max(0, sendResolvedAtMs - sendStartedAtMs);
+      const timing = {
+        part: partNumber,
+        partsTotal,
+        item: partLabel,
+        fileName,
+        sendStartedAt: new Date(sendStartedAtMs).toISOString(),
+        discordMessageAt: new Date(discordMessageAtMs).toISOString(),
+        sendRoundTripMs,
+        battleToDiscordMs: battleStartedAtMs ? Math.max(0, discordMessageAtMs - battleStartedAtMs) : null,
+        eventCheckToDiscordMs: eventCheckedAtMs ? Math.max(0, discordMessageAtMs - eventCheckedAtMs) : null,
+      };
+      record.partTimings.push(timing);
+      if (record.partTimings.length > 100) record.partTimings.splice(0, record.partTimings.length - 100);
+      record.partsSent = Math.max(Number(record.partsSent) || 0, partNumber);
+      record.lastPartSentAt = timing.discordMessageAt;
+      saveDelivery(state, record);
+
+      console.log('📨 [Battleboard Delivery] Result=SENT' +
+        ' | Discord=' + serverId +
+        ' | Battle=' + battleId +
+        ' | Channel=' + channelId +
+        ' | Part=' + partNumber + '/' + partsTotal +
+        ' | Item=' + partLabel +
+        ' | File=' + fileName +
+        ' | BattleToDiscord=' + elapsedFrom(battleStartedAtMs, discordMessageAtMs) +
+        ' | EventCheckToDiscord=' + elapsedFrom(eventCheckedAtMs, discordMessageAtMs) +
+        ' | channel.send=' + sendRoundTripMs + 'ms' +
+        ' | DiscordMessageAt=' + new Date(discordMessageAtMs).toISOString() + '.');
+    };
+
     if (files.length) {
       if ((Number(record.partsSent) || 0) < 1) {
-        await channel.send({ content: alertText, files: [files[0]], allowedMentions: { parse: [] } });
-        record.partsSent = 1;
-        saveDelivery(state, record);
+        await sendPart(
+          { content: alertText, files: [files[0]], allowedMentions: { parse: [] } },
+          'ข้อความแจ้งเตือน + รูปที่ 1',
+          1,
+          getAttachmentName(files[0], 'report-image-1')
+        );
       }
       for (let index = 1; index < files.length; index++) {
         if ((Number(record.partsSent) || 0) >= index + 1) continue;
-        await channel.send({ files: [files[index]], allowedMentions: { parse: [] } });
-        record.partsSent = index + 1;
-        saveDelivery(state, record);
+        await sendPart(
+          { files: [files[index]], allowedMentions: { parse: [] } },
+          'รูปที่ ' + (index + 1),
+          index + 1,
+          getAttachmentName(files[index], 'report-image-' + (index + 1))
+        );
       }
     } else if ((Number(record.partsSent) || 0) < 1) {
-      await channel.send({
+      await sendPart({
         content: alertText + '\n' + String(report.payload && report.payload.content || ''),
         allowedMentions: { parse: [] },
-      });
-      record.partsSent = 1;
-      saveDelivery(state, record);
+      }, 'ข้อความแจ้งเตือน (ไม่มีรูป)', 1, 'ไม่มีไฟล์แนบ');
     }
+
+    const completedAtMs = Date.now();
+    const finalDiscordAtMs = toTimestampMs(record.lastPartSentAt) || completedAtMs;
+    const firstAttemptAtMs = toTimestampMs(record.firstDeliveryAttemptAt) || attemptStartedAtMs;
     record.status = 'sent';
     record.partsTotal = partsTotal;
-    record.sentAt = new Date().toISOString();
+    record.sentAt = new Date(finalDiscordAtMs).toISOString();
+    record.totalBattleToDiscordMs = battleStartedAtMs ? Math.max(0, finalDiscordAtMs - battleStartedAtMs) : null;
+    record.totalEventCheckToDiscordMs = eventCheckedAtMs ? Math.max(0, finalDiscordAtMs - eventCheckedAtMs) : null;
+    record.deliveryWindowMs = Math.max(0, completedAtMs - firstAttemptAtMs);
     saveDelivery(state, record);
-    console.log('✅ [Battleboard] Report delivered | Discord=' + serverId + ' | Battle=' + battleId + ' | Channel=' + channelId);
+
+    console.log('✅ [Battleboard Delivery] Result=COMPLETE' +
+      ' | Discord=' + serverId +
+      ' | Battle=' + battleId +
+      ' | Channel=' + channelId +
+      ' | Sent=' + (Number(record.partsSent) || 0) + '/' + partsTotal +
+      ' | BattleToLastDiscordFile=' + elapsedFrom(battleStartedAtMs, finalDiscordAtMs) +
+      ' | EventCheckToLastDiscordFile=' + elapsedFrom(eventCheckedAtMs, finalDiscordAtMs) +
+      ' | DeliveryWindow=' + record.deliveryWindowMs + 'ms' +
+      ' | LastDiscordMessageAt=' + new Date(finalDiscordAtMs).toISOString() + '.');
   }
   async function processEvent(serverId, guildConfig, state, event) {
     const battleId = String(event && event.battle_id || '').trim();
@@ -281,7 +415,7 @@ function createBattleboardIntegration(deps = {}) {
       }
       const channel = await client.channels.fetch(channelId).catch(() => null);
       if (!channel || typeof channel.send !== 'function') throw new Error('Auto-Battle channel unavailable: ' + channelId);
-      await deliver(channel, channelId, battleId, report, route.targets, state, serverId);
+      await deliver(channel, channelId, battleId, report, route.targets, state, serverId, event);
     }
     return true;
   }
@@ -373,5 +507,5 @@ function createBattleboardIntegration(deps = {}) {
 }
 module.exports = {
   createBattleboardIntegration,
-  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, deliveryKey, snapshotFingerprint, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup },
+  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, deliveryKey, toTimestampMs, formatElapsedMs, getAttachmentName, snapshotFingerprint, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup },
 };
