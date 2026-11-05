@@ -377,11 +377,12 @@ function createBattleboardIntegration(deps = {}) {
       } catch (sendError) {
         const failedAtMs = Date.now();
         const sendRoundTripMs = Math.max(0, failedAtMs - sendStartedAtMs);
-        summary.fileUploadFailures = (Number(summary.fileUploadFailures) || 0) + 1;
         record.lastFailedPart = partNumber;
         record.lastFailureAt = new Date(failedAtMs).toISOString();
         record.lastFailure = String(sendError && sendError.message || sendError).slice(0, 200);
         saveDelivery(state, record);
+        persist();
+        summary.fileUploadFailures = (Number(summary.fileUploadFailures) || 0) + 1;
         persist();
         console.error('❌ [Battleboard ส่งไฟล์ไม่สำเร็จ]' +
           ' | เซิร์ฟเวอร์ Discord=' + serverId +
@@ -677,9 +678,13 @@ function createBattleboardIntegration(deps = {}) {
         if (!config) continue;
         const state = getState(config);
         const retryAfter = Date.parse(state.retryAfterAt || '');
-        if (Number.isFinite(retryAfter) && retryAfter > Date.now()) continue;
+        if (Number.isFinite(retryAfter) && retryAfter > Date.now()) {
+          flushLatencySummary(state, serverId);
+          continue;
+        }
         try {
           await pollServer(serverId, config);
+          flushLatencySummary(state, serverId);
           if (Number(state.consecutiveFailures) > 0 || state.retryAfterAt) {
             delete state.consecutiveFailures;
             delete state.retryAfterAt;
@@ -690,9 +695,13 @@ function createBattleboardIntegration(deps = {}) {
           const delay = retryDelayMs(failures);
           state.consecutiveFailures = failures;
           state.retryAfterAt = new Date(Date.now() + delay).toISOString();
+          const summary = getLatencySummary(state);
+          if (Number(error && error.status) >= 400) summary.apiFailures = (Number(summary.apiFailures) || 0) + 1;
+          else summary.otherPollFailures = (Number(summary.otherPollFailures) || 0) + 1;
           persist();
           console.error('❌ [Battleboard] ตรวจข้อมูลไม่สำเร็จ | เซิร์ฟเวอร์ Discord=' + serverId +
             ' | รอตรวจซ้ำอีก=' + Math.ceil(delay / 1000) + 'วินาที | สาเหตุ=' + String(error && error.message || error).slice(0, 260));
+          flushLatencySummary(state, serverId);
         }
       }
     } finally {
