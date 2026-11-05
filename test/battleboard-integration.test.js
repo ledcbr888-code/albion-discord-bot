@@ -57,3 +57,33 @@ test('matches a guild event when its detail guild index is incomplete', () => {
 test('creates stable idempotency keys per battle and channel', () => {
   assert.equal(deliveryKey('526764798', '12345678901234567'), '526764798:12345678901234567');
 });
+
+
+test('does not refresh an unchanged tracking snapshot more often than every five minutes', () => {
+  const items = buildTrackedItems({ guilds: ['PLAC'], players: [] });
+  const signature = require('../battleboard-integration').__test.snapshotFingerprint(items);
+  const state = {
+    snapshotInitialized: true,
+    snapshotFingerprint: signature,
+    lastSnapshotSyncAt: '2026-11-06T00:00:00.000Z',
+  };
+  const { isSnapshotSyncDue } = require('../battleboard-integration').__test;
+  assert.equal(isSnapshotSyncDue(state, items, Date.parse('2026-11-06T00:04:59.000Z')), false);
+  assert.equal(isSnapshotSyncDue(state, items, Date.parse('2026-11-06T00:05:00.000Z')), true);
+  assert.equal(isSnapshotSyncDue(state, buildTrackedItems({ guilds: ['Psz'], players: [] }), Date.parse('2026-11-06T00:01:00.000Z')), true);
+});
+
+test('backs off transient API failures exponentially and caps retry delay at five minutes', () => {
+  const { retryDelayMs } = require('../battleboard-integration').__test;
+  assert.equal(retryDelayMs(1), 30000);
+  assert.equal(retryDelayMs(2), 60000);
+  assert.equal(retryDelayMs(3), 120000);
+  assert.equal(retryDelayMs(20), 300000);
+});
+
+test('only clears a previous website snapshot when the local tracking list becomes empty', () => {
+  const { needsEmptySnapshotCleanup } = require('../battleboard-integration').__test;
+  assert.equal(needsEmptySnapshotCleanup({ snapshotInitialized: false }), false);
+  assert.equal(needsEmptySnapshotCleanup({ snapshotInitialized: true, snapshotFingerprint: '[]' }), false);
+  assert.equal(needsEmptySnapshotCleanup({ snapshotInitialized: true, snapshotFingerprint: '[["guild","plac","id"]]' }), true);
+});
