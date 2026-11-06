@@ -195,7 +195,7 @@ test('builds a direct BOSS BOT Battleboard detail link for Discord alerts', () =
   const { buildBattleboardDetailUrl } = require('../battleboard-integration').__test;
   assert.equal(
     buildBattleboardDetailUrl('526855865'),
-    'https://albion-battleboard-clone-1.vercel.app/?battle=526855865&server=asia#battle-detail-panel',
+    'https://albion-battleboard-clone-1.vercel.app/battles/526855865',
   );
   assert.equal(buildBattleboardDetailUrl('invalid'), 'https://albion-battleboard-clone-1.vercel.app/');
 });

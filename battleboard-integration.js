@@ -11,7 +11,7 @@ const VERY_SLOW_REPORT_MS = 10 * 60 * 1000;
 function buildBattleboardDetailUrl(battleId) {
   const id = String(battleId == null ? '' : battleId).trim();
   if (!/^\d+$/.test(id)) return 'https://albion-battleboard-clone-1.vercel.app/';
-  return 'https://albion-battleboard-clone-1.vercel.app/?battle=' + encodeURIComponent(id) + '&server=asia#battle-detail-panel';
+  return 'https://albion-battleboard-clone-1.vercel.app/battles/' + encodeURIComponent(id);
 }
 function normalizeName(value) {
   return String(value == null ? '' : value).normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
