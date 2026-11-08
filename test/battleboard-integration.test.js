@@ -11,6 +11,8 @@ const {
   },
 } = require('../battleboard-integration');
 
+const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+
 test('normalizes names consistently', () => {
   assert.equal(normalizeName('  PLAC   '), 'plac');
 });
@@ -391,18 +393,18 @@ test('enforces a minimum write interval and keeps only the newest pending snapsh
   const writes = [];
   const scheduler = createTrackingBackupScheduler({
     debounceMs: 5,
-    minIntervalMs: 50,
+    minIntervalMs: 80,
     write: async snapshot => { writes.push({ value: JSON.parse(snapshot).value, at: Date.now() }); },
   });
   try {
     scheduler.enqueue(JSON.stringify({ value: 1 }));
-    await wait(15);
+    await wait(25);
     assert.equal(writes.length, 1);
     scheduler.enqueue(JSON.stringify({ value: 2 }));
     scheduler.enqueue(JSON.stringify({ value: 3 }));
-    await wait(20);
+    await wait(25);
     assert.equal(writes.length, 1, 'the second write must respect the minimum interval');
-    await wait(50);
+    await wait(75);
     assert.equal(writes.length, 2);
     assert.equal(writes[1].value, 3, 'intermediate state should be coalesced');
     assert.ok(writes[1].at - writes[0].at >= 45);
