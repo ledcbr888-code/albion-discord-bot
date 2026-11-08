@@ -28,7 +28,7 @@ const path = require('path');
 const express = require('express');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const ctaModule = require('./cta');
-const { evaluateBattleboardDeltaPage } = require('./battleboard-delta-cursor');
+const { mergeBattleboardPendingItems } = require('./battleboard-delta-cursor');
 const { createBattleboardIntegration } = require('./battleboard-integration');
 const { createTrackingBackupScheduler, createThrottledSuccessLogger } = require('./tracking-backup-scheduler');
 let Fuse; try { Fuse = require('fuse.js'); } catch(e) { console.warn('fuse.js not installed, using fallback'); }
@@ -1308,7 +1308,7 @@ async function fetchBattleboardRecentBattles(config, targetGuild, targetGuildId,
         });
         if (!body.items.length) break;
 
-        const decision = evaluateBattleboardDeltaPage({
+        const decision = mergeBattleboardPendingItems({
             items: body.items,
             nextCursor: body.pagination?.nextCursor,
             matchesTarget: battle => battleboardBattleMatchesGuild(battle, targetGuild, targetGuildId),
