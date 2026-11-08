@@ -385,19 +385,8 @@ function createBattleboardIntegration(deps = {}) {
     if (!/^\d+$/.test(battleId)) return true;
     const detailResponse = await fetchDetail(battleId);
     // A missing detail may be a short upstream delay; keep it pending instead of dropping it.
-    if (Number(detailResponse.status) === 404) {
-      if (options.quietPending !== true) {
-        console.log('⏳ [Auto-Battle] ยังไม่พบรายละเอียด Battle จากระบบต้นทาง | เซิร์ฟเวอร์=' + serverId + ' | Battle ID=' + battleId);
-      }
-      return false;
-    }
-    if (detailResponse.ready !== true || !detailResponse.detail || Number(detailResponse.detailSchemaVersion || 0) < 4) {
-      if (options.quietPending !== true) {
-        console.log('⏳ [Auto-Battle] รายละเอียด Battle ยังไม่พร้อม รอข้อมูลครบก่อนส่งรายงาน | เซิร์ฟเวอร์=' + serverId + ' | Battle ID=' + battleId +
-          ' | สถานะ=' + String(detailResponse.status || detailResponse.statusText || 'กำลังรวบรวมข้อมูล'));
-      }
-      return false;
-    }
+    if (Number(detailResponse.status) === 404) return false;
+    if (detailResponse.ready !== true || !detailResponse.detail || Number(detailResponse.detailSchemaVersion || 0) < 4) return false;
     const detail = detailResponse.detail;
     const routes = getRoutes(guildConfig, detail, event);
     if (!routes.length) {
