@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, deliveryKey },
+  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey },
 } = require('../battleboard-integration');
 
 test('normalizes names consistently', () => {
@@ -52,6 +52,76 @@ test('matches Auto-Battle routes by exact guild ID or normalized name', () => {
 test('matches a guild event when its detail guild index is incomplete', () => {
   const event = { matches: [{ type: 'guild', id: 'guild-id-1', name: 'PLAC' }] };
   assert.equal(targetGuildMatches({ targetGuild: 'PLAC' }, {}, event), true);
+});
+
+test('does not pool Fame across Guild routes that share one Discord channel', () => {
+  const routes = [
+    { targetGuild: 'PLAC', channelId: '99999999999999999', minFrames: 100000 },
+    { targetGuild: 'Psz', channelId: '99999999999999999', minFrames: 200000 },
+  ];
+  const report = {
+    totalFame: 206180,
+    playerReportData: [
+      { displayName: 'PLAC-player', guild: 'PLAC', fame: 88102 },
+      { displayName: 'Psz-player', guild: 'Psz', fame: 118078 },
+    ],
+  };
+  const detail = {
+    guilds: {
+      plac: { id: 'plac', name: 'PLAC' },
+      psz: { id: 'psz', name: 'Psz' },
+    },
+  };
+
+  const checks = evaluateAutoBattleRoutes(routes, report, detail, {});
+  assert.deepEqual(checks.map(check => ({
+    targetGuild: check.targetGuild,
+    totalFame: check.totalFame,
+    minFame: check.minFame,
+    eligible: check.eligible,
+  })), [
+    { targetGuild: 'PLAC', totalFame: 88102, minFame: 100000, eligible: false },
+    { targetGuild: 'Psz', totalFame: 118078, minFame: 200000, eligible: false },
+  ]);
+});
+
+test('does not credit Crusader Kings route with Fame from tracked All In Fighting players', () => {
+  const routes = [
+    { targetGuild: 'Crusader Kings', channelId: '99999999999999999', minFrames: 100000 },
+    { targetGuild: 'All In Fighting', channelId: '99999999999999999', minFrames: 200000 },
+  ];
+  const report = {
+    totalFame: 3100000,
+    playerReportData: [
+      { displayName: 'AD03E', guild: 'All In Fighting', fame: 1100000 },
+      { displayName: 'potter200', guild: 'All In Fighting', fame: 1000000 },
+      { displayName: 'WhatWrongss', guild: 'All In Fighting', fame: 1000000 },
+    ],
+  };
+  const detail = {
+    guilds: {
+      ck: { id: 'ck', name: 'Crusader Kings' },
+      aif: { id: 'aif', name: 'All In Fighting' },
+    },
+  };
+
+  const checks = evaluateAutoBattleRoutes(routes, report, detail, {});
+  assert.equal(checks.find(check => check.targetGuild === 'Crusader Kings').totalFame, 0);
+  assert.equal(checks.find(check => check.targetGuild === 'Crusader Kings').eligible, false);
+  assert.equal(checks.find(check => check.targetGuild === 'All In Fighting').totalFame, 3100000);
+  assert.equal(checks.find(check => check.targetGuild === 'All In Fighting').eligible, true);
+});
+
+test('resolves an ID-only Auto-Battle route to its Guild name before checking tracked Fame', () => {
+  const checks = evaluateAutoBattleRoutes(
+    [{ targetGuildId: 'aif-id', channelId: '99999999999999999', minFrames: 200000 }],
+    { playerReportData: [{ displayName: 'AD03E', guild: 'All In Fighting', fame: 300000 }] },
+    { guilds: { 'aif-id': { name: 'All In Fighting' } } },
+    {}
+  );
+  assert.equal(checks[0].targetGuild, 'All In Fighting');
+  assert.equal(checks[0].totalFame, 300000);
+  assert.equal(checks[0].eligible, true);
 });
 
 test('creates stable idempotency keys per battle and channel', () => {
