@@ -321,11 +321,19 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
     assert.equal(config.battleboardState.pendingEvents.length, 0);
     assert.equal(detailCalls.get('1001'), 2);
     assert.equal(detailCalls.get('1002'), 1);
+    assert.equal(capturedLogs.filter(line => line.includes('กำลังส่งรายงานส่วนที่') && line.includes('ไฟล์แนบ')).length, 4);
     assert.equal(capturedLogs.filter(line => line.includes('ส่งรายงานส่วนที่') && line.includes('เข้า Discord สำเร็จ')).length, 4);
+    assert.ok(capturedLogs.filter(line => line.includes('ส่งรายงานส่วนที่') && line.includes('เข้า Discord สำเร็จ'))
+      .every(line => line.includes('ใช้เวลาส่ง=')), 'each sent file should report its own send duration');
     assert.equal(capturedLogs.filter(line => line.includes('ส่งรายงานครบทุกส่วนเข้า Discord สำเร็จ')).length, 2);
+    assert.ok(capturedLogs.filter(line => line.includes('ส่งรายงานครบทุกส่วนเข้า Discord สำเร็จ'))
+      .every(line => line.includes('ใช้เวลาส่งรวม=')), 'each completed report should report total send duration');
     assert.equal(capturedLogs.filter(line => line.includes('ตั้งแต่ Battle เริ่มจนส่งรายงานครบ')).length, 2);
     assert.equal(capturedLogs.filter(line => line.includes('หลัง Battle จบจนส่งรายงานครบ')).length, 2);
     assert.ok(capturedLogs.some(line => line.includes('รายละเอียด Battle ยังไม่พร้อม จัดเข้าคิวรอข้อมูลแล้ว')));
+    assert.ok(capturedLogs.some(line => line.includes('เริ่มส่งรายงาน') && line.includes('Battle ID=1002')));
+    assert.ok(capturedLogs.some(line => line.includes('ข้ามรายงานนี้ เพราะมีบันทึกว่าส่งเข้า Discord สำเร็จแล้ว') && line.includes('Battle ID=1002')) === false,
+      'the same event is not replayed in this fixture');
   } finally {
     if (integration) integration.stop();
     console.log = oldConsoleLog;
