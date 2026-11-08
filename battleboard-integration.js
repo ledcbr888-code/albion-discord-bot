@@ -166,8 +166,14 @@ function elapsedMsBetween(startValue, endValue = new Date()) {
   const endMs = timestampMs(endValue);
   return startMs === null || endMs === null || endMs < startMs ? null : endMs - startMs;
 }
+function formatPreciseDuration(durationMs) {
+  if (!Number.isFinite(durationMs) || durationMs < 0) return 'คำนวณไม่ได้';
+  if (durationMs < 1000) return Math.round(durationMs) + ' ms';
+  if (durationMs < 10000) return (durationMs / 1000).toFixed(2) + ' วินาที';
+  return formatThaiDuration(durationMs);
+}
 function formatElapsedMs(value) {
-  return value === null || value === undefined ? 'ไม่มีข้อมูล' : formatThaiDuration(value);
+  return value === null || value === undefined ? 'ไม่มีข้อมูล' : formatPreciseDuration(value);
 }
 function getReportFileLogDetails(file, partNumber) {
   if (!file) return ' | รายการ=ข้อความรายงาน';
@@ -376,7 +382,7 @@ function createBattleboardIntegration(deps = {}) {
           ' | Guild=' + targets.join(', ') +
           ' | ห้อง=' + channelId +
           fileDetails +
-          ' | Discord API ใช้เวลา=' + formatThaiDuration(discordApiMs) +
+          ' | Discord API ใช้เวลา=' + formatPreciseDuration(discordApiMs) +
           (sentMessage && sentMessage.id ? ' | Message ID=' + sentMessage.id : '')
         );
       } catch (error) {
@@ -391,7 +397,7 @@ function createBattleboardIntegration(deps = {}) {
           ' | Guild=' + targets.join(', ') +
           ' | ห้อง=' + channelId +
           fileDetails +
-          ' | ใช้เวลาก่อนล้มเหลว=' + formatThaiDuration(sendDurationMs) +
+          ' | ใช้เวลาก่อนล้มเหลว=' + formatPreciseDuration(sendDurationMs) +
           ' | สาเหตุ=' + reason
         );
         throw error;
@@ -463,7 +469,7 @@ function createBattleboardIntegration(deps = {}) {
       ' | สร้างรายงาน=' + formatElapsedMs(timings.reportBuildMs) +
       ' | ตรวจ Fame=' + formatElapsedMs(timings.fameCheckMs) +
       ' | ดึงห้อง Discord=' + formatElapsedMs(timings.channelFetchMs) +
-      ' | ส่ง Discord รวม=' + formatThaiDuration(totalDiscordSendMs) +
+      ' | ส่ง Discord รวม=' + formatPreciseDuration(totalDiscordSendMs) +
       ' | บอทได้รับ Event→ส่งครบ=' + formatElapsedMs(botReceivedToSentMs) +
       ' | Retry=' + (Number(timings.retryAttempts) || 0) + ' ครั้ง'
     );
@@ -506,7 +512,7 @@ function createBattleboardIntegration(deps = {}) {
         '❌ [Auto-Battle] ดึงรายละเอียด Battle ไม่สำเร็จ | เซิร์ฟเวอร์=' + serverId +
         ' | Battle ID=' + battleId +
         ' | Retry=' + retryAttempt +
-        ' | API ใช้เวลา=' + formatThaiDuration(detailFetchMs) +
+        ' | API ใช้เวลา=' + formatPreciseDuration(detailFetchMs) +
         ' | สาเหตุ=' + String(error && error.message || error).slice(0, 180)
       );
       throw error;
@@ -522,8 +528,8 @@ function createBattleboardIntegration(deps = {}) {
           '⏳ [Auto-Battle] รายละเอียด Battle ยังไม่พร้อม | เซิร์ฟเวอร์=' + serverId +
           ' | Battle ID=' + battleId +
           ' | ผล API=' + (Number(detailResponse.status) === 404 ? 'HTTP 404' : 'HTTP response แต่ข้อมูลยังไม่พร้อม') +
-          ' | API ครั้งนี้=' + formatThaiDuration(detailFetchMs) +
-          ' | API รวม ' + event.__detailFetchCount + ' ครั้ง=' + formatThaiDuration(event.__detailFetchTotalMs) +
+          ' | API ครั้งนี้=' + formatPreciseDuration(detailFetchMs) +
+          ' | API รวม ' + event.__detailFetchCount + ' ครั้ง=' + formatPreciseDuration(event.__detailFetchTotalMs) +
           ' | บอทรอมาแล้ว=' + formatElapsedMs(elapsedMsBetween(botReceivedAt, new Date())) +
           (pendingEntry ? ' | อยู่ในคิว=' + formatElapsedMs(elapsedMsBetween(pendingEntry.queuedAt, new Date())) : '')
         );
@@ -537,8 +543,8 @@ function createBattleboardIntegration(deps = {}) {
     console.log(
       '✅ [Auto-Battle] รายละเอียด Battle พร้อมใช้งาน | เซิร์ฟเวอร์=' + serverId +
       ' | Battle ID=' + battleId +
-      ' | API ครั้งนี้=' + formatThaiDuration(detailFetchMs) +
-      ' | API รวม ' + event.__detailFetchCount + ' ครั้ง=' + formatThaiDuration(event.__detailFetchTotalMs) +
+      ' | API ครั้งนี้=' + formatPreciseDuration(detailFetchMs) +
+      ' | API รวม ' + event.__detailFetchCount + ' ครั้ง=' + formatPreciseDuration(event.__detailFetchTotalMs) +
       ' | เวลาตั้งแต่บอทรับ Event=' + formatElapsedMs(elapsedMsBetween(botReceivedAt, event.__detailReadyAt)) +
       (pendingEntry ? ' | อยู่ในคิวก่อนพร้อม=' + formatElapsedMs(elapsedMsBetween(pendingEntry.queuedAt, event.__detailReadyAt)) : '')
     );
@@ -573,7 +579,7 @@ function createBattleboardIntegration(deps = {}) {
       error.autoBattleStageMs = reportBuildMs;
       console.error(
         '❌ [Auto-Battle] สร้างรายงาน/ไฟล์ไม่สำเร็จ | เซิร์ฟเวอร์=' + serverId +
-        ' | Battle ID=' + battleId + ' | ใช้เวลา=' + formatThaiDuration(reportBuildMs) +
+        ' | Battle ID=' + battleId + ' | ใช้เวลา=' + formatPreciseDuration(reportBuildMs) +
         ' | สาเหตุ=' + String(error && error.message || error).slice(0, 180)
       );
       throw error;
@@ -583,7 +589,7 @@ function createBattleboardIntegration(deps = {}) {
       '🛠️ [Auto-Battle] สร้างรายงาน/ไฟล์เสร็จ | เซิร์ฟเวอร์=' + serverId +
       ' | Battle ID=' + battleId +
       ' | จำนวนไฟล์=' + (Array.isArray(report.payload && report.payload.files) ? report.payload.files.length : 0) +
-      ' | ใช้เวลา=' + formatThaiDuration(reportBuildMs)
+      ' | ใช้เวลา=' + formatPreciseDuration(reportBuildMs)
     );
 
     const fameCheckStartedAtMs = Date.now();
@@ -592,7 +598,7 @@ function createBattleboardIntegration(deps = {}) {
     console.log(
       '💰 [Auto-Battle] ตรวจ Fame/เกณฑ์เสร็จ | เซิร์ฟเวอร์=' + serverId +
       ' | Battle ID=' + battleId +
-      ' | ใช้เวลา=' + formatThaiDuration(fameCheckMs) +
+      ' | ใช้เวลา=' + formatPreciseDuration(fameCheckMs) +
       ' | ผล=' + routeChecks.map(check => check.targetGuild + ':' +
         formatFame(check.totalFame) + '/' + formatFame(check.minFame) +
         (check.eligible ? ' ผ่าน' : ' ไม่ผ่าน')).join(' | ')
@@ -625,8 +631,22 @@ function createBattleboardIntegration(deps = {}) {
         });
         console.log('ℹ️ [Auto-Battle] ไม่ส่งรายงาน เนื่องจาก Fame รวมต่ำกว่าเกณฑ์ทุก Route | Battle ID=' + battleId +
           ' | ' + routeSummary +
-          ' | สร้างรายงาน=' + formatThaiDuration(reportBuildMs) +
-          ' | ตรวจ Fame=' + formatThaiDuration(fameCheckMs));
+          ' | สร้างรายงาน=' + formatPreciseDuration(reportBuildMs) +
+          ' | ตรวจ Fame=' + formatPreciseDuration(fameCheckMs));
+        console.log(
+          '📊 [Auto-Battle] สรุปเวลาแต่ละขั้นตอน (ไม่ส่งเพราะ Fame ต่ำกว่าเกณฑ์) | Battle ID=' + battleId +
+          ' | Battle จบ=' + formatThaiTimestamp(detail.endTime) +
+          ' | Battleboard first_seen_at=' + formatThaiTimestamp(event.first_seen_at || event.firstSeenAt) +
+          ' | บอทรับ Event=' + formatThaiTimestamp(botReceivedAt) +
+          ' | Battle จบ→first_seen=' + formatElapsedMs(elapsedMsBetween(detail.endTime, event.first_seen_at || event.firstSeenAt)) +
+          ' | first_seen→บอทรับ=' + formatElapsedMs(elapsedMsBetween(event.first_seen_at || event.firstSeenAt, botReceivedAt)) +
+          ' | บอทรับ→รายละเอียดพร้อม=' + formatElapsedMs(elapsedMsBetween(botReceivedAt, event.__detailReadyAt)) +
+          ' | Detail API รวม ' + (Number(event.__detailFetchCount) || 0) + ' ครั้ง=' +
+            formatElapsedMs(Number.isFinite(Number(event.__detailFetchTotalMs)) ? Number(event.__detailFetchTotalMs) : null) +
+          ' | ตรวจ Route=' + formatPreciseDuration(routeMatchMs) +
+          ' | สร้างรายงาน=' + formatPreciseDuration(reportBuildMs) +
+          ' | ตรวจ Fame=' + formatPreciseDuration(fameCheckMs)
+        );
         continue;
       }
 
@@ -639,13 +659,13 @@ function createBattleboardIntegration(deps = {}) {
         error.autoBattleStage = 'ค้นหาห้อง Discord';
         error.autoBattleStageMs = channelFetchMs;
         console.error('❌ [Auto-Battle] ดึงห้อง Discord ไม่สำเร็จ | Battle ID=' + battleId +
-          ' | ห้อง=' + channelId + ' | ใช้เวลา=' + formatThaiDuration(channelFetchMs) +
+          ' | ห้อง=' + channelId + ' | ใช้เวลา=' + formatPreciseDuration(channelFetchMs) +
           ' | สาเหตุ=' + String(error && error.message || error).slice(0, 180));
         throw error;
       }
       const channelFetchMs = Date.now() - channelFetchStartedAtMs;
       console.log('📡 [Auto-Battle] ตรวจห้อง Discord เสร็จ | Battle ID=' + battleId +
-        ' | ห้อง=' + channelId + ' | ใช้เวลา=' + formatThaiDuration(channelFetchMs) +
+        ' | ห้อง=' + channelId + ' | ใช้เวลา=' + formatPreciseDuration(channelFetchMs) +
         ' | พร้อมส่ง=' + Boolean(channel && typeof channel.send === 'function'));
       if (!channel || typeof channel.send !== 'function') {
         const error = new Error('Auto-Battle channel unavailable: ' + channelId);
@@ -825,7 +845,7 @@ function createBattleboardIntegration(deps = {}) {
     if (events.length) {
       console.log('📥 [Auto-Battle] รับ Events feed จาก Battleboard | เซิร์ฟเวอร์=' + serverId +
         ' | จำนวน Event=' + events.length +
-        ' | API ใช้เวลา=' + formatThaiDuration(eventsApiMs) +
+        ' | API ใช้เวลา=' + formatPreciseDuration(eventsApiMs) +
         ' | บอทได้รับข้อมูล=' + formatThaiTimestamp(botReceivedAt));
     }
     let deferRemaining = false;
@@ -919,5 +939,5 @@ function createBattleboardIntegration(deps = {}) {
 }
 module.exports = {
   createBattleboardIntegration,
-  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce, snapshotFingerprint, hasTrackedSnapshotChanged, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup, timestampMs, formatThaiDuration, formatThaiTimestamp, elapsedMsBetween, getBattleDelayMetrics, formatBattleDelayLines },
+  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce, snapshotFingerprint, hasTrackedSnapshotChanged, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup, timestampMs, formatThaiDuration, formatPreciseDuration, formatThaiTimestamp, elapsedMsBetween, getBattleDelayMetrics, formatBattleDelayLines },
 };
