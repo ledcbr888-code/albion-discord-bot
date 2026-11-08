@@ -58,7 +58,7 @@ function targetGuildMatches(config, detail, event) {
     (targetId && guild.id === targetId) || (targetName && normalizeName(guild.name) === targetName));
 }
 function evaluateAutoBattleRoutes(routes, report, detail, event) {
-  const reportRows = Array.isArray(report && report.playerReportData) ? report.playerReportData : [];
+  const trackedFame = Number(report && report.totalFame) || 0;
   const detailGuilds = getBattleGuilds(detail);
   const eventGuilds = (Array.isArray(event && event.matches) ? event.matches : [])
     .filter(match => match && match.type === 'guild')
@@ -77,20 +77,17 @@ function evaluateAutoBattleRoutes(routes, report, detail, event) {
       (normalizedTargetName && normalizeName(guild.name) === normalizedTargetName)
     );
     const resolvedName = String(matchedGuild && matchedGuild.name || targetName).trim();
-    const trackedRows = resolvedName
-      ? reportRows.filter(player => normalizeName(player && player.guild) === normalizeName(resolvedName))
-      : [];
-    const totalFame = trackedRows.reduce((sum, player) => sum + (Number(player && player.fame) || 0), 0);
     const configuredThreshold = Number(route && route.minFrames);
     const minFame = Number.isFinite(configuredThreshold) ? Math.max(0, configuredThreshold) : 0;
 
+    // minFrames is evaluated against the total Fame of all tracked participants.
+    // Each route is evaluated independently so only routes that pass are shown.
     return {
       route,
       targetGuild: resolvedName || targetId || 'Tracked Battle',
-      totalFame,
+      totalFame: trackedFame,
       minFame,
-      matchedPlayers: trackedRows.length,
-      eligible: totalFame >= minFame,
+      eligible: trackedFame >= minFame,
     };
   });
 }
@@ -312,8 +309,8 @@ function createBattleboardIntegration(deps = {}) {
       const prior = findDelivery(state, key);
       if (prior && (prior.status === 'sent' || prior.status === 'below-threshold')) continue;
 
-      // Each Auto-Battle route must satisfy its own tracked-member Fame threshold.
-      // Never pool Fame across different Guilds just because they share a Discord channel.
+      // Each Auto-Battle route is checked independently against the tracked-roster Fame total.
+      // Sharing a Discord channel must not make every configured Guild label appear as qualified.
       const qualifiedRoutes = checks.filter(check => check.eligible);
       if (!qualifiedRoutes.length) {
         const routeSummary = checks
@@ -322,8 +319,8 @@ function createBattleboardIntegration(deps = {}) {
         saveDelivery(state, {
           key, battleId, channelId, status: 'below-threshold',
           totalFame: Number(report.totalFame || 0),
-          routeChecks: checks.map(({ targetGuild, totalFame, minFame, matchedPlayers }) =>
-            ({ targetGuild, totalFame, minFame, matchedPlayers })),
+          routeChecks: checks.map(({ targetGuild, totalFame, minFame }) =>
+            ({ targetGuild, totalFame, minFame })),
           checkedAt: new Date().toISOString(),
         });
         console.log('ℹ️ [Battleboard] ทุก Guild route ต่ำกว่า Fame threshold | Battle=' + battleId +
