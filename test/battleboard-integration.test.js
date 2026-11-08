@@ -7,7 +7,7 @@ const {
   __test: {
     normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds,
     targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce,
-    snapshotFingerprint, hasTrackedSnapshotChanged, timestampMs, formatThaiDuration, formatThaiTimestamp,
+    snapshotFingerprint, hasTrackedSnapshotChanged, timestampMs, formatThaiDuration, formatPreciseDuration, formatThaiTimestamp,
     elapsedMsBetween, getBattleDelayMetrics, formatBattleDelayLines,
   },
 } = require('../battleboard-integration');
@@ -141,6 +141,13 @@ test('formats elapsed durations in Thai for seconds, minutes, hours, and days', 
   assert.equal(formatThaiDuration(3661000), '1 ชั่วโมง 1 นาที 1 วินาที');
   assert.equal(formatThaiDuration(90061000), '1 วัน 1 ชั่วโมง 1 นาที 1 วินาที');
   assert.equal(timestampMs('not-a-date'), null);
+});
+
+test('formats short stage durations in milliseconds and preserves longer Thai durations', () => {
+  assert.equal(formatPreciseDuration(0), '0 ms');
+  assert.equal(formatPreciseDuration(275), '275 ms');
+  assert.equal(formatPreciseDuration(1250), '1.25 วินาที');
+  assert.equal(formatPreciseDuration(65000), '1 นาที 5 วินาที');
 });
 
 test('formats UTC timestamps explicitly as Bangkok time and keeps the UTC instant visible', () => {
