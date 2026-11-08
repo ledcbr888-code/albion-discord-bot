@@ -108,9 +108,11 @@ function snapshotFingerprint(items) {
     item && item.id ? String(item.id) : null,
   ]));
 }
+function hasTrackedSnapshotChanged(state = {}, items = []) {
+  return state.snapshotInitialized !== true || state.snapshotFingerprint !== snapshotFingerprint(items);
+}
 function isSnapshotSyncDue(state = {}, items = [], now = Date.now()) {
-  const fingerprint = snapshotFingerprint(items);
-  if (state.snapshotInitialized !== true || state.snapshotFingerprint !== fingerprint) return true;
+  if (hasTrackedSnapshotChanged(state, items)) return true;
   const lastSync = Date.parse(state.lastSnapshotSyncAt || '');
   return !Number.isFinite(lastSync) || now - lastSync >= SNAPSHOT_SYNC_INTERVAL_MS;
 }
@@ -239,6 +241,7 @@ function createBattleboardIntegration(deps = {}) {
   }
   async function syncSnapshot(serverId, state, items) {
     if (!isSnapshotSyncDue(state, items)) return false;
+    const trackedSnapshotChanged = hasTrackedSnapshotChanged(state, items);
     const params = new URLSearchParams({ server: 'asia', discordServerId: serverId });
     const result = await request('/api/bot-tracked-entities?' + params.toString(), {
       method: 'PUT',
@@ -248,9 +251,11 @@ function createBattleboardIntegration(deps = {}) {
     state.snapshotFingerprint = snapshotFingerprint(items);
     state.lastSnapshotSyncAt = new Date().toISOString();
     persist();
-    console.log('🔁 [Battleboard] Tracking synced | Discord=' + serverId +
-      ' | Guilds=' + Number(result.counts && result.counts.guilds || 0) +
-      ' | Players=' + Number(result.counts && result.counts.players || 0));
+    if (trackedSnapshotChanged) {
+      console.log('🔁 [Battleboard] Tracking snapshot changed | Discord=' + serverId +
+        ' | Guilds=' + Number(result.counts && result.counts.guilds || 0) +
+        ' | Players=' + Number(result.counts && result.counts.players || 0));
+    }
     return true;
   }
   function eventsPath(serverId, cursor, limit) {
@@ -644,5 +649,5 @@ function createBattleboardIntegration(deps = {}) {
 }
 module.exports = {
   createBattleboardIntegration,
-  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce, snapshotFingerprint, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup, timestampMs, formatThaiDuration, getBattleDelayMetrics, formatBattleDelayLines },
+  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce, snapshotFingerprint, hasTrackedSnapshotChanged, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup, timestampMs, formatThaiDuration, getBattleDelayMetrics, formatBattleDelayLines },
 };

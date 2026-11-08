@@ -1,13 +1,13 @@
 'use strict';
 const test = require('node:test');
-const { createTrackingBackupScheduler, fingerprintTrackingSnapshot } = require('../tracking-backup-scheduler');
+const { createTrackingBackupScheduler, fingerprintTrackingSnapshot, createThrottledSuccessLogger } = require('../tracking-backup-scheduler');
 const assert = require('node:assert/strict');
 const {
   createBattleboardIntegration,
   __test: {
     normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds,
     targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce,
-    snapshotFingerprint, timestampMs, formatThaiDuration, getBattleDelayMetrics, formatBattleDelayLines,
+    snapshotFingerprint, hasTrackedSnapshotChanged, timestampMs, formatThaiDuration, getBattleDelayMetrics, formatBattleDelayLines,
   },
 } = require('../battleboard-integration');
 
@@ -339,6 +339,17 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
   }
 });
 
+test('only reports a tracked-entity sync when the snapshot content changes', () => {
+  const items = buildTrackedItems({ guilds: ['PLAC'], players: [] });
+  const state = {
+    snapshotInitialized: true,
+    snapshotFingerprint: snapshotFingerprint(items),
+  };
+  assert.equal(hasTrackedSnapshotChanged(state, items), false);
+  assert.equal(hasTrackedSnapshotChanged(state, buildTrackedItems({ guilds: ['Psz'], players: [] })), true);
+  assert.equal(hasTrackedSnapshotChanged({ snapshotInitialized: false }, items), true);
+});
+
 test('does not refresh an unchanged tracking snapshot more often than every five minutes', () => {
   const items = buildTrackedItems({ guilds: ['PLAC'], players: [] });
   const signature = require('../battleboard-integration').__test.snapshotFingerprint(items);
@@ -499,6 +510,28 @@ test('a newer snapshot arriving during a write supersedes older pending work', a
   }
 });
 
+
+
+test('throttles repeated successful backup logs and reports an aggregate count', () => {
+  let now = 1000;
+  const messages = [];
+  const reportSuccess = createThrottledSuccessLogger('GitHub', {
+    intervalMs: 60000,
+    now: () => now,
+    log: message => messages.push(message),
+  });
+
+  reportSuccess();
+  reportSuccess();
+  reportSuccess();
+  assert.equal(messages.length, 1);
+  assert.match(messages[0], /GitHub.*รวม 1 ครั้ง/);
+
+  now += 60000;
+  reportSuccess();
+  assert.equal(messages.length, 2);
+  assert.match(messages[1], /GitHub.*รวม 3 ครั้ง/);
+});
 
 test('continuous save activity does not postpone the first scheduled backup', async () => {
   const writes = [];

@@ -29,7 +29,7 @@ const express = require('express');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const ctaModule = require('./cta');
 const { createBattleboardIntegration } = require('./battleboard-integration');
-const { createTrackingBackupScheduler } = require('./tracking-backup-scheduler');
+const { createTrackingBackupScheduler, createThrottledSuccessLogger } = require('./tracking-backup-scheduler');
 let Fuse; try { Fuse = require('fuse.js'); } catch(e) { console.warn('fuse.js not installed, using fallback'); }
 
 const BANDIT_SERIF_FONT = '/usr/share/fonts/truetype/noto/NotoSerifDisplay-Black.ttf';
@@ -118,6 +118,13 @@ let githubDataSha = null;
 let githubPersistenceReady = false;
 const TRACKING_BACKUP_DEBOUNCE_MS = 2000;
 const TRACKING_BACKUP_MIN_INTERVAL_MS = 30 * 1000;
+const TRACKING_BACKUP_SUCCESS_LOG_INTERVAL_MS = 15 * 60 * 1000;
+const logSupabaseBackupSuccess = createThrottledSuccessLogger('Supabase', {
+    intervalMs: TRACKING_BACKUP_SUCCESS_LOG_INTERVAL_MS
+});
+const logGitHubBackupSuccess = createThrottledSuccessLogger('GitHub', {
+    intervalMs: TRACKING_BACKUP_SUCCESS_LOG_INTERVAL_MS
+});
 
 const supabaseTrackingBackupScheduler = createTrackingBackupScheduler({
     debounceMs: TRACKING_BACKUP_DEBOUNCE_MS,
@@ -136,7 +143,7 @@ const supabaseTrackingBackupScheduler = createTrackingBackupScheduler({
             params: { on_conflict: 'id' }
         });
     },
-    onSuccess: () => console.log('💾 Supabase tracking backup saved (latest snapshot; duplicate saves coalesced).'),
+    onSuccess: logSupabaseBackupSuccess,
     onError: (error, attempts, retryMs) => console.error(
         '❌ Supabase tracking backup failed; will retry in ' + Math.ceil(retryMs / 1000) + 's' +
         ' | Attempt=' + attempts + ' | Error=' + (error.response?.status || '') + ' ' +
@@ -151,26 +158,36 @@ const githubTrackingBackupScheduler = createTrackingBackupScheduler({
     retryMaxMs: 5 * 60 * 1000,
     write: async content => {
         const encoded = Buffer.from(String(content), 'utf8').toString('base64');
-        const get = await axios.get(GITHUB_DATA_API, {
-            timeout: 20000,
-            headers: githubRequestHeaders(),
-            params: { ref: GITHUB_DATA_BRANCH },
-            validateStatus: status => status === 200 || status === 404
-        });
-        const currentSha = get.status === 200 ? get.data.sha : undefined;
-        const body = {
-            message: 'Update Albion bot tracking backup',
-            content: encoded,
-            branch: GITHUB_DATA_BRANCH
-        };
-        if (currentSha) body.sha = currentSha;
-        const put = await axios.put(GITHUB_DATA_API, body, {
-            timeout: 20000,
-            headers: githubRequestHeaders()
-        });
-        githubDataSha = put.data?.content?.sha || currentSha || null;
+        for (let attempt = 1; attempt <= 3; attempt++) {
+            const get = await axios.get(GITHUB_DATA_API, {
+                timeout: 20000,
+                headers: githubRequestHeaders(),
+                params: { ref: GITHUB_DATA_BRANCH },
+                validateStatus: status => status === 200 || status === 404
+            });
+            const currentSha = get.status === 200 ? get.data.sha : undefined;
+            const body = {
+                message: 'Update Albion bot tracking backup',
+                content: encoded,
+                branch: GITHUB_DATA_BRANCH
+            };
+            if (currentSha) body.sha = currentSha;
+            try {
+                const put = await axios.put(GITHUB_DATA_API, body, {
+                    timeout: 20000,
+                    headers: githubRequestHeaders()
+                });
+                githubDataSha = put.data?.content?.sha || currentSha || null;
+                return;
+            } catch (error) {
+                if (Number(error.response?.status) !== 409 || attempt === 3) throw error;
+                // Another running instance updated the backup after our GET.
+                // Wait briefly, fetch the latest SHA, then retry the same snapshot.
+                await new Promise(resolve => setTimeout(resolve, 250 * attempt));
+            }
+        }
     },
-    onSuccess: () => console.log('💾 GitHub tracking backup saved (latest snapshot; duplicate saves coalesced).'),
+    onSuccess: logGitHubBackupSuccess,
     onError: (error, attempts, retryMs) => console.error(
         '❌ GitHub tracking backup failed; will retry in ' + Math.ceil(retryMs / 1000) + 's' +
         ' | Attempt=' + attempts + ' | Error=' + (error.response?.status || '') + ' ' +
@@ -6632,8 +6649,8 @@ async function pollAvaConfiguredChannels() {
     } finally { avaPollRunning = false; }
 }
 
-client.once('ready', async () => {
-    console.log(`✅ Logged in as ${client.user.tag}`);
+client.once('clientReady', async () => {
+    console.log(`✅ Discord Gateway READY: ${client.user?.tag || client.user?.id || 'bot connected'}`);
     await migrateLegacyDataAfterReady();
     const battleboardPrimary = createBattleboardIntegration({
         client,
@@ -7482,12 +7499,12 @@ client.rest.on('rateLimited', info => {
     console.warn('🔎 เส้นทาง API: ' + route);
 });
 client.on('debug', info => {
-    // discord.js includes a partial token in this debug message; never print token material.
-    if (/Provided token:/i.test(String(info))) {
-        console.log('🔎 discord.js debug: token supplied (value hidden)');
-        return;
-    }
-    console.log('🔎 discord.js debug:', info);
+    // General discord.js debug output includes frequent heartbeat messages.
+    // Keep it opt-in for troubleshooting and always suppress heartbeats/token details.
+    if (!/^(1|true|yes)$/i.test(String(process.env.DISCORD_DEBUG_LOGS || '').trim())) return;
+    const message = String(info || '');
+    if (/heartbeat|provided token:/i.test(message)) return;
+    console.log('🔎 discord.js debug:', message.slice(0, 500));
 });
 client.on('shardError', err => {
     const status = Number(err?.status ?? err?.statusCode ?? err?.response?.status);
@@ -7520,16 +7537,6 @@ process.on('uncaughtException', err => console.error('❌ Uncaught exception:', 
 
 console.log('🛡️ AUTO-BATTLE FIX V3 LOADED: Battle reports enabled');
 
-client.once('ready', () => {
-    console.log(`✅ Discord Gateway READY: ${client.user?.tag || client.user?.id || 'bot connected'}`);
-});
-client.on('shardReady', shardId => {
-    console.log(`✅ Discord shard ${shardId} is READY`);
-});
-client.on('shardReconnecting', shardId => {
-    console.warn(`⚠️ Discord shard ${shardId} reconnecting`);
-});
-
 // One bounded, unauthenticated discovery request plus one short WebSocket handshake test.
 // No bot token is sent to either diagnostic endpoint. This runs once per process start;
 // it does not poll/retry and always allows the normal discord.js login attempt to continue.
@@ -7556,7 +7563,7 @@ initializeTrackingPersistence()
         // A watchdog reports the connection state once if login/READY is still pending.
         // It does not restart the service or trigger any additional API requests.
         let readyLogged = false;
-        client.once('ready', () => { readyLogged = true; });
+        client.once('clientReady', () => { readyLogged = true; });
         const gatewayWatchdog = setTimeout(() => {
             if (readyLogged || client.isReady()) return;
             const managerStatus = client.ws?.status;
