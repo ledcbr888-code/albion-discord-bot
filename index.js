@@ -29,6 +29,7 @@ const express = require('express');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const ctaModule = require('./cta');
 const { createBattleboardIntegration } = require('./battleboard-integration');
+const { createTrackingBackupScheduler } = require('./tracking-backup-scheduler');
 let Fuse; try { Fuse = require('fuse.js'); } catch(e) { console.warn('fuse.js not installed, using fallback'); }
 
 const BANDIT_SERIF_FONT = '/usr/share/fonts/truetype/noto/NotoSerifDisplay-Black.ttf';
@@ -115,7 +116,69 @@ let supabasePersistenceReady = false;
 let supabaseSaveQueue = Promise.resolve();
 let githubSaveQueue = Promise.resolve();
 let githubDataSha = null;
+
 let githubPersistenceReady = false;
+const TRACKING_BACKUP_DEBOUNCE_MS = 2000;
+const TRACKING_BACKUP_MIN_INTERVAL_MS = 30 * 1000;
+
+const supabaseTrackingBackupScheduler = createTrackingBackupScheduler({
+    debounceMs: TRACKING_BACKUP_DEBOUNCE_MS,
+    minIntervalMs: TRACKING_BACKUP_MIN_INTERVAL_MS,
+    retryBaseMs: 30 * 1000,
+    retryMaxMs: 5 * 60 * 1000,
+    write: async content => {
+        const payload = JSON.parse(String(content));
+        await axios.post(SUPABASE_API, {
+            id: SUPABASE_ROW_ID,
+            payload,
+            updated_at: new Date().toISOString()
+        }, {
+            timeout: 20000,
+            headers: { ...supabaseHeaders(), Prefer: 'resolution=merge-duplicates,return=minimal' },
+            params: { on_conflict: 'id' }
+        });
+    },
+    onSuccess: () => console.log('💾 Supabase tracking backup saved (latest snapshot; duplicate saves coalesced).'),
+    onError: (error, attempts, retryMs) => console.error(
+        '❌ Supabase tracking backup failed; will retry in ' + Math.ceil(retryMs / 1000) + 's' +
+        ' | Attempt=' + attempts + ' | Error=' + (error.response?.status || '') + ' ' +
+        (error.response?.data?.message || error.message)
+    )
+});
+
+const githubTrackingBackupScheduler = createTrackingBackupScheduler({
+    debounceMs: TRACKING_BACKUP_DEBOUNCE_MS,
+    minIntervalMs: TRACKING_BACKUP_MIN_INTERVAL_MS,
+    retryBaseMs: 30 * 1000,
+    retryMaxMs: 5 * 60 * 1000,
+    write: async content => {
+        const encoded = Buffer.from(String(content), 'utf8').toString('base64');
+        const get = await axios.get(GITHUB_DATA_API, {
+            timeout: 20000,
+            headers: githubRequestHeaders(),
+            params: { ref: GITHUB_DATA_BRANCH },
+            validateStatus: status => status === 200 || status === 404
+        });
+        const currentSha = get.status === 200 ? get.data.sha : undefined;
+        const body = {
+            message: 'Update Albion bot tracking backup',
+            content: encoded,
+            branch: GITHUB_DATA_BRANCH
+        };
+        if (currentSha) body.sha = currentSha;
+        const put = await axios.put(GITHUB_DATA_API, body, {
+            timeout: 20000,
+            headers: githubRequestHeaders()
+        });
+        githubDataSha = put.data?.content?.sha || currentSha || null;
+    },
+    onSuccess: () => console.log('💾 GitHub tracking backup saved (latest snapshot; duplicate saves coalesced).'),
+    onError: (error, attempts, retryMs) => console.error(
+        '❌ GitHub tracking backup failed; will retry in ' + Math.ceil(retryMs / 1000) + 's' +
+        ' | Attempt=' + attempts + ' | Error=' + (error.response?.status || '') + ' ' +
+        (error.response?.data?.message || error.message)
+    )
+});
 let guildConfigs = {};
 let banditGlobalVotes = {};
 let botUsageStats = {};
@@ -506,6 +569,7 @@ async function pullGitHubTrackingData() {
         githubDataSha = remote.sha || null;
         loadData();
         githubPersistenceReady = true;
+        githubTrackingBackupScheduler.markSaved(content);
         console.log('💾 GitHub tracking data loaded from private repo ' + GITHUB_DATA_REPO + '/' + GITHUB_DATA_PATH);
         return true;
     } catch (err) {
@@ -517,28 +581,11 @@ async function pullGitHubTrackingData() {
 
 function queueGitHubTrackingSave(content) {
     if (!GITHUB_DATA_TOKEN || !GITHUB_DATA_REPO || !githubPersistenceReady) return;
-    githubSaveQueue = githubSaveQueue.then(async () => {
-        const encoded = Buffer.from(String(content), 'utf8').toString('base64');
-        const get = await axios.get(GITHUB_DATA_API, {
-            timeout: 20000, headers: githubRequestHeaders(),
-            params: { ref: GITHUB_DATA_BRANCH },
-            validateStatus: status => status === 200 || status === 404
-        });
-        const currentSha = get.status === 200 ? get.data.sha : undefined;
-        const body = {
-            message: 'Update Albion bot tracking backup',
-            content: encoded,
-            branch: GITHUB_DATA_BRANCH
-        };
-        if (currentSha) body.sha = currentSha;
-        const put = await axios.put(GITHUB_DATA_API, body, {
-            timeout: 20000, headers: githubRequestHeaders()
-        });
-        githubDataSha = put.data?.content?.sha || currentSha || null;
-        console.log('💾 GitHub tracking backup saved successfully.');
-    }).catch(err => {
-        console.error('❌ GitHub tracking backup save failed:', err.response?.status || '', err.response?.data?.message || err.message);
-    });
+    try {
+        githubTrackingBackupScheduler.enqueue(content);
+    } catch (err) {
+        console.error('❌ Refusing to queue invalid GitHub tracking backup:', err.message);
+    }
 }
 
 function supabaseHeaders() {
@@ -558,6 +605,7 @@ async function pullSupabaseTrackingData() {
             fs.renameSync(tempFile, DATA_FILE);
             loadData();
             supabasePersistenceReady = true;
+            supabaseTrackingBackupScheduler.markSaved(content);
             console.log('💾 Tracking data loaded from Supabase; ' + Object.keys(guildConfigs).length + ' Discord server(s).');
             return true;
         }
@@ -569,6 +617,7 @@ async function pullSupabaseTrackingData() {
                     timeout: 20000, headers: { ...supabaseHeaders(), Prefer: 'resolution=merge-duplicates,return=representation' }, params: { on_conflict: 'id' }
                 });
                 supabasePersistenceReady = true;
+                supabaseTrackingBackupScheduler.markSaved(localText);
                 console.log('💾 Migrated existing local tracking data to Supabase without clearing it.');
                 return true;
             }
@@ -583,14 +632,11 @@ async function pullSupabaseTrackingData() {
 }
 function queueSupabaseTrackingSave(content) {
     if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !supabasePersistenceReady) return;
-    let payload;
-    try { payload = JSON.parse(String(content)); } catch (err) { console.error('❌ Refusing to persist invalid tracking JSON:', err.message); return; }
-    supabaseSaveQueue = supabaseSaveQueue.then(async () => {
-        await axios.post(SUPABASE_API, { id: SUPABASE_ROW_ID, payload, updated_at: new Date().toISOString() }, {
-            timeout: 20000, headers: { ...supabaseHeaders(), Prefer: 'resolution=merge-duplicates,return=minimal' }, params: { on_conflict: 'id' }
-        });
-        console.log('💾 Supabase tracking backup saved successfully.');
-    }).catch(err => console.error('❌ Supabase tracking save failed:', err.response?.status || '', err.response?.data?.message || err.message));
+    try {
+        supabaseTrackingBackupScheduler.enqueue(content);
+    } catch (err) {
+        console.error('❌ Refusing to queue invalid Supabase tracking backup:', err.message);
+    }
 }
 async function initializeTrackingPersistence() {
     if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY) {
