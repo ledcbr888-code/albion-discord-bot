@@ -20,3 +20,5 @@ jobs:
           node-version: 20
       - name: Check index.js syntax
         run: node --check index.js
+      - name: Test resumable Battleboard delta cursor
+        run: node --test test/battleboard-delta-cursor.test.js
