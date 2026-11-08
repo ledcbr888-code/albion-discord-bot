@@ -806,10 +806,16 @@ function createBattleboardIntegration(deps = {}) {
       existing.lastError = String(reason || existing.lastError || '').slice(0, 180);
       return false;
     }
+    const queuedAt = new Date().toISOString();
+    event.__queuedAt = event.__queuedAt || queuedAt;
     state.pendingEvents.push({
       battleId,
       event,
-      queuedAt: new Date().toISOString(),
+      queuedAt,
+      firstBotReceivedAt: event.__botReceivedAt || queuedAt,
+      sourceFirstSeenAt: event.first_seen_at || event.firstSeenAt || null,
+      websiteEventAt: event.checked_at || null,
+      eventsApiMs: Number.isFinite(Number(event.__eventsApiMs)) ? Number(event.__eventsApiMs) : null,
       attempts: 0,
       lastError: String(reason || '').slice(0, 180),
     });
@@ -830,6 +836,13 @@ function createBattleboardIntegration(deps = {}) {
       ' | เซิร์ฟเวอร์=' + serverId +
       ' | Battle ID=' + battleId +
       (elapsedSinceStart === null ? '' : ' | ผ่านมาตั้งแต่เริ่ม Battle=' + elapsedSinceStart) +
+      ' | first_seen_at=' + formatThaiTimestamp(event.first_seen_at || event.firstSeenAt) +
+      ' | checked_at=' + formatThaiTimestamp(event.checked_at) +
+      ' | บอทรับ Event=' + formatThaiTimestamp(event.__botReceivedAt) +
+      ' | first_seen→checked_at=' + formatElapsedMs(elapsedMsBetween(event.first_seen_at || event.firstSeenAt, event.checked_at)) +
+      ' | checked_at→บอทรับ=' + formatElapsedMs(elapsedMsBetween(event.checked_at, event.__botReceivedAt)) +
+      ' | Events API=' + formatElapsedMs(event.__eventsApiMs) +
+      ' | รอตั้งแต่บอทเห็น=' + formatElapsedMs(elapsedMsBetween(event.__botReceivedAt, queuedAt)) +
       ' | เหตุผล=' + reasonText
     );
     persist();
@@ -872,8 +885,20 @@ function createBattleboardIntegration(deps = {}) {
       entry.attempts = Math.max(0, Number(entry.attempts) || 0) + 1;
       entry.lastAttemptAt = new Date().toISOString();
       try {
-        const complete = await processEvent(serverId, guildConfig, state, entry.event, { quietPending: true });
+        if (entry.attempts === 1 || entry.attempts % 5 === 0) {
+          console.log('🔁 [Auto-Battle] เริ่มลอง Battle ที่ค้างอีกครั้ง | เซิร์ฟเวอร์=' + serverId +
+            ' | Battle ID=' + entry.battleId +
+            ' | Retry=' + entry.attempts +
+            ' | อยู่ในคิวแล้ว=' + formatElapsedMs(elapsedMsBetween(entry.queuedAt, new Date())));
+        }
+        const complete = await processEvent(serverId, guildConfig, state, entry.event, {
+          quietPending: true, pendingEntry: entry,
+        });
         if (complete) {
+          console.log('✅ [Auto-Battle] ประมวลผล Battle ที่ค้างเสร็จแล้ว | เซิร์ฟเวอร์=' + serverId +
+            ' | Battle ID=' + entry.battleId +
+            ' | Retry ทั้งหมด=' + entry.attempts +
+            ' | เวลาตั้งแต่เข้าคิว=' + formatElapsedMs(elapsedMsBetween(entry.queuedAt, new Date())));
           removePendingEvent(state, entry.battleId);
         } else {
           rotatePendingEvent(state, entry);
@@ -889,7 +914,12 @@ function createBattleboardIntegration(deps = {}) {
         entry.lastError = String(error && error.message || error).slice(0, 180);
         rotatePendingEvent(state, entry);
         console.warn('⚠️ [Auto-Battle] ลองประมวลผล Battle ที่ค้างไม่สำเร็จ จะลองใหม่อีกครั้ง' +
-          ' | เซิร์ฟเวอร์=' + serverId + ' | Battle ID=' + entry.battleId + ' | สาเหตุ=' + entry.lastError);
+          ' | เซิร์ฟเวอร์=' + serverId + ' | Battle ID=' + entry.battleId +
+          ' | Retry=' + entry.attempts +
+          ' | ขั้นตอน=' + String(error && error.autoBattleStage || 'ไม่ทราบขั้นตอน') +
+          (Number.isFinite(Number(error && error.autoBattleStageMs)) ? ' | ใช้เวลา=' + formatPreciseDuration(Number(error.autoBattleStageMs)) : '') +
+          ' | อยู่ในคิวแล้ว=' + formatElapsedMs(elapsedMsBetween(entry.queuedAt, new Date())) +
+          ' | สาเหตุ=' + entry.lastError);
       }
     }
   }
@@ -918,10 +948,33 @@ function createBattleboardIntegration(deps = {}) {
     // Battle detail stop the cursor from advancing over newer Auto-Battle events.
     await retryPendingEvents(serverId, guildConfig, state);
 
-    const result = await request(eventsPath(serverId, state.eventCursor, 100));
+    const eventsRequestStartedAtMs = Date.now();
+    let result;
+    try { result = await request(eventsPath(serverId, state.eventCursor, 100)); }
+    catch (error) {
+      if (error && typeof error === 'object') {
+        error.autoBattleStage = 'ดึง Events feed จาก Battleboard';
+        error.autoBattleStageMs = Date.now() - eventsRequestStartedAtMs;
+      }
+      throw error;
+    }
+    const eventsApiMs = Date.now() - eventsRequestStartedAtMs;
+    const botReceivedAt = new Date().toISOString();
     const events = Array.isArray(result.items) ? result.items : [];
+    if (events.length) {
+      console.log('📥 [Auto-Battle] รับ Events feed จาก Battleboard | เซิร์ฟเวอร์=' + serverId +
+        ' | จำนวน Event=' + events.length +
+        ' | API ใช้เวลา=' + formatPreciseDuration(eventsApiMs) +
+        ' | บอทได้รับข้อมูล=' + formatThaiTimestamp(botReceivedAt));
+    }
     let deferRemaining = false;
-    for (const event of events) {
+    for (const rawEvent of events) {
+      const event = {
+        ...rawEvent,
+        __botReceivedAt: rawEvent && rawEvent.__botReceivedAt || botReceivedAt,
+        __eventsApiMs: Number.isFinite(Number(rawEvent && rawEvent.__eventsApiMs))
+          ? Number(rawEvent.__eventsApiMs) : eventsApiMs,
+      };
       if (deferRemaining) {
         enqueuePendingEvent(serverId, state, event, 'deferred-after-transient-error');
       } else {
@@ -935,6 +988,8 @@ function createBattleboardIntegration(deps = {}) {
           console.warn('⚠️ [Auto-Battle] ประมวลผล Battle ไม่สำเร็จ จัดเข้าคิวเพื่อลองใหม่' +
             ' | เซิร์ฟเวอร์=' + serverId +
             ' | Battle ID=' + String(event && event.battle_id || 'ไม่ทราบ') +
+            ' | ขั้นตอน=' + String(error && error.autoBattleStage || 'ไม่ทราบขั้นตอน') +
+            (Number.isFinite(Number(error && error.autoBattleStageMs)) ? ' | ใช้เวลา=' + formatPreciseDuration(Number(error.autoBattleStageMs)) : '') +
             ' | สาเหตุ=' + String(error && error.message || error).slice(0, 180));
         }
       }
