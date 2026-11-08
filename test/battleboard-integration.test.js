@@ -6,7 +6,7 @@ const {
   __test: {
     normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds,
     targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce,
-    snapshotFingerprint,
+    snapshotFingerprint, timestampMs, formatThaiDuration, getBattleDelayMetrics, formatBattleDelayLines,
   },
 } = require('../battleboard-integration');
 
@@ -129,6 +129,44 @@ test('resolves an ID-only Auto-Battle route to its Guild name before checking tr
   assert.equal(checks[0].eligible, true);
 });
 
+
+test('formats elapsed durations in Thai for seconds, minutes, hours, and days', () => {
+  assert.equal(formatThaiDuration(500), 'น้อยกว่า 1 วินาที');
+  assert.equal(formatThaiDuration(45000), '45 วินาที');
+  assert.equal(formatThaiDuration(125000), '2 นาที 5 วินาที');
+  assert.equal(formatThaiDuration(3661000), '1 ชั่วโมง 1 นาที 1 วินาที');
+  assert.equal(formatThaiDuration(90061000), '1 วัน 1 ชั่วโมง 1 นาที 1 วินาที');
+  assert.equal(timestampMs('not-a-date'), null);
+});
+
+test('calculates Battle-start-to-send and Battle-end-to-send delays separately', () => {
+  const event = { battle_start_time: '2026-11-08T10:00:00.000Z' };
+  const detail = {
+    startTime: '2026-11-08T10:00:00.000Z',
+    endTime: '2026-11-08T10:04:00.000Z',
+  };
+  const sentAt = '2026-11-08T10:07:30.000Z';
+  const metrics = getBattleDelayMetrics(event, detail, sentAt);
+  assert.equal(metrics.fromBattleStartMs, 450000);
+  assert.equal(metrics.fromBattleEndMs, 210000);
+  assert.deepEqual(formatBattleDelayLines(event, detail, sentAt), [
+    '⏱️ ตั้งแต่ Battle เริ่มจนส่งรายงานครบ: 7 นาที 30 วินาที',
+    '⏱️ หลัง Battle จบจนส่งรายงานครบ: 3 นาที 30 วินาที',
+  ]);
+});
+
+test('does not report negative or fabricated delays when Battle timestamps are missing or invalid', () => {
+  const metrics = getBattleDelayMetrics(
+    { battle_start_time: '2026-11-08T10:00:00.000Z' },
+    { endTime: 'invalid-time' },
+    '2026-11-08T09:59:00.000Z'
+  );
+  assert.equal(metrics.fromBattleStartMs, null);
+  assert.equal(metrics.fromBattleEndMs, null);
+  assert.match(formatBattleDelayLines({}, {}, '2026-11-08T10:00:00.000Z')[0], /ไม่มีข้อมูลเวลาเริ่ม/);
+  assert.match(formatBattleDelayLines({}, {}, '2026-11-08T10:00:00.000Z')[1], /ไม่มีข้อมูลเวลาจบ/);
+});
+
 test('creates stable idempotency keys per battle and channel', () => {
   assert.equal(deliveryKey('526764798', '12345678901234567'), '526764798:12345678901234567');
 });
@@ -149,14 +187,20 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
   const oldFetch = global.fetch;
   const channelId = '99999999999999999';
   const serverId = '1165745441120452638';
+  const battleStartTime = new Date(Date.now() - 2 * 60 * 60 * 1000).toISOString();
+  const battleEndTime = new Date(Date.now() - 60 * 60 * 1000).toISOString();
   const events = [
     {
       battle_id: '1001',
+      battle_start_time: battleStartTime,
+      first_seen_at: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
       checked_at: '2026-11-08T00:00:01.000Z',
       matches: [{ type: 'guild', id: 'guild-plac', name: 'PLAC' }],
     },
     {
       battle_id: '1002',
+      battle_start_time: battleStartTime,
+      first_seen_at: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
       checked_at: '2026-11-08T00:00:02.000Z',
       matches: [{ type: 'guild', id: 'guild-plac', name: 'PLAC' }],
     },
@@ -187,6 +231,13 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
   const eventCalls = { count: 0 };
   const detailCalls = new Map();
   const sent = [];
+  const capturedLogs = [];
+  const oldConsoleLog = console.log;
+  const oldConsoleWarn = console.warn;
+  const oldConsoleError = console.error;
+  console.log = (...args) => capturedLogs.push(args.join(' '));
+  console.warn = (...args) => capturedLogs.push(args.join(' '));
+  console.error = (...args) => capturedLogs.push(args.join(' '));
   let integration;
   process.env.BATTLEBOARD_API_URL = 'https://battleboard.example';
   process.env.BOT_API_KEY = 'test-key-'.padEnd(40, 'x');
@@ -206,7 +257,11 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
         body = {
           ready: true,
           detailSchemaVersion: 4,
-          detail: { guilds: { 'guild-plac': { id: 'guild-plac', name: 'PLAC' } } },
+          detail: {
+            startTime: battleStartTime,
+            endTime: battleEndTime,
+            guilds: { 'guild-plac': { id: 'guild-plac', name: 'PLAC' } },
+          },
         };
       }
     } else {
@@ -263,8 +318,16 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
     assert.equal(config.battleboardState.pendingEvents.length, 0);
     assert.equal(detailCalls.get('1001'), 2);
     assert.equal(detailCalls.get('1002'), 1);
+    assert.equal(capturedLogs.filter(line => line.includes('ส่งรายงานส่วนที่') && line.includes('เข้า Discord สำเร็จ')).length, 4);
+    assert.equal(capturedLogs.filter(line => line.includes('ส่งรายงานครบทุกส่วนเข้า Discord สำเร็จ')).length, 2);
+    assert.equal(capturedLogs.filter(line => line.includes('ตั้งแต่ Battle เริ่มจนส่งรายงานครบ')).length, 2);
+    assert.equal(capturedLogs.filter(line => line.includes('หลัง Battle จบจนส่งรายงานครบ')).length, 2);
+    assert.ok(capturedLogs.some(line => line.includes('รายละเอียด Battle ยังไม่พร้อม จัดเข้าคิวรอข้อมูลแล้ว')));
   } finally {
     if (integration) integration.stop();
+    console.log = oldConsoleLog;
+    console.warn = oldConsoleWarn;
+    console.error = oldConsoleError;
     global.fetch = oldFetch;
     if (oldApiUrl === undefined) delete process.env.BATTLEBOARD_API_URL;
     else process.env.BATTLEBOARD_API_URL = oldApiUrl;
