@@ -57,6 +57,43 @@ function targetGuildMatches(config, detail, event) {
   return getBattleGuilds(detail).some(guild =>
     (targetId && guild.id === targetId) || (targetName && normalizeName(guild.name) === targetName));
 }
+function evaluateAutoBattleRoutes(routes, report, detail, event) {
+  const reportRows = Array.isArray(report && report.playerReportData) ? report.playerReportData : [];
+  const detailGuilds = getBattleGuilds(detail);
+  const eventGuilds = (Array.isArray(event && event.matches) ? event.matches : [])
+    .filter(match => match && match.type === 'guild')
+    .map(match => ({
+      id: String(match.id || match.resolvedEntityId || ''),
+      name: String(match.name || '').trim(),
+    }));
+  const battleGuilds = [...detailGuilds, ...eventGuilds];
+
+  return (Array.isArray(routes) ? routes : []).map(route => {
+    const targetId = String(route && (route.targetGuildId || route.guildId) || '').trim();
+    const targetName = String(route && (route.targetGuild || route.targetGuildName) || '').trim();
+    const normalizedTargetName = normalizeName(targetName);
+    const matchedGuild = battleGuilds.find(guild =>
+      (targetId && String(guild.id || '') === targetId) ||
+      (normalizedTargetName && normalizeName(guild.name) === normalizedTargetName)
+    );
+    const resolvedName = String(matchedGuild && matchedGuild.name || targetName).trim();
+    const trackedRows = resolvedName
+      ? reportRows.filter(player => normalizeName(player && player.guild) === normalizeName(resolvedName))
+      : [];
+    const totalFame = trackedRows.reduce((sum, player) => sum + (Number(player && player.fame) || 0), 0);
+    const configuredThreshold = Number(route && route.minFrames);
+    const minFame = Number.isFinite(configuredThreshold) ? Math.max(0, configuredThreshold) : 0;
+
+    return {
+      route,
+      targetGuild: resolvedName || targetId || 'Tracked Battle',
+      totalFame,
+      minFame,
+      matchedPlayers: trackedRows.length,
+      eligible: totalFame >= minFame,
+    };
+  });
+}
 function deliveryKey(battleId, channelId) { return String(battleId) + ':' + String(channelId); }
 function snapshotFingerprint(items) {
   return JSON.stringify((Array.isArray(items) ? items : []).map(item => [
@@ -194,7 +231,7 @@ function createBattleboardIntegration(deps = {}) {
       throw error;
     }
   }
-  async function deliver(channel, channelId, battleId, report, targets, state, serverId) {
+  async function deliver(channel, channelId, battleId, report, targets, routeChecks, state, serverId) {
     const key = deliveryKey(battleId, channelId);
     const prior = findDelivery(state, key);
     if (prior && prior.status === 'sent') return;
@@ -202,9 +239,13 @@ function createBattleboardIntegration(deps = {}) {
     const partsTotal = Math.max(1, files.length);
     const record = prior || { key, battleId: String(battleId), channelId: String(channelId), status: 'sending', partsSent: 0 };
     if (!prior) saveDelivery(state, record);
+    const routeSummary = (Array.isArray(routeChecks) ? routeChecks : [])
+      .map(check => check.targetGuild + ': ' + formatFame(check.totalFame) + ' / ' + formatFame(check.minFame))
+      .join(' | ');
     const alertText =
       '🚨 **BOSS BOT Battleboard Alert!** ตรวจพบไฟต์ใหม่ของ **' + targets.join(', ') + '**\n' +
       '💰 Fame รวมของผู้ที่ติดตาม: ' + formatFame(report.totalFame) + '\n' +
+      (routeSummary ? '🎯 Fame ตามเงื่อนไขแต่ละ Guild: ' + routeSummary + '\n' : '') +
       '⚔️ Kills: ' + Number(report.totalKills || 0).toLocaleString() + '\n' +
       '☠️ Deaths: ' + Number(report.totalDeaths || 0).toLocaleString() + '\n' +
       '➕ Kills + Deaths: ' + (Number(report.totalKills || 0) + Number(report.totalDeaths || 0)).toLocaleString() + '\n' +
@@ -217,7 +258,9 @@ function createBattleboardIntegration(deps = {}) {
       }
       for (let index = 1; index < files.length; index++) {
         if ((Number(record.partsSent) || 0) >= index + 1) continue;
-        await channel.send({ files: [files[index]], allowedMentions: { parse: [] } });
+        const continuationText =
+          '📎 **BOSS BOT Battle Report – ส่วนที่ ' + (index + 1) + '/' + partsTotal + '** | Battle ID: ' + battleId;
+        await channel.send({ content: continuationText, files: [files[index]], allowedMentions: { parse: [] } });
         record.partsSent = index + 1;
         saveDelivery(state, record);
       }
@@ -256,32 +299,42 @@ function createBattleboardIntegration(deps = {}) {
     const report = await buildBattleReportPayload(battleId, [], {
       autoBattle: true, guildId: serverId, apiData: detail, trackedPlayers: players, trackedGuilds: guilds,
     });
+    const routeChecks = evaluateAutoBattleRoutes(routes, report, detail, event);
     const byChannel = new Map();
-    for (const route of routes) {
-      const channelId = String(route.channelId);
-      const entry = byChannel.get(channelId) || { targets: [], minFame: Number.POSITIVE_INFINITY };
-      const target = String(route.targetGuild || route.targetGuildId || 'Tracked Battle');
-      if (!entry.targets.includes(target)) entry.targets.push(target);
-      const fame = Number(route.minFrames);
-      entry.minFame = Math.min(entry.minFame, Number.isFinite(fame) ? fame : 0);
+    for (const check of routeChecks) {
+      const channelId = String(check.route.channelId);
+      const entry = byChannel.get(channelId) || [];
+      entry.push(check);
       byChannel.set(channelId, entry);
     }
-    for (const [channelId, route] of byChannel) {
+    for (const [channelId, checks] of byChannel) {
       const key = deliveryKey(battleId, channelId);
       const prior = findDelivery(state, key);
       if (prior && (prior.status === 'sent' || prior.status === 'below-threshold')) continue;
-      if (Number(report.totalFame || 0) < route.minFame) {
+
+      // Each Auto-Battle route must satisfy its own tracked-member Fame threshold.
+      // Never pool Fame across different Guilds just because they share a Discord channel.
+      const qualifiedRoutes = checks.filter(check => check.eligible);
+      if (!qualifiedRoutes.length) {
+        const routeSummary = checks
+          .map(check => check.targetGuild + '=' + formatFame(check.totalFame) + '/' + formatFame(check.minFame))
+          .join(' | ');
         saveDelivery(state, {
           key, battleId, channelId, status: 'below-threshold',
-          totalFame: Number(report.totalFame || 0), minFame: route.minFame, checkedAt: new Date().toISOString(),
+          totalFame: Number(report.totalFame || 0),
+          routeChecks: checks.map(({ targetGuild, totalFame, minFame, matchedPlayers }) =>
+            ({ targetGuild, totalFame, minFame, matchedPlayers })),
+          checkedAt: new Date().toISOString(),
         });
-        console.log('ℹ️ [Battleboard] Below Fame threshold | Battle=' + battleId +
-          ' | Fame=' + formatFame(report.totalFame) + ' | Required=' + formatFame(route.minFame));
+        console.log('ℹ️ [Battleboard] ทุก Guild route ต่ำกว่า Fame threshold | Battle=' + battleId +
+          ' | ' + routeSummary);
         continue;
       }
+
       const channel = await client.channels.fetch(channelId).catch(() => null);
       if (!channel || typeof channel.send !== 'function') throw new Error('Auto-Battle channel unavailable: ' + channelId);
-      await deliver(channel, channelId, battleId, report, route.targets, state, serverId);
+      const targets = [...new Set(qualifiedRoutes.map(check => check.targetGuild))];
+      await deliver(channel, channelId, battleId, report, targets, qualifiedRoutes, state, serverId);
     }
     return true;
   }
@@ -373,5 +426,5 @@ function createBattleboardIntegration(deps = {}) {
 }
 module.exports = {
   createBattleboardIntegration,
-  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, deliveryKey, snapshotFingerprint, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup },
+  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, snapshotFingerprint, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup },
 };
