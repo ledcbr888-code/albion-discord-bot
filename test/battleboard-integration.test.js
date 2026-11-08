@@ -2,7 +2,12 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const {
-  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey },
+  createBattleboardIntegration,
+  __test: {
+    normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds,
+    targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce,
+    snapshotFingerprint,
+  },
 } = require('../battleboard-integration');
 
 test('normalizes names consistently', () => {
@@ -128,6 +133,139 @@ test('creates stable idempotency keys per battle and channel', () => {
   assert.equal(deliveryKey('526764798', '12345678901234567'), '526764798:12345678901234567');
 });
 
+
+test('creates a stable, distinct Discord nonce for every Battle, channel, and report part', () => {
+  const first = deliveryNonce('526764798', '12345678901234567', 1);
+  assert.equal(first, deliveryNonce('526764798', '12345678901234567', 1));
+  assert.match(first, /^[a-f0-9]{24}$/);
+  assert.notEqual(first, deliveryNonce('526764799', '12345678901234567', 1));
+  assert.notEqual(first, deliveryNonce('526764798', '12345678901234568', 1));
+  assert.notEqual(first, deliveryNonce('526764798', '12345678901234567', 2));
+});
+
+test('a detail-pending Auto-Battle does not block later events and is retried', async () => {
+  const oldApiUrl = process.env.BATTLEBOARD_API_URL;
+  const oldApiKey = process.env.BOT_API_KEY;
+  const oldFetch = global.fetch;
+  const channelId = '99999999999999999';
+  const serverId = '1165745441120452638';
+  const events = [
+    {
+      battle_id: '1001',
+      checked_at: '2026-11-08T00:00:01.000Z',
+      matches: [{ type: 'guild', id: 'guild-plac', name: 'PLAC' }],
+    },
+    {
+      battle_id: '1002',
+      checked_at: '2026-11-08T00:00:02.000Z',
+      matches: [{ type: 'guild', id: 'guild-plac', name: 'PLAC' }],
+    },
+  ];
+  const config = {
+    guilds: [{ id: 'guild-plac', name: 'PLAC' }],
+    players: ['AD03E'],
+    autoBattles: [{
+      targetGuild: 'PLAC',
+      targetGuildId: 'guild-plac',
+      channelId,
+      minFrames: 100000,
+      enabled: true,
+    }],
+    battleboardState: {},
+  };
+  const items = buildTrackedItems(config);
+  Object.assign(config.battleboardState, {
+    snapshotInitialized: true,
+    snapshotFingerprint: snapshotFingerprint(items),
+    lastSnapshotSyncAt: new Date().toISOString(),
+    cursorInitialized: true,
+    eventCursor: { after: '2026-11-08T00:00:00.000Z', afterBattleId: '0' },
+    delivered: [],
+    pendingEvents: [],
+  });
+
+  const eventCalls = { count: 0 };
+  const detailCalls = new Map();
+  const sent = [];
+  let integration;
+  process.env.BATTLEBOARD_API_URL = 'https://battleboard.example';
+  process.env.BOT_API_KEY = 'test-key-'.padEnd(40, 'x');
+  global.fetch = async urlValue => {
+    const url = new URL(String(urlValue));
+    let body;
+    if (url.pathname === '/api/bot-tracked-entities' && url.searchParams.get('mode') === 'events') {
+      eventCalls.count++;
+      body = { items: eventCalls.count === 1 ? events : [] };
+    } else if (url.pathname === '/api/bot-battle-detail') {
+      const id = url.searchParams.get('id');
+      const calls = (detailCalls.get(id) || 0) + 1;
+      detailCalls.set(id, calls);
+      if (id === '1001' && calls === 1) {
+        body = { status: 404 };
+      } else {
+        body = {
+          ready: true,
+          detailSchemaVersion: 4,
+          detail: { guilds: { 'guild-plac': { id: 'guild-plac', name: 'PLAC' } } },
+        };
+      }
+    } else {
+      throw new Error('Unexpected fake URL: ' + url.href);
+    }
+    return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+  };
+
+  integration = createBattleboardIntegration({
+    client: {
+      channels: {
+        fetch: async id => {
+          assert.equal(id, channelId);
+          return {
+            send: async payload => {
+              sent.push(payload);
+              return { id: 'message-' + sent.length };
+            },
+          };
+        },
+      },
+    },
+    getAllGuildConfigs: () => [{ guildId: serverId, config }],
+    getGuildConfig: () => config,
+    saveData: () => {},
+    buildBattleReportPayload: async battleId => ({
+      totalFame: 500000,
+      totalKills: 10,
+      totalDeaths: 2,
+      battleUrl: 'https://example.test/battle/' + battleId,
+      payload: { files: [], content: 'report body for ' + battleId },
+    }),
+    formatFame: value => Number(value || 0).toLocaleString(),
+  });
+
+  try {
+    await integration.tick();
+    assert.equal(sent.length, 1, 'the later ready Battle should send during the first poll');
+    assert.equal(sent[0].nonce, deliveryNonce('1002', channelId, 1));
+    assert.equal(sent[0].enforceNonce, true);
+    assert.equal(config.battleboardState.eventCursor.afterBattleId, '1002');
+    assert.deepEqual(config.battleboardState.pendingEvents.map(entry => entry.battleId), ['1001']);
+
+    integration.stop();
+    await integration.tick();
+    assert.equal(sent.length, 2, 'the earlier Battle should send after its detail becomes ready');
+    assert.equal(sent[1].nonce, deliveryNonce('1001', channelId, 1));
+    assert.equal(config.battleboardState.pendingEvents.length, 0);
+    assert.equal(detailCalls.get('1001'), 2);
+    assert.equal(detailCalls.get('1002'), 1);
+  } finally {
+    if (integration) integration.stop();
+    global.fetch = oldFetch;
+    if (oldApiUrl === undefined) delete process.env.BATTLEBOARD_API_URL;
+    else process.env.BATTLEBOARD_API_URL = oldApiUrl;
+    if (oldApiKey === undefined) delete process.env.BOT_API_KEY;
+    else process.env.BOT_API_KEY = oldApiKey;
+  }
+});
 
 test('does not refresh an unchanged tracking snapshot more often than every five minutes', () => {
   const items = buildTrackedItems({ guilds: ['PLAC'], players: [] });
