@@ -1,10 +1,14 @@
 'use strict';
+const { createHash } = require('node:crypto');
 const POLL_MS = 30000;
 const TIMEOUT_MS = 8000;
 const SNAPSHOT_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 const RETRY_BASE_MS = 30 * 1000;
 const RETRY_MAX_MS = 5 * 60 * 1000;
 const MAX_DELIVERIES = 2000;
+const MAX_PENDING_EVENTS = 2000;
+const MAX_PENDING_RETRIES_PER_TICK = 10;
+const PENDING_EVENT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 function normalizeName(value) {
   return String(value == null ? '' : value).normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
 }
@@ -57,7 +61,46 @@ function targetGuildMatches(config, detail, event) {
   return getBattleGuilds(detail).some(guild =>
     (targetId && guild.id === targetId) || (targetName && normalizeName(guild.name) === targetName));
 }
+function evaluateAutoBattleRoutes(routes, report, detail, event) {
+  const trackedFame = Number(report && report.totalFame) || 0;
+  const detailGuilds = getBattleGuilds(detail);
+  const eventGuilds = (Array.isArray(event && event.matches) ? event.matches : [])
+    .filter(match => match && match.type === 'guild')
+    .map(match => ({
+      id: String(match.id || match.resolvedEntityId || ''),
+      name: String(match.name || '').trim(),
+    }));
+  const battleGuilds = [...detailGuilds, ...eventGuilds];
+
+  return (Array.isArray(routes) ? routes : []).map(route => {
+    const targetId = String(route && (route.targetGuildId || route.guildId) || '').trim();
+    const targetName = String(route && (route.targetGuild || route.targetGuildName) || '').trim();
+    const normalizedTargetName = normalizeName(targetName);
+    const matchedGuild = battleGuilds.find(guild =>
+      (targetId && String(guild.id || '') === targetId) ||
+      (normalizedTargetName && normalizeName(guild.name) === normalizedTargetName)
+    );
+    const resolvedName = String(matchedGuild && matchedGuild.name || targetName).trim();
+    const configuredThreshold = Number(route && route.minFrames);
+    const minFame = Number.isFinite(configuredThreshold) ? Math.max(0, configuredThreshold) : 0;
+
+    // minFrames is evaluated against the total Fame of all tracked participants.
+    // Each route is evaluated independently so only routes that pass are shown.
+    return {
+      route,
+      targetGuild: resolvedName || targetId || 'Tracked Battle',
+      totalFame: trackedFame,
+      minFame,
+      eligible: trackedFame >= minFame,
+    };
+  });
+}
 function deliveryKey(battleId, channelId) { return String(battleId) + ':' + String(channelId); }
+function deliveryNonce(battleId, channelId, partNumber) {
+  return createHash('sha256')
+    .update(String(battleId) + ':' + String(channelId) + ':' + String(Number(partNumber) || 1))
+    .digest('hex').slice(0, 24);
+}
 function snapshotFingerprint(items) {
   return JSON.stringify((Array.isArray(items) ? items : []).map(item => [
     String(item && item.type || ''),
@@ -130,6 +173,7 @@ function createBattleboardIntegration(deps = {}) {
   function getState(config) {
     if (!config.battleboardState || typeof config.battleboardState !== 'object') config.battleboardState = {};
     if (!Array.isArray(config.battleboardState.delivered)) config.battleboardState.delivered = [];
+    if (!Array.isArray(config.battleboardState.pendingEvents)) config.battleboardState.pendingEvents = [];
     return config.battleboardState;
   }
   function findDelivery(state, key) { return state.delivered.find(item => item && item.key === key) || null; }
@@ -194,7 +238,7 @@ function createBattleboardIntegration(deps = {}) {
       throw error;
     }
   }
-  async function deliver(channel, channelId, battleId, report, targets, state, serverId) {
+  async function deliver(channel, channelId, battleId, report, targets, routeChecks, state, serverId) {
     const key = deliveryKey(battleId, channelId);
     const prior = findDelivery(state, key);
     if (prior && prior.status === 'sent') return;
@@ -202,31 +246,64 @@ function createBattleboardIntegration(deps = {}) {
     const partsTotal = Math.max(1, files.length);
     const record = prior || { key, battleId: String(battleId), channelId: String(channelId), status: 'sending', partsSent: 0 };
     if (!prior) saveDelivery(state, record);
+    const routeSummary = (Array.isArray(routeChecks) ? routeChecks : [])
+      .map(check => check.targetGuild + ': ' + formatFame(check.totalFame) + ' / ' + formatFame(check.minFame))
+      .join(' | ');
     const alertText =
       '🚨 **BOSS BOT Battleboard Alert!** ตรวจพบไฟต์ใหม่ของ **' + targets.join(', ') + '**\n' +
+      '🆔 Battle ID: ' + battleId + '\n' +
       '💰 Fame รวมของผู้ที่ติดตาม: ' + formatFame(report.totalFame) + '\n' +
+      (routeSummary ? '🎯 Fame ตามเงื่อนไขแต่ละ Guild: ' + routeSummary + '\n' : '') +
       '⚔️ Kills: ' + Number(report.totalKills || 0).toLocaleString() + '\n' +
       '☠️ Deaths: ' + Number(report.totalDeaths || 0).toLocaleString() + '\n' +
       '➕ Kills + Deaths: ' + (Number(report.totalKills || 0) + Number(report.totalDeaths || 0)).toLocaleString() + '\n' +
       '🔗 Battle Link: <' + report.battleUrl + '>';
     if (files.length) {
       if ((Number(record.partsSent) || 0) < 1) {
-        await channel.send({ content: alertText, files: [files[0]], allowedMentions: { parse: [] } });
+        const sentMessage = await channel.send({
+          content: alertText,
+          files: [files[0]],
+          allowedMentions: { parse: [] },
+          nonce: deliveryNonce(battleId, channelId, 1),
+          enforceNonce: true,
+        });
         record.partsSent = 1;
+        if (sentMessage && sentMessage.id) {
+          if (!Array.isArray(record.messageIds)) record.messageIds = [];
+          record.messageIds[0] = String(sentMessage.id);
+        }
         saveDelivery(state, record);
       }
       for (let index = 1; index < files.length; index++) {
         if ((Number(record.partsSent) || 0) >= index + 1) continue;
-        await channel.send({ files: [files[index]], allowedMentions: { parse: [] } });
+        const continuationText =
+          '📎 **BOSS BOT Battle Report – ส่วนที่ ' + (index + 1) + '/' + partsTotal + '** | Battle ID: ' + battleId;
+        const sentMessage = await channel.send({
+          content: continuationText,
+          files: [files[index]],
+          allowedMentions: { parse: [] },
+          nonce: deliveryNonce(battleId, channelId, index + 1),
+          enforceNonce: true,
+        });
         record.partsSent = index + 1;
+        if (sentMessage && sentMessage.id) {
+          if (!Array.isArray(record.messageIds)) record.messageIds = [];
+          record.messageIds[index] = String(sentMessage.id);
+        }
         saveDelivery(state, record);
       }
     } else if ((Number(record.partsSent) || 0) < 1) {
-      await channel.send({
+      const sentMessage = await channel.send({
         content: alertText + '\n' + String(report.payload && report.payload.content || ''),
         allowedMentions: { parse: [] },
+        nonce: deliveryNonce(battleId, channelId, 1),
+        enforceNonce: true,
       });
       record.partsSent = 1;
+      if (sentMessage && sentMessage.id) {
+        if (!Array.isArray(record.messageIds)) record.messageIds = [];
+        record.messageIds[0] = String(sentMessage.id);
+      }
       saveDelivery(state, record);
     }
     record.status = 'sent';
@@ -235,13 +312,16 @@ function createBattleboardIntegration(deps = {}) {
     saveDelivery(state, record);
     console.log('✅ [Battleboard] Report delivered | Discord=' + serverId + ' | Battle=' + battleId + ' | Channel=' + channelId);
   }
-  async function processEvent(serverId, guildConfig, state, event) {
+  async function processEvent(serverId, guildConfig, state, event, options = {}) {
     const battleId = String(event && event.battle_id || '').trim();
     if (!/^\d+$/.test(battleId)) return true;
     const detailResponse = await fetchDetail(battleId);
-    if (Number(detailResponse.status) === 404) return true;
+    // A missing detail may be a short upstream delay; keep it pending instead of dropping it.
+    if (Number(detailResponse.status) === 404) return false;
     if (detailResponse.ready !== true || !detailResponse.detail || Number(detailResponse.detailSchemaVersion || 0) < 4) {
-      console.log('⏳ [Battleboard] Detail pending; retrying | Discord=' + serverId + ' | Battle=' + battleId);
+      if (options.quietPending !== true) {
+        console.log('⏳ [Battleboard] Detail pending; retrying | Discord=' + serverId + ' | Battle=' + battleId);
+      }
       return false;
     }
     const detail = detailResponse.detail;
@@ -256,34 +336,119 @@ function createBattleboardIntegration(deps = {}) {
     const report = await buildBattleReportPayload(battleId, [], {
       autoBattle: true, guildId: serverId, apiData: detail, trackedPlayers: players, trackedGuilds: guilds,
     });
+    const routeChecks = evaluateAutoBattleRoutes(routes, report, detail, event);
     const byChannel = new Map();
-    for (const route of routes) {
-      const channelId = String(route.channelId);
-      const entry = byChannel.get(channelId) || { targets: [], minFame: Number.POSITIVE_INFINITY };
-      const target = String(route.targetGuild || route.targetGuildId || 'Tracked Battle');
-      if (!entry.targets.includes(target)) entry.targets.push(target);
-      const fame = Number(route.minFrames);
-      entry.minFame = Math.min(entry.minFame, Number.isFinite(fame) ? fame : 0);
+    for (const check of routeChecks) {
+      const channelId = String(check.route.channelId);
+      const entry = byChannel.get(channelId) || [];
+      entry.push(check);
       byChannel.set(channelId, entry);
     }
-    for (const [channelId, route] of byChannel) {
+    for (const [channelId, checks] of byChannel) {
       const key = deliveryKey(battleId, channelId);
       const prior = findDelivery(state, key);
       if (prior && (prior.status === 'sent' || prior.status === 'below-threshold')) continue;
-      if (Number(report.totalFame || 0) < route.minFame) {
+
+      // Each Auto-Battle route is checked independently against the tracked-roster Fame total.
+      // Sharing a Discord channel must not make every configured Guild label appear as qualified.
+      const qualifiedRoutes = checks.filter(check => check.eligible);
+      if (!qualifiedRoutes.length) {
+        const routeSummary = checks
+          .map(check => check.targetGuild + '=' + formatFame(check.totalFame) + '/' + formatFame(check.minFame))
+          .join(' | ');
         saveDelivery(state, {
           key, battleId, channelId, status: 'below-threshold',
-          totalFame: Number(report.totalFame || 0), minFame: route.minFame, checkedAt: new Date().toISOString(),
+          totalFame: Number(report.totalFame || 0),
+          routeChecks: checks.map(({ targetGuild, totalFame, minFame }) =>
+            ({ targetGuild, totalFame, minFame })),
+          checkedAt: new Date().toISOString(),
         });
-        console.log('ℹ️ [Battleboard] Below Fame threshold | Battle=' + battleId +
-          ' | Fame=' + formatFame(report.totalFame) + ' | Required=' + formatFame(route.minFame));
+        console.log('ℹ️ [Battleboard] ทุก Guild route ต่ำกว่า Fame threshold | Battle=' + battleId +
+          ' | ' + routeSummary);
         continue;
       }
+
       const channel = await client.channels.fetch(channelId).catch(() => null);
       if (!channel || typeof channel.send !== 'function') throw new Error('Auto-Battle channel unavailable: ' + channelId);
-      await deliver(channel, channelId, battleId, report, route.targets, state, serverId);
+      const targets = [...new Set(qualifiedRoutes.map(check => check.targetGuild))];
+      await deliver(channel, channelId, battleId, report, targets, qualifiedRoutes, state, serverId);
     }
     return true;
+  }
+  function enqueuePendingEvent(state, event, reason) {
+    const battleId = String(event && event.battle_id || '').trim();
+    if (!/^\d+$/.test(battleId)) return;
+    if (!Array.isArray(state.pendingEvents)) state.pendingEvents = [];
+    const existing = state.pendingEvents.find(item => item && String(item.battleId) === battleId);
+    if (existing) {
+      existing.event = event;
+      existing.lastError = String(reason || existing.lastError || '').slice(0, 180);
+      return;
+    }
+    state.pendingEvents.push({
+      battleId,
+      event,
+      queuedAt: new Date().toISOString(),
+      attempts: 0,
+      lastError: String(reason || '').slice(0, 180),
+    });
+    if (state.pendingEvents.length > MAX_PENDING_EVENTS) {
+      const dropped = state.pendingEvents.splice(0, state.pendingEvents.length - MAX_PENDING_EVENTS);
+      console.warn('⚠️ [Battleboard] Pending Auto-Battle queue cap reached; oldest item(s) discarded | Discord=' +
+        (state.guildId || 'unknown') + ' | Dropped=' + dropped.length);
+    }
+    persist();
+  }
+  function removePendingEvent(state, battleId) {
+    if (!Array.isArray(state.pendingEvents)) return;
+    state.pendingEvents = state.pendingEvents.filter(item => String(item && item.battleId || '') !== String(battleId));
+    persist();
+  }
+  function rotatePendingEvent(state, entry) {
+    if (!Array.isArray(state.pendingEvents)) state.pendingEvents = [];
+    state.pendingEvents = state.pendingEvents.filter(item => item !== entry);
+    state.pendingEvents.push(entry);
+    persist();
+  }
+  async function retryPendingEvents(serverId, guildConfig, state) {
+    if (!Array.isArray(state.pendingEvents) || !state.pendingEvents.length) return;
+    const now = Date.now();
+    const retained = [];
+    let expired = 0;
+    for (const entry of state.pendingEvents) {
+      if (!entry || !entry.event || !/^\d+$/.test(String(entry.battleId || ''))) continue;
+      const queuedAt = Date.parse(entry.queuedAt || '');
+      if (Number.isFinite(queuedAt) && now - queuedAt > PENDING_EVENT_MAX_AGE_MS) {
+        expired++;
+        continue;
+      }
+      retained.push(entry);
+    }
+    state.pendingEvents = retained;
+    if (expired) {
+      console.warn('⚠️ [Battleboard] Expired pending Auto-Battle detail(s) after 24h | Discord=' +
+        serverId + ' | Count=' + expired);
+      persist();
+    }
+    const candidates = state.pendingEvents.slice(0, MAX_PENDING_RETRIES_PER_TICK);
+    for (const entry of candidates) {
+      if (!state.pendingEvents.includes(entry)) continue;
+      entry.attempts = Math.max(0, Number(entry.attempts) || 0) + 1;
+      entry.lastAttemptAt = new Date().toISOString();
+      try {
+        const complete = await processEvent(serverId, guildConfig, state, entry.event, { quietPending: true });
+        if (complete) {
+          removePendingEvent(state, entry.battleId);
+        } else {
+          rotatePendingEvent(state, entry);
+        }
+      } catch (error) {
+        entry.lastError = String(error && error.message || error).slice(0, 180);
+        rotatePendingEvent(state, entry);
+        console.warn('⚠️ [Battleboard] Pending Auto-Battle retry failed | Discord=' + serverId +
+          ' | Battle=' + entry.battleId + ' | Error=' + entry.lastError);
+      }
+    }
   }
   async function pollServer(serverId, guildConfig) {
     if (!validDiscordServerId(serverId) || !guildConfig) return;
@@ -305,10 +470,30 @@ function createBattleboardIntegration(deps = {}) {
       await initialiseCursor(serverId, state);
       return;
     }
+
+    // Retry old detail-pending events in a bounded batch, but never let an unavailable
+    // Battle detail stop the cursor from advancing over newer Auto-Battle events.
+    await retryPendingEvents(serverId, guildConfig, state);
+
     const result = await request(eventsPath(serverId, state.eventCursor, 100));
     const events = Array.isArray(result.items) ? result.items : [];
+    let deferRemaining = false;
     for (const event of events) {
-      if (!(await processEvent(serverId, guildConfig, state, event))) return;
+      if (deferRemaining) {
+        enqueuePendingEvent(state, event, 'deferred-after-transient-error');
+      } else {
+        try {
+          const complete = await processEvent(serverId, guildConfig, state, event);
+          if (!complete) enqueuePendingEvent(state, event, 'detail-not-ready');
+        } catch (error) {
+          if ([401, 403].includes(Number(error && error.status))) throw error;
+          enqueuePendingEvent(state, event, String(error && error.message || error));
+          deferRemaining = true;
+          console.warn('⚠️ [Battleboard] Auto-Battle event queued for retry | Discord=' + serverId +
+            ' | Battle=' + String(event && event.battle_id || 'unknown') +
+            ' | Error=' + String(error && error.message || error).slice(0, 180));
+        }
+      }
       state.eventCursor = {
         after: String(event.checked_at || state.eventCursor.after),
         afterBattleId: String(event.battle_id || state.eventCursor.afterBattleId || '0'),
@@ -373,5 +558,5 @@ function createBattleboardIntegration(deps = {}) {
 }
 module.exports = {
   createBattleboardIntegration,
-  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, deliveryKey, snapshotFingerprint, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup },
+  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce, snapshotFingerprint, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup },
 };
