@@ -237,23 +237,29 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
       totalKills: 10,
       totalDeaths: 2,
       battleUrl: 'https://example.test/battle/' + battleId,
-      payload: { files: [], content: 'report body for ' + battleId },
+      payload: { files: [Buffer.from('image-part-1'), Buffer.from('image-part-2')], content: 'report body for ' + battleId },
     }),
     formatFame: value => Number(value || 0).toLocaleString(),
   });
 
   try {
     await integration.tick();
-    assert.equal(sent.length, 1, 'the later ready Battle should send during the first poll');
+    assert.equal(sent.length, 2, 'the later ready Battle should send both report parts during the first poll');
     assert.equal(sent[0].nonce, deliveryNonce('1002', channelId, 1));
     assert.equal(sent[0].enforceNonce, true);
+    assert.match(sent[0].content, /Battle ID: 1002/);
+    assert.equal(sent[1].nonce, deliveryNonce('1002', channelId, 2));
+    assert.match(sent[1].content, /ส่วนที่ 2\/2.*Battle ID: 1002/);
     assert.equal(config.battleboardState.eventCursor.afterBattleId, '1002');
     assert.deepEqual(config.battleboardState.pendingEvents.map(entry => entry.battleId), ['1001']);
 
     integration.stop();
     await integration.tick();
-    assert.equal(sent.length, 2, 'the earlier Battle should send after its detail becomes ready');
-    assert.equal(sent[1].nonce, deliveryNonce('1001', channelId, 1));
+    assert.equal(sent.length, 4, 'the earlier Battle should send both parts after its detail becomes ready');
+    assert.equal(sent[2].nonce, deliveryNonce('1001', channelId, 1));
+    assert.match(sent[2].content, /Battle ID: 1001/);
+    assert.equal(sent[3].nonce, deliveryNonce('1001', channelId, 2));
+    assert.match(sent[3].content, /ส่วนที่ 2\/2.*Battle ID: 1001/);
     assert.equal(config.battleboardState.pendingEvents.length, 0);
     assert.equal(detailCalls.get('1001'), 2);
     assert.equal(detailCalls.get('1002'), 1);
