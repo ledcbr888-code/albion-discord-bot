@@ -54,16 +54,16 @@ test('matches a guild event when its detail guild index is incomplete', () => {
   assert.equal(targetGuildMatches({ targetGuild: 'PLAC' }, {}, event), true);
 });
 
-test('does not pool Fame across Guild routes that share one Discord channel', () => {
+test('checks each route threshold independently against total tracked Fame', () => {
   const routes = [
     { targetGuild: 'PLAC', channelId: '99999999999999999', minFrames: 100000 },
     { targetGuild: 'Psz', channelId: '99999999999999999', minFrames: 200000 },
   ];
   const report = {
-    totalFame: 206180,
+    totalFame: 150000,
     playerReportData: [
-      { displayName: 'PLAC-player', guild: 'PLAC', fame: 88102 },
-      { displayName: 'Psz-player', guild: 'Psz', fame: 118078 },
+      { displayName: 'tracked-player-1', guild: 'PLAC', fame: 80000 },
+      { displayName: 'tracked-player-2', guild: 'Psz', fame: 70000 },
     ],
   };
   const detail = {
@@ -80,12 +80,12 @@ test('does not pool Fame across Guild routes that share one Discord channel', ()
     minFame: check.minFame,
     eligible: check.eligible,
   })), [
-    { targetGuild: 'PLAC', totalFame: 88102, minFame: 100000, eligible: false },
-    { targetGuild: 'Psz', totalFame: 118078, minFame: 200000, eligible: false },
+    { targetGuild: 'PLAC', totalFame: 150000, minFame: 100000, eligible: true },
+    { targetGuild: 'Psz', totalFame: 150000, minFame: 200000, eligible: false },
   ]);
 });
 
-test('does not credit Crusader Kings route with Fame from tracked All In Fighting players', () => {
+test('checks both matching Guild routes against the tracked-player Fame total', () => {
   const routes = [
     { targetGuild: 'Crusader Kings', channelId: '99999999999999999', minFrames: 100000 },
     { targetGuild: 'All In Fighting', channelId: '99999999999999999', minFrames: 200000 },
@@ -106,8 +106,8 @@ test('does not credit Crusader Kings route with Fame from tracked All In Fightin
   };
 
   const checks = evaluateAutoBattleRoutes(routes, report, detail, {});
-  assert.equal(checks.find(check => check.targetGuild === 'Crusader Kings').totalFame, 0);
-  assert.equal(checks.find(check => check.targetGuild === 'Crusader Kings').eligible, false);
+  assert.equal(checks.find(check => check.targetGuild === 'Crusader Kings').totalFame, 3100000);
+  assert.equal(checks.find(check => check.targetGuild === 'Crusader Kings').eligible, true);
   assert.equal(checks.find(check => check.targetGuild === 'All In Fighting').totalFame, 3100000);
   assert.equal(checks.find(check => check.targetGuild === 'All In Fighting').eligible, true);
 });
