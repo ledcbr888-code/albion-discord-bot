@@ -131,10 +131,15 @@ function createTrackingBackupScheduler(options = {}) {
       return false;
     }
 
+    // Replace the queued payload with the newest state, but retain the first
+    // timer in this burst. Repeated saves must not postpone a backup forever.
+    const hadPending = Boolean(pending);
     pending = { snapshot: text, fingerprint };
-    schedule(failureCount
-      ? Math.min(retryMaxMs, retryBaseMs * (2 ** (failureCount - 1)))
-      : debounceMs);
+    if (!hadPending && inFlightFingerprint === null) {
+      schedule(failureCount
+        ? Math.min(retryMaxMs, retryBaseMs * (2 ** (failureCount - 1)))
+        : debounceMs);
+    }
     return true;
   }
 
