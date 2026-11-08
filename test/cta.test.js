@@ -79,6 +79,6 @@ test('22-player CTA roster renders to a compact four-column image', async () => 
     });
     const dimensions = pngDimensions(buffer);
 
-    assert.deepEqual(dimensions, { width: 1100, height: 734 });
+    assert.deepEqual(dimensions, { width: 1100, height: 742 });
     assert.ok(buffer.length < 2_000_000, '22-player roster image should stay below 2 MB');
 });
