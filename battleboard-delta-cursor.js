@@ -7,7 +7,7 @@ function validCursor(cursor) {
         cursor &&
         typeof cursor.after === 'string' &&
         !Number.isNaN(Date.parse(cursor.after)) &&
-        (!cursor.afterId || /^\\d+$/.test(String(cursor.afterId)))
+        (!cursor.afterId || /^\d+$/.test(String(cursor.afterId)))
     );
 }
 
@@ -16,7 +16,7 @@ function mergeBattleboardPendingItems({ items = [], nextCursor = null, matchesTa
     const pendingById = new Map();
     for (const item of Array.isArray(existingPending) ? existingPending : []) {
         const id = getBattleId(item);
-        if (!/^\\d+$/.test(id) || processed.has(id)) continue;
+        if (!/^\d+$/.test(id) || processed.has(id)) continue;
         pendingById.set(id, {
             id,
             firstSeenAt: Number(item.firstSeenAt) || Date.now(),
@@ -28,7 +28,7 @@ function mergeBattleboardPendingItems({ items = [], nextCursor = null, matchesTa
     const overflowItems = [];
     for (const item of matchingItems) {
         const id = getBattleId(item);
-        if (!/^\\d+$/.test(id) || processed.has(id) || pendingById.has(id)) continue;
+        if (!/^\d+$/.test(id) || processed.has(id) || pendingById.has(id)) continue;
         if (pendingById.size >= Math.max(1, Number(maxPending) || 1000)) {
             overflowItems.push(item);
             continue;
@@ -50,7 +50,7 @@ function mergeBattleboardPendingItems({ items = [], nextCursor = null, matchesTa
         shouldAdvance: canAdvance,
         cursor: canAdvance ? {
             after: String(nextCursor.after),
-            afterId: /^\\d+$/.test(String(nextCursor.afterId || '')) ? String(nextCursor.afterId) : null
+            afterId: /^\d+$/.test(String(nextCursor.afterId || '')) ? String(nextCursor.afterId) : null
         } : null
     };
 }
