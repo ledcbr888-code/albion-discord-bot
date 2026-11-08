@@ -7,7 +7,8 @@ const {
   __test: {
     normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds,
     targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce,
-    snapshotFingerprint, hasTrackedSnapshotChanged, timestampMs, formatThaiDuration, getBattleDelayMetrics, formatBattleDelayLines,
+    snapshotFingerprint, hasTrackedSnapshotChanged, timestampMs, formatThaiDuration, formatThaiTimestamp,
+    formatPreciseDuration, elapsedMsBetween, getBattleDelayMetrics, formatBattleDelayLines,
   },
 } = require('../battleboard-integration');
 
@@ -142,6 +143,19 @@ test('formats elapsed durations in Thai for seconds, minutes, hours, and days', 
   assert.equal(timestampMs('not-a-date'), null);
 });
 
+test('normalizes numeric timestamps and formats precise stage timing in Bangkok time', () => {
+  assert.equal(timestampMs(1793923200), 1793923200000);
+  assert.equal(timestampMs(1793923200000), 1793923200000);
+  assert.equal(timestampMs('1793923200'), 1793923200000);
+  assert.equal(formatPreciseDuration(0), '0 ms');
+  assert.equal(formatPreciseDuration(275), '275 ms');
+  assert.equal(formatPreciseDuration(1250), '1.25 วินาที');
+  assert.equal(formatThaiTimestamp('2026-11-08T00:16:26.196Z'),
+    '08/11/2026 07:16:26 น. (UTC 2026-11-08T00:16:26.196Z)');
+  assert.equal(elapsedMsBetween('2026-11-08T00:16:26.196Z', '2026-11-08T00:18:30.923Z'), 124727);
+  assert.equal(elapsedMsBetween('2026-11-08T00:18:30.923Z', '2026-11-08T00:16:26.196Z'), null);
+});
+
 test('calculates Battle-start-to-send and Battle-end-to-send delays separately', () => {
   const event = { battle_start_time: '2026-11-08T10:00:00.000Z' };
   const detail = {
@@ -196,15 +210,22 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
     {
       battle_id: '1001',
       battle_start_time: battleStartTime,
-      first_seen_at: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
-      checked_at: '2026-11-08T00:00:01.000Z',
+      first_seen_at: new Date(Date.now() - 35 * 60 * 1000).toISOString(),
+      checked_at: new Date(Date.now() - 34 * 60 * 1000).toISOString(),
       matches: [{ type: 'guild', id: 'guild-plac', name: 'PLAC' }],
     },
     {
       battle_id: '1002',
       battle_start_time: battleStartTime,
-      first_seen_at: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
-      checked_at: '2026-11-08T00:00:02.000Z',
+      first_seen_at: new Date(Date.now() - 35 * 60 * 1000).toISOString(),
+      checked_at: new Date(Date.now() - 34 * 60 * 1000 + 1000).toISOString(),
+      matches: [{ type: 'guild', id: 'guild-plac', name: 'PLAC' }],
+    },
+    {
+      battle_id: '1002',
+      battle_start_time: battleStartTime,
+      first_seen_at: new Date(Date.now() - 35 * 60 * 1000).toISOString(),
+      checked_at: new Date(Date.now() - 34 * 60 * 1000 + 2000).toISOString(),
       matches: [{ type: 'guild', id: 'guild-plac', name: 'PLAC' }],
     },
   ];
@@ -320,12 +341,27 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
     assert.match(sent[3].content, /ส่วนที่ 2\/2.*Battle ID: 1001/);
     assert.equal(config.battleboardState.pendingEvents.length, 0);
     assert.equal(detailCalls.get('1001'), 2);
-    assert.equal(detailCalls.get('1002'), 1);
+    assert.equal(detailCalls.get('1002'), 2);
+    assert.ok(capturedLogs.some(line => line.includes('รับ Events feed จาก Battleboard') && line.includes('API ใช้เวลา=')));
+    assert.ok(capturedLogs.some(line => line.includes('บอทได้รับ Battle Event') && line.includes('first_seen→checked_at=')));
+    assert.ok(capturedLogs.some(line => line.includes('รายละเอียด Battle พร้อมใช้งาน') && line.includes('API รวม')));
+    assert.ok(capturedLogs.some(line => line.includes('สร้างรายงาน/ไฟล์เสร็จ') && line.includes('จำนวนไฟล์=2')));
+    assert.ok(capturedLogs.some(line => line.includes('ตรวจ Fame/เกณฑ์เสร็จ') && line.includes('ผ่าน')));
+    assert.ok(capturedLogs.some(line => line.includes('สรุปเวลาแต่ละขั้นตอน') && line.includes('checked_at→บอทรับ=')));
+    assert.ok(capturedLogs.some(line => line.includes('ประมวลผล Battle ที่ค้างเสร็จแล้ว') && line.includes('Retry ทั้งหมด=1')));
+    assert.equal(capturedLogs.filter(line => line.includes('กำลังส่งรายงานส่วนที่') && line.includes('ไฟล์แนบ')).length, 4);
     assert.equal(capturedLogs.filter(line => line.includes('ส่งรายงานส่วนที่') && line.includes('เข้า Discord สำเร็จ')).length, 4);
+    assert.ok(capturedLogs.filter(line => line.includes('ส่งรายงานส่วนที่') && line.includes('เข้า Discord สำเร็จ'))
+      .every(line => line.includes('ใช้เวลาส่ง=')), 'each sent file should report its own send duration');
     assert.equal(capturedLogs.filter(line => line.includes('ส่งรายงานครบทุกส่วนเข้า Discord สำเร็จ')).length, 2);
+    assert.ok(capturedLogs.filter(line => line.includes('ส่งรายงานครบทุกส่วนเข้า Discord สำเร็จ'))
+      .every(line => line.includes('ใช้เวลาส่งรวม=')), 'each completed report should report total send duration');
     assert.equal(capturedLogs.filter(line => line.includes('ตั้งแต่ Battle เริ่มจนส่งรายงานครบ')).length, 2);
     assert.equal(capturedLogs.filter(line => line.includes('หลัง Battle จบจนส่งรายงานครบ')).length, 2);
     assert.ok(capturedLogs.some(line => line.includes('รายละเอียด Battle ยังไม่พร้อม จัดเข้าคิวรอข้อมูลแล้ว')));
+    assert.ok(capturedLogs.some(line => line.includes('เริ่มส่งรายงาน') && line.includes('Battle ID=1002')));
+    assert.ok(capturedLogs.some(line => line.includes('ข้ามรายงานนี้ เพราะมีบันทึกว่าส่งเข้า Discord สำเร็จแล้ว') && line.includes('Battle ID=1002')),
+      'a previously delivered event should state why it was skipped instead of silently continuing');
   } finally {
     if (integration) integration.stop();
     console.log = oldConsoleLog;
