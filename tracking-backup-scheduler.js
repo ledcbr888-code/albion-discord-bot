@@ -18,6 +18,26 @@ function fingerprintTrackingSnapshot(snapshot) {
   return createHash('sha256').update(JSON.stringify(fingerprintPayload)).digest('hex');
 }
 
+function createThrottledSuccessLogger(label, options = {}) {
+  const intervalMs = Math.max(1000, Number(options.intervalMs) || 15 * 60 * 1000);
+  const now = typeof options.now === 'function' ? options.now : Date.now;
+  const log = typeof options.log === 'function' ? options.log : console.log;
+  let lastLogAt = null;
+  let successesSinceLastLog = 0;
+
+  return function reportSuccess() {
+    successesSinceLastLog += 1;
+    const currentTime = now();
+    if (lastLogAt !== null && currentTime - lastLogAt < intervalMs) return;
+
+    const successCount = successesSinceLastLog;
+    successesSinceLastLog = 0;
+    lastLogAt = currentTime;
+    log('💾 [' + String(label || 'Backup') + '] สำรองข้อมูลสำเร็จ | รวม ' +
+      successCount + ' ครั้งตั้งแต่สรุปล่าสุด');
+  };
+}
+
 function createTrackingBackupScheduler(options = {}) {
   if (typeof options.write !== 'function') throw new TypeError('A backup write function is required.');
 
@@ -169,4 +189,4 @@ function createTrackingBackupScheduler(options = {}) {
   return { enqueue, flush, markSaved, stop, getStatus };
 }
 
-module.exports = { createTrackingBackupScheduler, fingerprintTrackingSnapshot };
+module.exports = { createTrackingBackupScheduler, fingerprintTrackingSnapshot, createThrottledSuccessLogger };
