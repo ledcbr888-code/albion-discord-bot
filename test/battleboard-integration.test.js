@@ -207,6 +207,13 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
       checked_at: '2026-11-08T00:00:02.000Z',
       matches: [{ type: 'guild', id: 'guild-plac', name: 'PLAC' }],
     },
+    {
+      battle_id: '1002',
+      battle_start_time: battleStartTime,
+      first_seen_at: new Date(Date.now() - 30 * 60 * 1000).toISOString(),
+      checked_at: '2026-11-08T00:00:03.000Z',
+      matches: [{ type: 'guild', id: 'guild-plac', name: 'PLAC' }],
+    },
   ];
   const config = {
     guilds: [{ id: 'guild-plac', name: 'PLAC' }],
@@ -320,7 +327,7 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
     assert.match(sent[3].content, /ส่วนที่ 2\/2.*Battle ID: 1001/);
     assert.equal(config.battleboardState.pendingEvents.length, 0);
     assert.equal(detailCalls.get('1001'), 2);
-    assert.equal(detailCalls.get('1002'), 1);
+    assert.equal(detailCalls.get('1002'), 2);
     assert.equal(capturedLogs.filter(line => line.includes('กำลังส่งรายงานส่วนที่') && line.includes('ไฟล์แนบ')).length, 4);
     assert.equal(capturedLogs.filter(line => line.includes('ส่งรายงานส่วนที่') && line.includes('เข้า Discord สำเร็จ')).length, 4);
     assert.ok(capturedLogs.filter(line => line.includes('ส่งรายงานส่วนที่') && line.includes('เข้า Discord สำเร็จ'))
@@ -332,8 +339,8 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
     assert.equal(capturedLogs.filter(line => line.includes('หลัง Battle จบจนส่งรายงานครบ')).length, 2);
     assert.ok(capturedLogs.some(line => line.includes('รายละเอียด Battle ยังไม่พร้อม จัดเข้าคิวรอข้อมูลแล้ว')));
     assert.ok(capturedLogs.some(line => line.includes('เริ่มส่งรายงาน') && line.includes('Battle ID=1002')));
-    assert.ok(capturedLogs.some(line => line.includes('ข้ามรายงานนี้ เพราะมีบันทึกว่าส่งเข้า Discord สำเร็จแล้ว') && line.includes('Battle ID=1002')) === false,
-      'the same event is not replayed in this fixture');
+    assert.ok(capturedLogs.some(line => line.includes('ข้ามรายงานนี้ เพราะมีบันทึกว่าส่งเข้า Discord สำเร็จแล้ว') && line.includes('Battle ID=1002')),
+      'a previously delivered event should state why it was skipped instead of silently continuing');
   } finally {
     if (integration) integration.stop();
     console.log = oldConsoleLog;
