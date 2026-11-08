@@ -115,7 +115,7 @@ test('checks both matching Guild routes against the tracked-player Fame total', 
 test('resolves an ID-only Auto-Battle route to its Guild name before checking tracked Fame', () => {
   const checks = evaluateAutoBattleRoutes(
     [{ targetGuildId: 'aif-id', channelId: '99999999999999999', minFrames: 200000 }],
-    { playerReportData: [{ displayName: 'AD03E', guild: 'All In Fighting', fame: 300000 }] },
+    { totalFame: 300000, playerReportData: [{ displayName: 'AD03E', guild: 'All In Fighting', fame: 300000 }] },
     { guilds: { 'aif-id': { name: 'All In Fighting' } } },
     {}
   );
