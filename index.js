@@ -1254,34 +1254,50 @@ async function fetchBattleboardRecentBattles(config, targetGuild, targetGuildId,
         return body;
     };
 
-    const cursor = tracker.battleboardCursor;
-    if (!cursor || !cursor.after || Number.isNaN(Date.parse(cursor.after))) {
+    let workingCursor = tracker.battleboardCursor && typeof tracker.battleboardCursor === 'object'
+        ? {
+            after: String(tracker.battleboardCursor.after || ''),
+            afterId: /^\\d+$/.test(String(tracker.battleboardCursor.afterId || ''))
+                ? String(tracker.battleboardCursor.afterId) : null
+        }
+        : null;
+
+    if (!workingCursor || !workingCursor.after || Number.isNaN(Date.parse(workingCursor.after))) {
         const bootstrap = await getUpdates({ mode: 'bootstrap' });
         const initial = bootstrap.cursor;
         if (!initial || !initial.after || Number.isNaN(Date.parse(initial.after))) {
             throw new Error('Battleboard Delta API returned an invalid bootstrap cursor');
         }
-        tracker.battleboardCursor = {
+        workingCursor = {
             after: String(initial.after),
-            afterId: /^\d+$/.test(String(initial.afterId || '')) ? String(initial.afterId) : null
+            afterId: /^\\d+$/.test(String(initial.afterId || '')) ? String(initial.afterId) : null
         };
+        tracker.battleboardCursor = workingCursor;
         tracker.battleboardCursorInitialized = true;
+        if (!Array.isArray(tracker.battleboardPendingBattles)) tracker.battleboardPendingBattles = [];
         saveData();
         console.log('✅ [Auto-Battle Delta] ตั้งต้น Cursor แล้ว | Guild=' +
             (targetGuild || targetGuildId || 'unknown') + ' | ไม่ดึงย้อนหลังเพื่อป้องกันรายงานเก่าซ้ำ');
         return [];
     }
 
+    // Initial baseline requests never replay the seven-day archive.
     if (options.baselineOnly === true) return [];
 
     const queueScopeKey = String(options.queueScopeKey || '');
     const pendingByScope = options.pendingByScope instanceof Map ? options.pendingByScope : new Map();
-    const existingPending = pendingByScope.get(queueScopeKey) || new Map();
-    let workingCursor = {
-        after: String(cursor.after),
-        afterId: /^\d+$/.test(String(cursor.afterId || '')) ? String(cursor.afterId) : null
-    };
+    const originalCursor = JSON.stringify(workingCursor);
+    const originalPending = Array.isArray(tracker.battleboardPendingBattles)
+        ? tracker.battleboardPendingBattles : [];
+    let pendingQueue = originalPending
+        .filter(item => /^\\d+$/.test(String(item?.id || '')))
+        .map(item => ({
+            id: String(item.id),
+            firstSeenAt: Number(item.firstSeenAt) || Date.now(),
+            source: String(item.source || 'BOSS BOT Battleboard Delta API')
+        }));
     let cursorChanged = false;
+    let pageBlockedByPendingLimit = false;
 
     for (let page = 0; page < BATTLEBOARD_DELTA_MAX_PAGES; page++) {
         const body = await getUpdates({
@@ -1296,48 +1312,44 @@ async function fetchBattleboardRecentBattles(config, targetGuild, targetGuildId,
             items: body.items,
             nextCursor: body.pagination?.nextCursor,
             matchesTarget: battle => battleboardBattleMatchesGuild(battle, targetGuild, targetGuildId),
-            processedIds: processedBattles
+            processedIds: processedBattles,
+            existingPending: pendingQueue,
+            maxPending: 1000
         });
-
-        if (decision.pendingItems.length) {
-            const nextPending = new Map();
-            for (const battle of decision.pendingItems) {
-                const id = String(battle?.id ?? battle?.Id ?? battle?.battleId ?? battle?.BattleId ?? '').trim();
-                if (!/^\d+$/.test(id)) continue;
-                const previous = existingPending.get(id);
-                const firstSeenText = battle?._battleboardFirstSeenAt || battle?.firstSeenAt || battle?.first_seen_at || battle?.startTime || '';
-                const firstSeenAt = Number(previous?.firstSeenAt) ||
-                    (Number.isFinite(Date.parse(firstSeenText)) ? Date.parse(firstSeenText) : Date.now());
-                nextPending.set(id, {
-                    firstSeenAt,
-                    source: 'BOSS BOT Battleboard Delta API'
-                });
-            }
-            for (const [id, metadata] of existingPending.entries()) {
-                if (!processedBattles.has(String(id)) && !nextPending.has(String(id))) nextPending.set(String(id), metadata);
-            }
-            pendingByScope.set(queueScopeKey, nextPending);
-            if (cursorChanged) {
-                tracker.battleboardCursor = workingCursor;
-                saveData();
-            }
-            console.log('🔄 [Auto-Battle Delta] พบไฟต์ที่ตรง Tracker=' + decision.pendingItems.length +
-                ' | Cursor จะค้างไว้จนกว่าจะจัดการไฟต์ในหน้านี้ครบ | Guild=' + (targetGuild || targetGuildId));
-            return [...nextPending.keys()];
+        pendingQueue = decision.pendingItems;
+        if (decision.overflowItems.length) {
+            pageBlockedByPendingLimit = true;
+            break;
         }
-
         if (!decision.shouldAdvance) break;
+
         workingCursor = decision.cursor;
         cursorChanged = true;
         if (body.pagination?.hasMore !== true) break;
     }
 
-    if (cursorChanged) {
-        tracker.battleboardCursor = workingCursor;
-        saveData();
+    // Persist the cursor and its pending queue together. If the process stops
+    // before this atomic tracking.json save, the old cursor simply replays the page.
+    tracker.battleboardCursor = workingCursor;
+    tracker.battleboardCursorInitialized = true;
+    tracker.battleboardPendingBattles = pendingQueue;
+    const pendingChanged = JSON.stringify(originalPending) !== JSON.stringify(pendingQueue);
+    if (cursorChanged || pendingChanged || JSON.stringify(tracker.battleboardCursor) !== originalCursor) saveData();
+
+    const pendingMap = new Map();
+    for (const item of pendingQueue) {
+        if (processedBattles.has(String(item.id))) continue;
+        pendingMap.set(String(item.id), {
+            firstSeenAt: Number(item.firstSeenAt) || Date.now(),
+            source: item.source || 'BOSS BOT Battleboard Delta API'
+        });
     }
-    pendingByScope.set(queueScopeKey, new Map());
-    return [];
+    pendingByScope.set(queueScopeKey, pendingMap);
+
+    if (pageBlockedByPendingLimit) {
+        console.warn('⚠️ [Auto-Battle Delta] Pending queue เต็ม 1,000 รายการ; จะหยุดเลื่อน Cursor ชั่วคราวจนกว่าจะประมวลผลคิวได้');
+    }
+    return [...pendingMap.keys()];
 }
 
 function normalizeBattleboardDetailForAutoBattle(rawDetail) {
