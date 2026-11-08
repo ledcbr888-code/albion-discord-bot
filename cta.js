@@ -18,15 +18,9 @@ const WEAPONS = {
     Heal: ['Hallowfall', 'Fallen', 'Exalted', 'Blight', 'WildStaff', 'Rampant', 'Forgebark', 'Redemption Staff', 'Holy Staff', 'Divine Staff', 'Lifetouch Staff', 'Great Holy Staff', 'Great Nature Staff', 'Nature Staff', 'Ironroot Staff']
 };
 const ROLE_ORDER = ['Tank', 'DPS', 'Support', 'Heal'];
+const MAX_CTA_PLAYERS = 20;
 const ROLE_LABELS = { Caller: '📣 Caller', Tank: '🛡️ Tank', DPS: '⚔️ DPS', Support: '🔮 Support', Heal: '💚 Heal' };
 const ROLE_LABELS_SHORT = { Caller: 'CALLER', Tank: 'TANK', DPS: 'DPS', Support: 'SUPPORT', Heal: 'HEALER' };
-
-const PRESETS = {
-    small: { label: 'Small Scale', desc: '1-2-8-2-2 = 15 คน', counts: { Tank: 2, DPS: 8, Support: 2, Heal: 2 } },
-    zvz: { label: 'ZvZ', desc: '1-4-10-3-2 = 19 คน', counts: { Tank: 4, DPS: 10, Support: 3, Heal: 2 } },
-    gank: { label: 'Gank', desc: '1-1-3-1-1 = 7 คน', counts: { Tank: 1, DPS: 3, Support: 1, Heal: 1 } },
-    ava: { label: 'AVA', desc: '1-3-12-3-3 = 22 คน', counts: { Tank: 3, DPS: 12, Support: 3, Heal: 3 } },
-};
 
 const sessions = new Map();
 const SESSION_TTL_MS = 30 * 60 * 1000;
@@ -246,7 +240,7 @@ const commandBuilders = [
             const value = String(hour).padStart(2, '0') + ':00';
             return { name: value + ' UTC', value };
         })))
-        .addIntegerOption(o => o.setName('max_players').setDescription('จำนวนผู้เล่นสูงสุดรวม Caller (1-22)').setRequired(true).setMinValue(1).setMaxValue(22)),
+        .addIntegerOption(o => o.setName('max_players').setDescription('จำนวนผู้เล่นสูงสุดรวม Caller (1-20)').setRequired(true).setMinValue(1).setMaxValue(MAX_CTA_PLAYERS)),
     new SlashCommandBuilder().setName('ctaup').setDescription('เรียกใช้ชุดแผน CTA ที่บันทึกไว้')
 ];
 
@@ -392,15 +386,6 @@ function buildCountRows(session) {
         return new ActionRowBuilder().addComponents(menu);
     });
 }
-function buildPresetRows(sessionId) {
-    const row1 = new ActionRowBuilder().addComponents(
-        new ButtonBuilder().setCustomId('cta:preset:' + sessionId + ':small').setLabel('⚔️ Small Scale (1-2-8-2-2)').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('cta:preset:' + sessionId + ':zvz').setLabel('🛡️ ZvZ (1-4-10-3-2)').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('cta:preset:' + sessionId + ':gank').setLabel('🗡️ Gank (1-1-3-1-1)').setStyle(ButtonStyle.Secondary),
-        new ButtonBuilder().setCustomId('cta:preset:' + sessionId + ':ava').setLabel('🏰 AVA').setStyle(ButtonStyle.Secondary)
-    );
-    return [row1];
-}
 function getMetaWarnings(counts, total, maxPlayers) {
     const warnings = [];
     const tank = Number(counts.Tank) || 0;
@@ -432,8 +417,7 @@ function countPanel(session) {
     const countRows = buildCountRows(session);
     const actionRow = new ActionRowBuilder().addComponents(
         new ButtonBuilder().setCustomId('cta:countnext:' + session.id).setLabel('ยืนยันตำแหน่งและเลือกอาวุธ').setStyle(ButtonStyle.Success),
-        new ButtonBuilder().setCustomId('cta:presetmenu:' + session.id).setLabel('เลือก Preset').setStyle(ButtonStyle.Primary),
-        new ButtonBuilder().setCustomId('cta:preset:' + session.id + ':clear').setLabel('ล้างจำนวน').setStyle(ButtonStyle.Secondary),
+        new ButtonBuilder().setCustomId('cta:clearcounts:' + session.id).setLabel('ล้างจำนวน').setStyle(ButtonStyle.Secondary),
         new ButtonBuilder().setCustomId('cta:cancel:' + session.id).setLabel('ยกเลิก').setStyle(ButtonStyle.Danger)
     );
     const detail = ['Caller', ...ROLE_ORDER].map(role => {
@@ -569,7 +553,7 @@ async function buildRosterSmallIconImage(event) {
     ensureCtaThaiFont(canvasLib);
     const { createCanvas, loadImage } = canvasLib;
     const slots = event.slots;
-    // Four columns keep a 22-player AVA roster compact instead of producing a tall image.
+    // Four columns keep a full 20-player roster compact instead of producing a tall image.
     const cols = 4;
     const width = 1100;
     const padding = 12;
@@ -763,7 +747,7 @@ async function weaponPanelPayload(session) {
     const description = [
         '📍 **ตำแหน่ง:** ' + (ROLE_LABELS[slot.role] || slot.role),
         '🗡️ **ช่อง:** ' + (session.slotIndex + 1) + '/' + session.slots.length + ' | **เลือกแล้ว:** ' + selected + '/' + session.slots.length,
-        roleSummary, '', '**สรุปช่อง**', ...slotSummary.slice(0, 22)
+        roleSummary, '', '**สรุปช่อง**', ...slotSummary.slice(0, 20)
     ].filter(Boolean);
     const infoEmbed = new EmbedBuilder().setColor(0xd99a3d).setTitle('🗡️ กำหนดอาวุธ — ' + (ROLE_LABELS[slot.role] || slot.role)).setDescription(description.join('\n').slice(0, 4000)).setFooter({ text: 'Fuzzy Search: blaz → Blazing, bracer → Battle Bracers' });
     let gridBuffer = null;
@@ -945,32 +929,9 @@ async function handleInteraction(interaction, deps) {
     }
     touchSession(session);
     if (!ownerOnly(interaction, session)) { await interaction.reply({ content: '🔒 เฉพาะผู้สร้าง', flags: MessageFlags.Ephemeral }); return true; }
-    if (action === 'presetmenu') {
+    if (action === 'clearcounts') {
         return queueSessionInteractionUpdate(session, interaction, async () => {
-            await interaction.editReply({
-                content: '📌 **เลือก Preset สำหรับ CTA**\nเลือกชุดตำแหน่งที่ต้องการ หรือกลับไปปรับจำนวนเอง',
-                components: [
-                    ...buildPresetRows(session.id),
-                    new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('cta:presetback:' + session.id).setLabel('กลับไปเลือกจำนวนเอง').setStyle(ButtonStyle.Secondary))
-                ]
-            });
-        }).then(() => true);
-    }
-    if (action === 'preset') {
-        const presetKey = parts[3];
-        if (presetKey !== 'clear' && !PRESETS[presetKey]) {
-            await interaction.reply({ content: '❌ ไม่พบ preset', flags: MessageFlags.Ephemeral });
-            return true;
-        }
-        return queueSessionInteractionUpdate(session, interaction, async () => {
-            session.counts = presetKey === 'clear'
-                ? { Tank: 0, DPS: 0, Support: 0, Heal: 0 }
-                : { ...PRESETS[presetKey].counts };
-            await interaction.editReply(countPanel(session));
-        }).then(() => true);
-    }
-    if (action === 'presetback') {
-        return queueSessionInteractionUpdate(session, interaction, async () => {
+            session.counts = { Tank: 0, DPS: 0, Support: 0, Heal: 0 };
             await interaction.editReply(countPanel(session));
         }).then(() => true);
     }
@@ -1115,8 +1076,13 @@ async function handleInteraction(interaction, deps) {
         const title = safeText(interaction.fields.getTextInputValue('title'), 80);
         if (!title) { await interaction.reply({ content: 'กรุณาระบุชื่อ CTA', flags: MessageFlags.Ephemeral }); return true; }
         if (!session.template) { await interaction.reply({ content: 'ไม่พบแผน', flags: MessageFlags.Ephemeral }); return true; }
-        session.title = title; session.maxPlayers = session.template.maxPlayers;
-        session.slots = session.template.slots.map(s => ({ role: s.role, weapon: s.weapon }));
+        const templateSlots = Array.isArray(session.template.slots) ? session.template.slots : [];
+        if (templateSlots.length > MAX_CTA_PLAYERS || Number(session.template.maxPlayers) > MAX_CTA_PLAYERS) {
+            await interaction.reply({ content: '❌ ชุดแผนนี้มีผู้เล่นเกินขีดจำกัดปัจจุบัน 20 คน กรุณาสร้างชุดแผนใหม่', flags: MessageFlags.Ephemeral });
+            return true;
+        }
+        session.title = title; session.maxPlayers = Math.min(MAX_CTA_PLAYERS, Number(session.template.maxPlayers) || templateSlots.length);
+        session.slots = templateSlots.map(s => ({ role: s.role, weapon: s.weapon }));
         await interaction.reply({ content: '🕒 เลือกเวลาเริ่ม UTC', components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId('cta:uptime:' + id).setPlaceholder('เลือกเวลา 00:00–23:00 UTC').addOptions(utcHourOptions()))], flags: MessageFlags.Ephemeral });
         return true;
     }
@@ -1178,4 +1144,4 @@ async function handleInteraction(interaction, deps) {
     return false;
 }
 
-module.exports = { commandBuilders, handleInteraction, WEAPONS, PRESETS, getMetaWarnings, buildWeaponGridImage, buildRosterSmallIconImage, startLifecycle: ensureLifecycleRunner };
+module.exports = { commandBuilders, handleInteraction, WEAPONS, getMetaWarnings, countPanel, buildWeaponGridImage, buildRosterSmallIconImage, startLifecycle: ensureLifecycleRunner };
