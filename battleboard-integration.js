@@ -442,6 +442,12 @@ function createBattleboardIntegration(deps = {}) {
       await sendPart(1, {
         content: alertText + '\n' + String(report.payload && report.payload.content || ''),
       });
+    } else {
+      console.log(
+        '⏭️ [Auto-Battle] ข้ามข้อความรายงาน 1/1 เพราะมีบันทึกว่าส่งสำเร็จแล้ว' +
+        ' | Battle ID=' + battleId +
+        (record.messageIds && record.messageIds[0] ? ' | Message ID=' + record.messageIds[0] : '')
+      );
     }
 
     record.status = 'sent';
