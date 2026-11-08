@@ -303,7 +303,20 @@ function createBattleboardIntegration(deps = {}) {
     const files = Array.isArray(report.payload && report.payload.files) ? report.payload.files : [];
     const partsTotal = Math.max(1, files.length);
     const record = prior || { key, battleId: String(battleId), channelId: String(channelId), status: 'sending', partsSent: 0 };
-    if (!prior) saveDelivery(state, record);
+    const reportAttemptStartedAtMs = Date.now();
+    if (!record.firstAttemptAt) record.firstAttemptAt = new Date(reportAttemptStartedAtMs).toISOString();
+    if (!Array.isArray(record.partResults)) record.partResults = [];
+    record.auditVersion = 2;
+    record.lastAttemptAt = new Date(reportAttemptStartedAtMs).toISOString();
+    saveDelivery(state, record);
+    console.log(
+      '📤 [Auto-Battle] เริ่มส่งรายงาน' +
+      ' | เซิร์ฟเวอร์=' + serverId +
+      ' | Battle ID=' + battleId +
+      ' | Guild=' + targets.join(', ') +
+      ' | ห้อง=' + channelId +
+      ' | จำนวนส่วน=' + partsTotal
+    );
     const routeSummary = (Array.isArray(routeChecks) ? routeChecks : [])
       .map(check => check.targetGuild + ': ' + formatFame(check.totalFame) + ' / ' + formatFame(check.minFame))
       .join(' | ');
@@ -318,6 +331,30 @@ function createBattleboardIntegration(deps = {}) {
       '🔗 Battle Link: <' + report.battleUrl + '>';
 
     const sendPart = async (partNumber, payload) => {
+      const partIndex = partNumber - 1;
+      const partStartedAtMs = Date.now();
+      const partStartedAt = new Date(partStartedAtMs).toISOString();
+      const previousPart = record.partResults[partIndex] || {};
+      const attemptNumber = Math.max(0, Number(previousPart.attempts) || 0) + 1;
+      const partLabel = files.length ? 'ไฟล์แนบ ' : 'ข้อความรายงาน ';
+      record.partResults[partIndex] = {
+        ...previousPart,
+        partNumber,
+        status: 'sending',
+        attempts: attemptNumber,
+        startedAt: partStartedAt,
+      };
+      record.lastAttemptAt = partStartedAt;
+      saveDelivery(state, record);
+      console.log(
+        '📤 [Auto-Battle] กำลังส่งรายงานส่วนที่ ' + partNumber + '/' + partsTotal +
+        ' | ' + partLabel + partNumber + '/' + partsTotal +
+        ' | เซิร์ฟเวอร์=' + serverId +
+        ' | Battle ID=' + battleId +
+        ' | Guild=' + targets.join(', ') +
+        ' | ห้อง=' + channelId +
+        ' | ครั้งที่=' + attemptNumber
+      );
       try {
         const sentMessage = await channel.send({
           ...payload,
@@ -325,7 +362,16 @@ function createBattleboardIntegration(deps = {}) {
           nonce: deliveryNonce(battleId, channelId, partNumber),
           enforceNonce: true,
         });
+        const sentAt = new Date();
+        const sendDurationMs = Math.max(0, sentAt.getTime() - partStartedAtMs);
         record.partsSent = Math.max(Number(record.partsSent) || 0, partNumber);
+        record.partResults[partIndex] = {
+          ...record.partResults[partIndex],
+          status: 'sent',
+          sentAt: sentAt.toISOString(),
+          sendDurationMs,
+          messageId: sentMessage && sentMessage.id ? String(sentMessage.id) : null,
+        };
         if (sentMessage && sentMessage.id) {
           if (!Array.isArray(record.messageIds)) record.messageIds = [];
           record.messageIds[partNumber - 1] = String(sentMessage.id);
@@ -333,20 +379,36 @@ function createBattleboardIntegration(deps = {}) {
         saveDelivery(state, record);
         console.log(
           '✅ [Auto-Battle] ส่งรายงานส่วนที่ ' + partNumber + '/' + partsTotal + ' เข้า Discord สำเร็จ' +
+          ' | ' + partLabel + partNumber + '/' + partsTotal +
           ' | เซิร์ฟเวอร์=' + serverId +
           ' | Battle ID=' + battleId +
           ' | Guild=' + targets.join(', ') +
           ' | ห้อง=' + channelId +
+          ' | ใช้เวลาส่ง=' + formatThaiDuration(sendDurationMs) +
           (sentMessage && sentMessage.id ? ' | Message ID=' + sentMessage.id : '')
         );
       } catch (error) {
+        const failedAt = new Date();
+        const sendDurationMs = Math.max(0, failedAt.getTime() - partStartedAtMs);
         const reason = String(error && error.message || error).slice(0, 220);
+        record.partResults[partIndex] = {
+          ...record.partResults[partIndex],
+          status: 'failed',
+          failedAt: failedAt.toISOString(),
+          sendDurationMs,
+          error: reason,
+        };
+        record.lastError = reason;
+        saveDelivery(state, record);
         console.error(
           '❌ [Auto-Battle] ส่งรายงานส่วนที่ ' + partNumber + '/' + partsTotal + ' ไม่สำเร็จ' +
+          ' | ' + partLabel + partNumber + '/' + partsTotal +
           ' | เซิร์ฟเวอร์=' + serverId +
           ' | Battle ID=' + battleId +
           ' | Guild=' + targets.join(', ') +
           ' | ห้อง=' + channelId +
+          ' | ครั้งที่=' + attemptNumber +
+          ' | ใช้เวลาก่อนล้มเหลว=' + formatThaiDuration(sendDurationMs) +
           ' | สาเหตุ=' + reason
         );
         throw error;
@@ -356,9 +418,22 @@ function createBattleboardIntegration(deps = {}) {
     if (files.length) {
       if ((Number(record.partsSent) || 0) < 1) {
         await sendPart(1, { content: alertText, files: [files[0]] });
+      } else {
+        console.log(
+          '⏭️ [Auto-Battle] ข้ามไฟล์แนบ 1/' + partsTotal + ' เพราะมีบันทึกว่าส่งสำเร็จแล้ว' +
+          ' | Battle ID=' + battleId +
+          (record.messageIds && record.messageIds[0] ? ' | Message ID=' + record.messageIds[0] : '')
+        );
       }
       for (let index = 1; index < files.length; index++) {
-        if ((Number(record.partsSent) || 0) >= index + 1) continue;
+        if ((Number(record.partsSent) || 0) >= index + 1) {
+          console.log(
+            '⏭️ [Auto-Battle] ข้ามไฟล์แนบ ' + (index + 1) + '/' + partsTotal + ' เพราะมีบันทึกว่าส่งสำเร็จแล้ว' +
+            ' | Battle ID=' + battleId +
+            (record.messageIds && record.messageIds[index] ? ' | Message ID=' + record.messageIds[index] : '')
+          );
+          continue;
+        }
         const continuationText =
           '📎 **BOSS BOT Battle Report – ส่วนที่ ' + (index + 1) + '/' + partsTotal + '** | Battle ID: ' + battleId;
         await sendPart(index + 1, { content: continuationText, files: [files[index]] });
@@ -372,6 +447,8 @@ function createBattleboardIntegration(deps = {}) {
     record.status = 'sent';
     record.partsTotal = partsTotal;
     record.sentAt = new Date().toISOString();
+    const totalSendDurationMs = Math.max(0, Date.parse(record.sentAt) - Date.parse(record.firstAttemptAt || record.sentAt));
+    record.totalSendDurationMs = totalSendDurationMs;
     saveDelivery(state, record);
     console.log(
       '✅ [Auto-Battle] ส่งรายงานครบทุกส่วนเข้า Discord สำเร็จ' +
@@ -379,7 +456,8 @@ function createBattleboardIntegration(deps = {}) {
       ' | Battle ID=' + battleId +
       ' | Guild=' + targets.join(', ') +
       ' | ห้อง=' + channelId +
-      ' | ส่งแล้ว=' + Math.min(Number(record.partsSent) || 0, partsTotal) + '/' + partsTotal + ' ส่วน'
+      ' | ส่งแล้ว=' + Math.min(Number(record.partsSent) || 0, partsTotal) + '/' + partsTotal + ' ส่วน' +
+      ' | ใช้เวลาส่งรวม=' + formatThaiDuration(totalSendDurationMs)
     );
     for (const line of formatBattleDelayLines(event, detail, record.sentAt)) {
       console.log('📊 [Auto-Battle] ' + line + ' | Battle ID=' + battleId);
@@ -400,7 +478,14 @@ function createBattleboardIntegration(deps = {}) {
     }
     const players = trackedPlayers(guildConfig);
     const guilds = trackedGuilds(guildConfig);
-    if (!players.length && !guilds.length) return true;
+    if (!players.length && !guilds.length) {
+      console.warn(
+        '⚠️ [Auto-Battle] ไม่สร้างรายงาน เพราะไม่มีรายชื่อ Guild/Player ที่ติดตาม' +
+        ' | เซิร์ฟเวอร์=' + serverId +
+        ' | Battle ID=' + battleId
+      );
+      return true;
+    }
     const report = await buildBattleReportPayload(battleId, [], {
       autoBattle: true, guildId: serverId, apiData: detail, trackedPlayers: players, trackedGuilds: guilds,
     });
@@ -415,7 +500,28 @@ function createBattleboardIntegration(deps = {}) {
     for (const [channelId, checks] of byChannel) {
       const key = deliveryKey(battleId, channelId);
       const prior = findDelivery(state, key);
-      if (prior && (prior.status === 'sent' || prior.status === 'below-threshold')) continue;
+      if (prior && prior.status === 'sent') {
+        console.log(
+          '⏭️ [Auto-Battle] ข้ามรายงานนี้ เพราะมีบันทึกว่าส่งเข้า Discord สำเร็จแล้ว ไม่ส่งซ้ำ' +
+          ' | เซิร์ฟเวอร์=' + serverId +
+          ' | Battle ID=' + battleId +
+          ' | ห้อง=' + channelId +
+          ' | ส่งแล้ว=' + Math.min(Number(prior.partsSent) || 0, Number(prior.partsTotal) || Number(prior.partsSent) || 0) +
+            '/' + (Number(prior.partsTotal) || 'ไม่ทราบ') + ' ส่วน' +
+          (prior.sentAt ? ' | เวลาที่ส่ง=' + prior.sentAt : '')
+        );
+        continue;
+      }
+      if (prior && prior.status === 'below-threshold') {
+        console.log(
+          '⏭️ [Auto-Battle] ข้ามรายงานนี้ เพราะเคยตรวจแล้วว่า Fame ต่ำกว่าเกณฑ์' +
+          ' | เซิร์ฟเวอร์=' + serverId +
+          ' | Battle ID=' + battleId +
+          ' | ห้อง=' + channelId +
+          ' | ตรวจล่าสุด=' + String(prior.checkedAt || 'ไม่ทราบเวลา')
+        );
+        continue;
+      }
 
       // Each Auto-Battle route is checked independently against the tracked-roster Fame total.
       // Sharing a Discord channel must not make every configured Guild label appear as qualified.
