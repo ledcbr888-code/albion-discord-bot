@@ -4,6 +4,7 @@ on:
   pull_request:
     paths:
       - 'index.js'
+      - 'cta.js'
       - 'battleboard-integration.js'
       - 'test/**'
       - '.github/workflows/battleboard-integration.yml'
@@ -12,6 +13,7 @@ on:
       - main
     paths:
       - 'index.js'
+      - 'cta.js'
       - 'battleboard-integration.js'
       - 'test/**'
       - '.github/workflows/battleboard-integration.yml'
@@ -24,10 +26,14 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 24
+      - name: Install CTA test dependencies
+        run: npm install --no-save --no-package-lock --ignore-scripts discord.js @napi-rs/canvas axios
       - name: Check JavaScript syntax
         run: |
           node --check index.js
           node --check battleboard-integration.js
+          node --check cta.js
           node --check test/battleboard-integration.test.js
+          node --check test/cta.test.js
       - name: Run isolated integration tests
-        run: node --test test/battleboard-integration.test.js
+        run: node --test test/*.test.js
