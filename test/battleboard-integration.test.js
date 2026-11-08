@@ -7,7 +7,8 @@ const {
   __test: {
     normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds,
     targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce,
-    snapshotFingerprint, hasTrackedSnapshotChanged, timestampMs, formatThaiDuration, getBattleDelayMetrics, formatBattleDelayLines,
+    snapshotFingerprint, hasTrackedSnapshotChanged, timestampMs, formatThaiDuration, formatThaiTimestamp,
+    elapsedMsBetween, getBattleDelayMetrics, formatBattleDelayLines,
   },
 } = require('../battleboard-integration');
 
@@ -140,6 +141,15 @@ test('formats elapsed durations in Thai for seconds, minutes, hours, and days', 
   assert.equal(formatThaiDuration(3661000), '1 ชั่วโมง 1 นาที 1 วินาที');
   assert.equal(formatThaiDuration(90061000), '1 วัน 1 ชั่วโมง 1 นาที 1 วินาที');
   assert.equal(timestampMs('not-a-date'), null);
+});
+
+test('formats UTC timestamps explicitly as Bangkok time and keeps the UTC instant visible', () => {
+  assert.equal(
+    formatThaiTimestamp('2026-11-08T00:16:26.196Z'),
+    '08/11/2569 07:16:26 น. (UTC 2026-11-08T00:16:26.196Z)'
+  );
+  assert.equal(elapsedMsBetween('2026-11-08T00:16:26.196Z', '2026-11-08T00:18:30.923Z'), 124727);
+  assert.equal(elapsedMsBetween('2026-11-08T00:18:30.923Z', '2026-11-08T00:16:26.196Z'), null);
 });
 
 test('calculates Battle-start-to-send and Battle-end-to-send delays separately', () => {
@@ -321,6 +331,14 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
     assert.equal(config.battleboardState.pendingEvents.length, 0);
     assert.equal(detailCalls.get('1001'), 2);
     assert.equal(detailCalls.get('1002'), 1);
+    assert.ok(capturedLogs.some(line => line.includes('รับ Events feed จาก Battleboard') && line.includes('API ใช้เวลา=')));
+    assert.ok(capturedLogs.some(line => line.includes('บอทได้รับ Battle Event') && line.includes('first_seen→บอทรับ=')));
+    assert.ok(capturedLogs.some(line => line.includes('รายละเอียด Battle พร้อมใช้งาน') && line.includes('API รวม')));
+    assert.ok(capturedLogs.some(line => line.includes('สร้างรายงาน/ไฟล์เสร็จ') && line.includes('ใช้เวลา=')));
+    assert.ok(capturedLogs.some(line => line.includes('ตรวจ Fame/เกณฑ์เสร็จ') && line.includes('ผ่าน')));
+    assert.ok(capturedLogs.some(line => line.includes('ส่งรายงานส่วนที่') && line.includes('Discord API ใช้เวลา=')));
+    assert.ok(capturedLogs.some(line => line.includes('สรุปเวลาแต่ละขั้นตอน') && line.includes('บอทได้รับ Event→ส่งครบ=')));
+    assert.ok(capturedLogs.some(line => line.includes('ประมวลผล Battle ที่ค้างเสร็จแล้ว') && line.includes('Retry ทั้งหมด=1')));
     assert.equal(capturedLogs.filter(line => line.includes('ส่งรายงานส่วนที่') && line.includes('เข้า Discord สำเร็จ')).length, 4);
     assert.equal(capturedLogs.filter(line => line.includes('ส่งรายงานครบทุกส่วนเข้า Discord สำเร็จ')).length, 2);
     assert.equal(capturedLogs.filter(line => line.includes('ตั้งแต่ Battle เริ่มจนส่งรายงานครบ')).length, 2);
