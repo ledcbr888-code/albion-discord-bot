@@ -113,8 +113,6 @@ const SUPABASE_TABLE = String(process.env.SUPABASE_TABLE || 'bot_state').trim();
 const SUPABASE_ROW_ID = String(process.env.SUPABASE_ROW_ID || 'albion-discord-bot').trim();
 const SUPABASE_API = SUPABASE_URL ? `${SUPABASE_URL}/rest/v1/${encodeURIComponent(SUPABASE_TABLE)}` : '';
 let supabasePersistenceReady = false;
-let supabaseSaveQueue = Promise.resolve();
-let githubSaveQueue = Promise.resolve();
 let githubDataSha = null;
 
 let githubPersistenceReady = false;
