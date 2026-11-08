@@ -251,6 +251,7 @@ function createBattleboardIntegration(deps = {}) {
       .join(' | ');
     const alertText =
       '🚨 **BOSS BOT Battleboard Alert!** ตรวจพบไฟต์ใหม่ของ **' + targets.join(', ') + '**\n' +
+      '🆔 Battle ID: ' + battleId + '\n' +
       '💰 Fame รวมของผู้ที่ติดตาม: ' + formatFame(report.totalFame) + '\n' +
       (routeSummary ? '🎯 Fame ตามเงื่อนไขแต่ละ Guild: ' + routeSummary + '\n' : '') +
       '⚔️ Kills: ' + Number(report.totalKills || 0).toLocaleString() + '\n' +
@@ -311,14 +312,16 @@ function createBattleboardIntegration(deps = {}) {
     saveDelivery(state, record);
     console.log('✅ [Battleboard] Report delivered | Discord=' + serverId + ' | Battle=' + battleId + ' | Channel=' + channelId);
   }
-  async function processEvent(serverId, guildConfig, state, event) {
+  async function processEvent(serverId, guildConfig, state, event, options = {}) {
     const battleId = String(event && event.battle_id || '').trim();
     if (!/^\d+$/.test(battleId)) return true;
     const detailResponse = await fetchDetail(battleId);
     // A missing detail may be a short upstream delay; keep it pending instead of dropping it.
     if (Number(detailResponse.status) === 404) return false;
     if (detailResponse.ready !== true || !detailResponse.detail || Number(detailResponse.detailSchemaVersion || 0) < 4) {
-      console.log('⏳ [Battleboard] Detail pending; retrying | Discord=' + serverId + ' | Battle=' + battleId);
+      if (options.quietPending !== true) {
+        console.log('⏳ [Battleboard] Detail pending; retrying | Discord=' + serverId + ' | Battle=' + battleId);
+      }
       return false;
     }
     const detail = detailResponse.detail;
@@ -433,7 +436,7 @@ function createBattleboardIntegration(deps = {}) {
       entry.attempts = Math.max(0, Number(entry.attempts) || 0) + 1;
       entry.lastAttemptAt = new Date().toISOString();
       try {
-        const complete = await processEvent(serverId, guildConfig, state, entry.event);
+        const complete = await processEvent(serverId, guildConfig, state, entry.event, { quietPending: true });
         if (complete) {
           removePendingEvent(state, entry.battleId);
         } else {
