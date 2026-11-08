@@ -135,7 +135,7 @@ function timestampMs(value) {
   }
   const raw = String(value == null ? '' : value).trim();
   if (!raw) return null;
-  if (/^\d{10,13}$/.test(raw)) {
+  if (/^(?:\d{10}|\d{13})$/.test(raw)) {
     const numeric = Number(raw);
     const normalized = numeric < 1e12 ? numeric * 1000 : numeric;
     return Number.isFinite(normalized) && normalized > 0 ? normalized : null;
