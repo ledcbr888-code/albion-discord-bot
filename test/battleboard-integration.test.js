@@ -498,3 +498,52 @@ test('a newer snapshot arriving during a write supersedes older pending work', a
     scheduler.stop();
   }
 });
+
+
+test('continuous save activity does not postpone the first scheduled backup', async () => {
+  const writes = [];
+  const scheduler = createTrackingBackupScheduler({
+    debounceMs: 25,
+    minIntervalMs: 0,
+    write: async snapshot => { writes.push(JSON.parse(snapshot).value); },
+  });
+  try {
+    for (let value = 1; value <= 4; value++) {
+      scheduler.enqueue(JSON.stringify({ value }));
+      await wait(4);
+    }
+    await wait(15);
+    assert.deepEqual(writes, [4], 'the first timer should flush the newest snapshot without waiting for a quiet period');
+  } finally {
+    scheduler.stop();
+  }
+});
+
+test('frequent updates do not postpone a scheduled retry after a failed backup', async () => {
+  let attempts = 0;
+  const writes = [];
+  const scheduler = createTrackingBackupScheduler({
+    debounceMs: 1,
+    minIntervalMs: 0,
+    retryBaseMs: 30,
+    retryMaxMs: 30,
+    write: async snapshot => {
+      attempts++;
+      writes.push(JSON.parse(snapshot).value);
+      if (attempts === 1) throw new Error('offline');
+    },
+  });
+  try {
+    scheduler.enqueue(JSON.stringify({ value: 'initial' }));
+    await wait(8);
+    for (let value = 1; value <= 5; value++) {
+      scheduler.enqueue(JSON.stringify({ value }));
+      await wait(4);
+    }
+    await wait(22);
+    assert.equal(attempts, 2, 'the retry timer should not be reset by each subsequent save');
+    assert.deepEqual(writes, ['initial', 5]);
+  } finally {
+    scheduler.stop();
+  }
+});
