@@ -1,10 +1,14 @@
 'use strict';
+const { createHash } = require('node:crypto');
 const POLL_MS = 30000;
 const TIMEOUT_MS = 8000;
 const SNAPSHOT_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 const RETRY_BASE_MS = 30 * 1000;
 const RETRY_MAX_MS = 5 * 60 * 1000;
 const MAX_DELIVERIES = 2000;
+const MAX_PENDING_EVENTS = 2000;
+const MAX_PENDING_RETRIES_PER_TICK = 10;
+const PENDING_EVENT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 function normalizeName(value) {
   return String(value == null ? '' : value).normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
 }
@@ -92,6 +96,11 @@ function evaluateAutoBattleRoutes(routes, report, detail, event) {
   });
 }
 function deliveryKey(battleId, channelId) { return String(battleId) + ':' + String(channelId); }
+function deliveryNonce(battleId, channelId, partNumber) {
+  return createHash('sha256')
+    .update(String(battleId) + ':' + String(channelId) + ':' + String(Number(partNumber) || 1))
+    .digest('hex').slice(0, 24);
+}
 function snapshotFingerprint(items) {
   return JSON.stringify((Array.isArray(items) ? items : []).map(item => [
     String(item && item.type || ''),
@@ -164,6 +173,7 @@ function createBattleboardIntegration(deps = {}) {
   function getState(config) {
     if (!config.battleboardState || typeof config.battleboardState !== 'object') config.battleboardState = {};
     if (!Array.isArray(config.battleboardState.delivered)) config.battleboardState.delivered = [];
+    if (!Array.isArray(config.battleboardState.pendingEvents)) config.battleboardState.pendingEvents = [];
     return config.battleboardState;
   }
   function findDelivery(state, key) { return state.delivered.find(item => item && item.key === key) || null; }
@@ -249,24 +259,50 @@ function createBattleboardIntegration(deps = {}) {
       '🔗 Battle Link: <' + report.battleUrl + '>';
     if (files.length) {
       if ((Number(record.partsSent) || 0) < 1) {
-        await channel.send({ content: alertText, files: [files[0]], allowedMentions: { parse: [] } });
+        const sentMessage = await channel.send({
+          content: alertText,
+          files: [files[0]],
+          allowedMentions: { parse: [] },
+          nonce: deliveryNonce(battleId, channelId, 1),
+          enforceNonce: true,
+        });
         record.partsSent = 1;
+        if (sentMessage && sentMessage.id) {
+          if (!Array.isArray(record.messageIds)) record.messageIds = [];
+          record.messageIds[0] = String(sentMessage.id);
+        }
         saveDelivery(state, record);
       }
       for (let index = 1; index < files.length; index++) {
         if ((Number(record.partsSent) || 0) >= index + 1) continue;
         const continuationText =
           '📎 **BOSS BOT Battle Report – ส่วนที่ ' + (index + 1) + '/' + partsTotal + '** | Battle ID: ' + battleId;
-        await channel.send({ content: continuationText, files: [files[index]], allowedMentions: { parse: [] } });
+        const sentMessage = await channel.send({
+          content: continuationText,
+          files: [files[index]],
+          allowedMentions: { parse: [] },
+          nonce: deliveryNonce(battleId, channelId, index + 1),
+          enforceNonce: true,
+        });
         record.partsSent = index + 1;
+        if (sentMessage && sentMessage.id) {
+          if (!Array.isArray(record.messageIds)) record.messageIds = [];
+          record.messageIds[index] = String(sentMessage.id);
+        }
         saveDelivery(state, record);
       }
     } else if ((Number(record.partsSent) || 0) < 1) {
-      await channel.send({
+      const sentMessage = await channel.send({
         content: alertText + '\n' + String(report.payload && report.payload.content || ''),
         allowedMentions: { parse: [] },
+        nonce: deliveryNonce(battleId, channelId, 1),
+        enforceNonce: true,
       });
       record.partsSent = 1;
+      if (sentMessage && sentMessage.id) {
+        if (!Array.isArray(record.messageIds)) record.messageIds = [];
+        record.messageIds[0] = String(sentMessage.id);
+      }
       saveDelivery(state, record);
     }
     record.status = 'sent';
@@ -279,7 +315,8 @@ function createBattleboardIntegration(deps = {}) {
     const battleId = String(event && event.battle_id || '').trim();
     if (!/^\d+$/.test(battleId)) return true;
     const detailResponse = await fetchDetail(battleId);
-    if (Number(detailResponse.status) === 404) return true;
+    // A missing detail may be a short upstream delay; keep it pending instead of dropping it.
+    if (Number(detailResponse.status) === 404) return false;
     if (detailResponse.ready !== true || !detailResponse.detail || Number(detailResponse.detailSchemaVersion || 0) < 4) {
       console.log('⏳ [Battleboard] Detail pending; retrying | Discord=' + serverId + ' | Battle=' + battleId);
       return false;
@@ -335,6 +372,81 @@ function createBattleboardIntegration(deps = {}) {
     }
     return true;
   }
+  function enqueuePendingEvent(state, event, reason) {
+    const battleId = String(event && event.battle_id || '').trim();
+    if (!/^\d+$/.test(battleId)) return;
+    if (!Array.isArray(state.pendingEvents)) state.pendingEvents = [];
+    const existing = state.pendingEvents.find(item => item && String(item.battleId) === battleId);
+    if (existing) {
+      existing.event = event;
+      existing.lastError = String(reason || existing.lastError || '').slice(0, 180);
+      return;
+    }
+    state.pendingEvents.push({
+      battleId,
+      event,
+      queuedAt: new Date().toISOString(),
+      attempts: 0,
+      lastError: String(reason || '').slice(0, 180),
+    });
+    if (state.pendingEvents.length > MAX_PENDING_EVENTS) {
+      const dropped = state.pendingEvents.splice(0, state.pendingEvents.length - MAX_PENDING_EVENTS);
+      console.warn('⚠️ [Battleboard] Pending Auto-Battle queue cap reached; oldest item(s) discarded | Discord=' +
+        (state.guildId || 'unknown') + ' | Dropped=' + dropped.length);
+    }
+    persist();
+  }
+  function removePendingEvent(state, battleId) {
+    if (!Array.isArray(state.pendingEvents)) return;
+    state.pendingEvents = state.pendingEvents.filter(item => String(item && item.battleId || '') !== String(battleId));
+    persist();
+  }
+  function rotatePendingEvent(state, entry) {
+    if (!Array.isArray(state.pendingEvents)) state.pendingEvents = [];
+    state.pendingEvents = state.pendingEvents.filter(item => item !== entry);
+    state.pendingEvents.push(entry);
+    persist();
+  }
+  async function retryPendingEvents(serverId, guildConfig, state) {
+    if (!Array.isArray(state.pendingEvents) || !state.pendingEvents.length) return;
+    const now = Date.now();
+    const retained = [];
+    let expired = 0;
+    for (const entry of state.pendingEvents) {
+      if (!entry || !entry.event || !/^\d+$/.test(String(entry.battleId || ''))) continue;
+      const queuedAt = Date.parse(entry.queuedAt || '');
+      if (Number.isFinite(queuedAt) && now - queuedAt > PENDING_EVENT_MAX_AGE_MS) {
+        expired++;
+        continue;
+      }
+      retained.push(entry);
+    }
+    state.pendingEvents = retained;
+    if (expired) {
+      console.warn('⚠️ [Battleboard] Expired pending Auto-Battle detail(s) after 24h | Discord=' +
+        serverId + ' | Count=' + expired);
+      persist();
+    }
+    const candidates = state.pendingEvents.slice(0, MAX_PENDING_RETRIES_PER_TICK);
+    for (const entry of candidates) {
+      if (!state.pendingEvents.includes(entry)) continue;
+      entry.attempts = Math.max(0, Number(entry.attempts) || 0) + 1;
+      entry.lastAttemptAt = new Date().toISOString();
+      try {
+        const complete = await processEvent(serverId, guildConfig, state, entry.event);
+        if (complete) {
+          removePendingEvent(state, entry.battleId);
+        } else {
+          rotatePendingEvent(state, entry);
+        }
+      } catch (error) {
+        entry.lastError = String(error && error.message || error).slice(0, 180);
+        rotatePendingEvent(state, entry);
+        console.warn('⚠️ [Battleboard] Pending Auto-Battle retry failed | Discord=' + serverId +
+          ' | Battle=' + entry.battleId + ' | Error=' + entry.lastError);
+      }
+    }
+  }
   async function pollServer(serverId, guildConfig) {
     if (!validDiscordServerId(serverId) || !guildConfig) return;
     const state = getState(guildConfig);
@@ -355,10 +467,30 @@ function createBattleboardIntegration(deps = {}) {
       await initialiseCursor(serverId, state);
       return;
     }
+
+    // Retry old detail-pending events in a bounded batch, but never let an unavailable
+    // Battle detail stop the cursor from advancing over newer Auto-Battle events.
+    await retryPendingEvents(serverId, guildConfig, state);
+
     const result = await request(eventsPath(serverId, state.eventCursor, 100));
     const events = Array.isArray(result.items) ? result.items : [];
+    let deferRemaining = false;
     for (const event of events) {
-      if (!(await processEvent(serverId, guildConfig, state, event))) return;
+      if (deferRemaining) {
+        enqueuePendingEvent(state, event, 'deferred-after-transient-error');
+      } else {
+        try {
+          const complete = await processEvent(serverId, guildConfig, state, event);
+          if (!complete) enqueuePendingEvent(state, event, 'detail-not-ready');
+        } catch (error) {
+          if ([401, 403].includes(Number(error && error.status))) throw error;
+          enqueuePendingEvent(state, event, String(error && error.message || error));
+          deferRemaining = true;
+          console.warn('⚠️ [Battleboard] Auto-Battle event queued for retry | Discord=' + serverId +
+            ' | Battle=' + String(event && event.battle_id || 'unknown') +
+            ' | Error=' + String(error && error.message || error).slice(0, 180));
+        }
+      }
       state.eventCursor = {
         after: String(event.checked_at || state.eventCursor.after),
         afterBattleId: String(event.battle_id || state.eventCursor.afterBattleId || '0'),
@@ -423,5 +555,5 @@ function createBattleboardIntegration(deps = {}) {
 }
 module.exports = {
   createBattleboardIntegration,
-  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, snapshotFingerprint, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup },
+  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce, snapshotFingerprint, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup },
 };
