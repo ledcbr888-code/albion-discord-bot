@@ -568,14 +568,91 @@ function createBattleboardIntegration(deps = {}) {
   async function processEvent(serverId, guildConfig, state, event, options = {}) {
     const battleId = String(event && event.battle_id || '').trim();
     if (!/^\d+$/.test(battleId)) return true;
-    const detailResponse = await fetchDetail(battleId);
-    // A missing detail may be a short upstream delay; keep it pending instead of dropping it.
-    if (Number(detailResponse.status) === 404) return false;
-    if (detailResponse.ready !== true || !detailResponse.detail || Number(detailResponse.detailSchemaVersion || 0) < 4) return false;
+
+    const pendingEntry = options.pendingEntry || null;
+    const retryAttempt = pendingEntry ? Math.max(1, Number(pendingEntry.attempts) || 1) : 0;
+    const shouldLogRetry = !pendingEntry || retryAttempt === 1 || retryAttempt % 5 === 0;
+    const botReceivedAt = event.__botReceivedAt ||
+      (pendingEntry && pendingEntry.firstBotReceivedAt) || null;
+    const sourceFirstSeenAt = event.first_seen_at || event.firstSeenAt || null;
+    const websiteEventAt = event.checked_at || null;
+
+    if (event.__eventReceivedLog !== true) {
+      event.__eventReceivedLog = true;
+      console.log(
+        '📥 [Auto-Battle] บอทได้รับ Battle Event | เซิร์ฟเวอร์=' + serverId +
+        ' | Battle ID=' + battleId +
+        ' | Battleboard first_seen_at=' + formatThaiTimestamp(sourceFirstSeenAt) +
+        ' | เว็บสร้าง Event (checked_at)=' + formatThaiTimestamp(websiteEventAt) +
+        ' | บอทรับ Event=' + formatThaiTimestamp(botReceivedAt) +
+        ' | first_seen→checked_at=' + formatElapsedMs(elapsedMsBetween(sourceFirstSeenAt, websiteEventAt)) +
+        ' | checked_at→บอทรับ=' + formatElapsedMs(elapsedMsBetween(websiteEventAt, botReceivedAt)) +
+        ' | Events API=' + formatElapsedMs(event.__eventsApiMs)
+      );
+    }
+
+    const detailFetchStartedAtMs = Date.now();
+    let detailResponse;
+    try {
+      detailResponse = await fetchDetail(battleId);
+    } catch (error) {
+      const detailFetchMs = Date.now() - detailFetchStartedAtMs;
+      event.__detailFetchCount = (Number(event.__detailFetchCount) || 0) + 1;
+      event.__detailFetchTotalMs = (Number(event.__detailFetchTotalMs) || 0) + detailFetchMs;
+      if (error && typeof error === 'object') {
+        error.autoBattleStage = 'ดึงรายละเอียด Battle API';
+        error.autoBattleStageMs = detailFetchMs;
+      }
+      console.error(
+        '❌ [Auto-Battle] ดึงรายละเอียด Battle ไม่สำเร็จ | เซิร์ฟเวอร์=' + serverId +
+        ' | Battle ID=' + battleId +
+        ' | Retry=' + retryAttempt +
+        ' | API ใช้เวลา=' + formatPreciseDuration(detailFetchMs) +
+        ' | สาเหตุ=' + String(error && error.message || error).slice(0, 180)
+      );
+      throw error;
+    }
+    const detailFetchMs = Date.now() - detailFetchStartedAtMs;
+    event.__detailFetchCount = (Number(event.__detailFetchCount) || 0) + 1;
+    event.__detailFetchTotalMs = (Number(event.__detailFetchTotalMs) || 0) + detailFetchMs;
+
+    // A missing or incomplete detail stays pending and is retried; it is never reported as a sent Battle.
+    if (Number(detailResponse.status) === 404 || detailResponse.ready !== true ||
+        !detailResponse.detail || Number(detailResponse.detailSchemaVersion || 0) < 4) {
+      if (shouldLogRetry) {
+        console.warn(
+          '⏳ [Auto-Battle] รายละเอียด Battle ยังไม่พร้อม | เซิร์ฟเวอร์=' + serverId +
+          ' | Battle ID=' + battleId +
+          ' | ผล API=' + (Number(detailResponse.status) === 404 ? 'HTTP 404' : 'HTTP response แต่ข้อมูลยังไม่พร้อม') +
+          ' | API ครั้งนี้=' + formatPreciseDuration(detailFetchMs) +
+          ' | API รวม ' + event.__detailFetchCount + ' ครั้ง=' + formatPreciseDuration(event.__detailFetchTotalMs) +
+          ' | บอทรอมาแล้ว=' + formatElapsedMs(elapsedMsBetween(botReceivedAt, new Date())) +
+          (pendingEntry ? ' | อยู่ในคิว=' + formatElapsedMs(elapsedMsBetween(pendingEntry.queuedAt, new Date())) : '')
+        );
+      }
+      return false;
+    }
+
     const detail = detailResponse.detail;
+    const detailReadyAt = new Date().toISOString();
+    event.__detailReadyAt = event.__detailReadyAt || detailReadyAt;
+    console.log(
+      '✅ [Auto-Battle] รายละเอียด Battle พร้อมใช้งาน | เซิร์ฟเวอร์=' + serverId +
+      ' | Battle ID=' + battleId +
+      ' | API ครั้งนี้=' + formatPreciseDuration(detailFetchMs) +
+      ' | API รวม ' + event.__detailFetchCount + ' ครั้ง=' + formatPreciseDuration(event.__detailFetchTotalMs) +
+      ' | เวลาตั้งแต่บอทรับ Event=' + formatElapsedMs(elapsedMsBetween(botReceivedAt, event.__detailReadyAt)) +
+      (pendingEntry ? ' | อยู่ในคิวก่อนพร้อม=' + formatElapsedMs(elapsedMsBetween(pendingEntry.queuedAt, event.__detailReadyAt)) : '')
+    );
+
+    const routeMatchStartedAtMs = Date.now();
     const routes = getRoutes(guildConfig, detail, event);
+    const routeMatchMs = Date.now() - routeMatchStartedAtMs;
     if (!routes.length) {
-      console.log('ℹ️ [Auto-Battle] Battle นี้ไม่ตรงกับกิลด์หรือห้องรายงานที่ตั้งค่าไว้ | เซิร์ฟเวอร์=' + serverId + ' | Battle ID=' + battleId);
+      console.log('ℹ️ [Auto-Battle] Battle นี้ไม่ตรงกับกิลด์หรือห้องรายงานที่ตั้งค่าไว้ | เซิร์ฟเวอร์=' +
+        serverId + ' | Battle ID=' + battleId +
+        ' | Detail API=' + formatPreciseDuration(event.__detailFetchTotalMs) +
+        ' | ตรวจ Route=' + formatPreciseDuration(routeMatchMs));
       return true;
     }
     const players = trackedPlayers(guildConfig);
@@ -584,14 +661,43 @@ function createBattleboardIntegration(deps = {}) {
       console.warn(
         '⚠️ [Auto-Battle] ไม่สร้างรายงาน เพราะไม่มีรายชื่อ Guild/Player ที่ติดตาม' +
         ' | เซิร์ฟเวอร์=' + serverId +
-        ' | Battle ID=' + battleId
+        ' | Battle ID=' + battleId +
+        ' | Detail API=' + formatPreciseDuration(event.__detailFetchTotalMs) +
+        ' | ตรวจ Route=' + formatPreciseDuration(routeMatchMs)
       );
       return true;
     }
-    const report = await buildBattleReportPayload(battleId, [], {
-      autoBattle: true, guildId: serverId, apiData: detail, trackedPlayers: players, trackedGuilds: guilds,
-    });
+
+    const reportBuildStartedAtMs = Date.now();
+    let report;
+    try {
+      report = await buildBattleReportPayload(battleId, [], {
+        autoBattle: true, guildId: serverId, apiData: detail, trackedPlayers: players, trackedGuilds: guilds,
+      });
+    } catch (error) {
+      const reportBuildMs = Date.now() - reportBuildStartedAtMs;
+      if (error && typeof error === 'object') {
+        error.autoBattleStage = 'สร้างรายงาน/ไฟล์';
+        error.autoBattleStageMs = reportBuildMs;
+      }
+      console.error('❌ [Auto-Battle] สร้างรายงาน/ไฟล์ไม่สำเร็จ | Battle ID=' + battleId +
+        ' | ใช้เวลา=' + formatPreciseDuration(reportBuildMs) +
+        ' | สาเหตุ=' + String(error && error.message || error).slice(0, 180));
+      throw error;
+    }
+    const reportBuildMs = Date.now() - reportBuildStartedAtMs;
+    console.log('🛠️ [Auto-Battle] สร้างรายงาน/ไฟล์เสร็จ | Battle ID=' + battleId +
+      ' | จำนวนไฟล์=' + (Array.isArray(report.payload && report.payload.files) ? report.payload.files.length : 0) +
+      ' | ใช้เวลา=' + formatPreciseDuration(reportBuildMs));
+
+    const fameCheckStartedAtMs = Date.now();
     const routeChecks = evaluateAutoBattleRoutes(routes, report, detail, event);
+    const fameCheckMs = Date.now() - fameCheckStartedAtMs;
+    console.log('💰 [Auto-Battle] ตรวจ Fame/เกณฑ์เสร็จ | Battle ID=' + battleId +
+      ' | ใช้เวลา=' + formatPreciseDuration(fameCheckMs) +
+      ' | ผล=' + routeChecks.map(check => check.targetGuild + ':' +
+        formatFame(check.totalFame) + '/' + formatFame(check.minFame) +
+        (check.eligible ? ' ผ่าน' : ' ไม่ผ่าน')).join(' | '));
     const byChannel = new Map();
     for (const check of routeChecks) {
       const channelId = String(check.route.channelId);
@@ -640,14 +746,53 @@ function createBattleboardIntegration(deps = {}) {
           checkedAt: new Date().toISOString(),
         });
         console.log('ℹ️ [Auto-Battle] ไม่ส่งรายงาน เนื่องจาก Fame รวมต่ำกว่าเกณฑ์ทุก Route | Battle ID=' + battleId +
-          ' | ' + routeSummary);
+          ' | ' + routeSummary +
+          ' | สร้างรายงาน=' + formatPreciseDuration(reportBuildMs) +
+          ' | ตรวจ Fame=' + formatPreciseDuration(fameCheckMs));
+        console.log('📊 [Auto-Battle] สรุปเวลาแต่ละขั้นตอน (ไม่ส่งเพราะ Fame ต่ำกว่าเกณฑ์) | Battle ID=' + battleId +
+          ' | Battle จบ=' + formatThaiTimestamp(detail.endTime) +
+          ' | first_seen_at=' + formatThaiTimestamp(event.first_seen_at || event.firstSeenAt) +
+          ' | checked_at=' + formatThaiTimestamp(event.checked_at) +
+          ' | บอทรับ Event=' + formatThaiTimestamp(botReceivedAt) +
+          ' | Battle จบ→first_seen=' + formatElapsedMs(elapsedMsBetween(detail.endTime, event.first_seen_at || event.firstSeenAt)) +
+          ' | first_seen→checked_at=' + formatElapsedMs(elapsedMsBetween(event.first_seen_at || event.firstSeenAt, event.checked_at)) +
+          ' | checked_at→บอทรับ=' + formatElapsedMs(elapsedMsBetween(event.checked_at, botReceivedAt)) +
+          ' | บอทรับ→รายละเอียดพร้อม=' + formatElapsedMs(elapsedMsBetween(botReceivedAt, event.__detailReadyAt)) +
+          ' | Detail API รวม=' + formatElapsedMs(event.__detailFetchTotalMs) +
+          ' | ตรวจ Route=' + formatPreciseDuration(routeMatchMs) +
+          ' | สร้างรายงาน=' + formatPreciseDuration(reportBuildMs) +
+          ' | ตรวจ Fame=' + formatPreciseDuration(fameCheckMs));
         continue;
       }
 
-      const channel = await client.channels.fetch(channelId).catch(() => null);
-      if (!channel || typeof channel.send !== 'function') throw new Error('Auto-Battle channel unavailable: ' + channelId);
+      const channelFetchStartedAtMs = Date.now();
+      let channel = null;
+      let channelFetchError = null;
+      try { channel = await client.channels.fetch(channelId); }
+      catch (error) { channelFetchError = error; }
+      const channelFetchMs = Date.now() - channelFetchStartedAtMs;
+      console.log('📡 [Auto-Battle] ตรวจห้อง Discord เสร็จ | Battle ID=' + battleId +
+        ' | ห้อง=' + channelId + ' | ใช้เวลา=' + formatPreciseDuration(channelFetchMs) +
+        ' | พร้อมส่ง=' + Boolean(channel && typeof channel.send === 'function'));
+      if (!channel || typeof channel.send !== 'function') {
+        const error = new Error('Auto-Battle channel unavailable: ' + channelId +
+          (channelFetchError ? ' (' + String(channelFetchError.message || channelFetchError).slice(0, 120) + ')' : ''));
+        error.autoBattleStage = 'ค้นหาห้อง Discord';
+        error.autoBattleStageMs = channelFetchMs;
+        throw error;
+      }
       const targets = [...new Set(qualifiedRoutes.map(check => check.targetGuild))];
-      await deliver(channel, channelId, battleId, report, targets, qualifiedRoutes, state, serverId, event, detail);
+      await deliver(channel, channelId, battleId, report, targets, qualifiedRoutes, state, serverId, event, detail, {
+        eventsApiMs: event.__eventsApiMs,
+        botReceivedAt,
+        detailReadyAt: event.__detailReadyAt,
+        queuedAt: pendingEntry && pendingEntry.queuedAt,
+        retryAttempts: pendingEntry && pendingEntry.attempts,
+        routeMatchMs,
+        reportBuildMs,
+        fameCheckMs,
+        channelFetchMs,
+      });
     }
     return true;
   }
