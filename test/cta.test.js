@@ -7,9 +7,9 @@ const { test } = require('node:test');
 
 const {
     commandBuilders,
-    PRESETS,
     WEAPONS,
     getMetaWarnings,
+    countPanel,
     buildWeaponGridImage,
     buildRosterSmallIconImage
 } = require('../cta');
@@ -21,15 +21,23 @@ function pngDimensions(buffer) {
     return { width: buffer.readUInt32BE(16), height: buffer.readUInt32BE(20) };
 }
 
-test('CTA max-player option supports the built-in 22-player AVA preset', () => {
+test('CTA remains capped at 20 players and has no built-in Preset controls', () => {
     const command = commandBuilders.find(builder => builder.name === 'cta').toJSON();
     const maxPlayersOption = command.options.find(option => option.name === 'max_players');
-    const ava = PRESETS.ava;
-    const avaTotal = 1 + Object.values(ava.counts).reduce((sum, count) => sum + count, 0);
+    const panel = countPanel({
+        id: 'cta-test',
+        title: 'Test CTA',
+        startAt: Date.now() + 60_000,
+        maxPlayers: 20,
+        counts: { Tank: 0, DPS: 0, Support: 0, Heal: 0 }
+    });
+    const components = panel.components.flatMap(row => row.toJSON().components);
 
-    assert.equal(maxPlayersOption.max_value, 22);
-    assert.equal(avaTotal, 22);
-    assert.ok(avaTotal <= maxPlayersOption.max_value);
+    assert.equal(maxPlayersOption.max_value, 20);
+    assert.ok(components.some(component => component.custom_id === 'cta:clearcounts:cta-test'));
+    assert.ok(components.every(component => !/preset/i.test(
+        component.custom_id + ' ' + (component.label || '')
+    )));
 });
 
 test('DPS composition warnings identify missing and low DPS counts for larger groups', () => {
@@ -58,20 +66,19 @@ test('weapon selection grid keeps 16 choices per page within the reduced canvas 
     assert.ok(buffer.length < 2_000_000, 'weapon grid should stay below 2 MB');
 });
 
-test('22-player CTA roster renders to a compact four-column image', async () => {
+test('20-player CTA roster renders to a compact four-column image', async () => {
+    const roles = ['Tank', 'DPS', 'Support', 'Heal'];
     const slots = [{ role: 'Caller', weapon: WEAPONS.Caller[0], userId: 'caller', userName: 'Caller' }];
-    for (const role of ['Tank', 'DPS', 'Support', 'Heal']) {
-        const count = PRESETS.ava.counts[role];
-        for (let index = 0; index < count; index++) {
-            slots.push({
-                role,
-                weapon: WEAPONS[role][index % WEAPONS[role].length],
-                userId: index % 2 === 0 ? role + '-' + index : null,
-                userName: index % 2 === 0 ? 'Player ' + index : null
-            });
-        }
+    for (let index = 0; index < 19; index++) {
+        const role = roles[index % roles.length];
+        slots.push({
+            role,
+            weapon: WEAPONS[role][index % WEAPONS[role].length],
+            userId: index % 2 === 0 ? role + '-' + index : null,
+            userName: index % 2 === 0 ? 'Player ' + index : null
+        });
     }
-    assert.equal(slots.length, 22);
+    assert.equal(slots.length, 20);
 
     const buffer = await buildRosterSmallIconImage({
         id: 'cta-roster-image-regression-' + Date.now(),
@@ -79,6 +86,6 @@ test('22-player CTA roster renders to a compact four-column image', async () => 
     });
     const dimensions = pngDimensions(buffer);
 
-    assert.deepEqual(dimensions, { width: 1100, height: 742 });
-    assert.ok(buffer.length < 2_000_000, '22-player roster image should stay below 2 MB');
+    assert.deepEqual(dimensions, { width: 1100, height: 630 });
+    assert.ok(buffer.length < 2_000_000, '20-player roster should stay below 2 MB');
 });
