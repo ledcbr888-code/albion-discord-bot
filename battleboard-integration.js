@@ -293,11 +293,26 @@ function createBattleboardIntegration(deps = {}) {
   async function syncSnapshot(serverId, state, items) {
     if (!isSnapshotSyncDue(state, items)) return false;
     const trackedSnapshotChanged = hasTrackedSnapshotChanged(state, items);
+    const syncStartedAtMs = Date.now();
     const params = new URLSearchParams({ server: 'asia', discordServerId: serverId });
-    const result = await request('/api/bot-tracked-entities?' + params.toString(), {
-      method: 'PUT',
-      body: { server: 'asia', discordServerId: serverId, items, confirmEmpty: items.length === 0 },
-    });
+    let result;
+    try {
+      result = await request('/api/bot-tracked-entities?' + params.toString(), {
+        method: 'PUT',
+        body: { server: 'asia', discordServerId: serverId, items, confirmEmpty: items.length === 0 },
+      });
+    } catch (error) {
+      if (error && typeof error === 'object') {
+        error.autoBattleStage = 'ซิงก์รายการ Guild/Player ไป Battleboard';
+        error.autoBattleStageMs = Date.now() - syncStartedAtMs;
+      }
+      throw error;
+    }
+    const syncDurationMs = Date.now() - syncStartedAtMs;
+    console.log('🔄 [Auto-Battle] ซิงก์รายการ Guild/Player ไป Battleboard เสร็จ | เซิร์ฟเวอร์=' + serverId +
+      ' | API ใช้เวลา=' + formatPreciseDuration(syncDurationMs) +
+      ' | รายการ=' + items.length +
+      ' | ข้อมูลเปลี่ยน=' + trackedSnapshotChanged);
     state.snapshotInitialized = true;
     state.snapshotFingerprint = snapshotFingerprint(items);
     state.lastSnapshotSyncAt = new Date().toISOString();
@@ -907,7 +922,7 @@ function createBattleboardIntegration(deps = {}) {
             const waitingMs = queuedAt === null ? null : Math.max(0, Date.now() - queuedAt);
             console.log('⏳ [Auto-Battle] รายละเอียด Battle ยังไม่ครบ กำลังลองใหม่ครั้งที่ ' + entry.attempts +
               ' | เซิร์ฟเวอร์=' + serverId + ' | Battle ID=' + entry.battleId +
-              (waitingMs === null ? '' : ' | อยู่ในคิวแล้ว=' + formatThaiDuration(waitingMs)));
+              (waitingMs === null ? '' : ' | อยู่ในคิวแล้ว=' + formatElapsedMs(waitingMs)));
           }
         }
       } catch (error) {
@@ -1029,7 +1044,10 @@ function createBattleboardIntegration(deps = {}) {
           state.retryAfterAt = new Date(Date.now() + delay).toISOString();
           persist();
           console.error('❌ [Auto-Battle] ตรวจสอบ Event ไม่สำเร็จ จะลองใหม่ใน ' + Math.ceil(delay / 1000) + ' วินาที' +
-            ' | เซิร์ฟเวอร์=' + serverId + ' | สาเหตุ=' + String(error && error.message || error).slice(0, 260));
+            ' | เซิร์ฟเวอร์=' + serverId +
+            ' | ขั้นตอน=' + String(error && error.autoBattleStage || 'ซิงก์ Tracking / Poll') +
+            (Number.isFinite(Number(error && error.autoBattleStageMs)) ? ' | ใช้เวลา=' + formatPreciseDuration(Number(error.autoBattleStageMs)) : '') +
+            ' | สาเหตุ=' + String(error && error.message || error).slice(0, 260));
         }
       }
     } finally {
@@ -1057,5 +1075,5 @@ function createBattleboardIntegration(deps = {}) {
 }
 module.exports = {
   createBattleboardIntegration,
-  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce, snapshotFingerprint, hasTrackedSnapshotChanged, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup, timestampMs, formatThaiDuration, getBattleDelayMetrics, formatBattleDelayLines },
+  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce, snapshotFingerprint, hasTrackedSnapshotChanged, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup, timestampMs, formatThaiDuration, formatThaiTimestamp, formatPreciseDuration, elapsedMsBetween, getBattleDelayMetrics, formatBattleDelayLines },
 };
