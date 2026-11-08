@@ -73,7 +73,8 @@ const WEAPON_RAW_BASE = 'https://raw.githubusercontent.com/ledcbr888-code/albion
 
 // ===== PERFORMANCE CACHES =====
 const weaponIconPathCache = new Map(); // name -> path or null
-const weaponImageCache = new Map(); // name -> loaded Image (canvas)
+const weaponImageCache = new Map(); // name -> loaded Image (canvas), bounded to limit memory use
+const weaponImagePromises = new Map(); // share in-flight image loads across CTA sessions
 const gridCache = new Map(); // key -> Buffer
 const rosterCache = new Map(); // eventId+hash -> Buffer
 
@@ -245,7 +246,7 @@ const commandBuilders = [
             const value = String(hour).padStart(2, '0') + ':00';
             return { name: value + ' UTC', value };
         })))
-        .addIntegerOption(o => o.setName('max_players').setDescription('จำนวนผู้เล่นสูงสุดรวม Caller (1-20)').setRequired(true).setMinValue(1).setMaxValue(20)),
+        .addIntegerOption(o => o.setName('max_players').setDescription('จำนวนผู้เล่นสูงสุดรวม Caller (1-22)').setRequired(true).setMinValue(1).setMaxValue(22)),
     new SlashCommandBuilder().setName('ctaup').setDescription('เรียกใช้ชุดแผน CTA ที่บันทึกไว้')
 ];
 
@@ -450,25 +451,39 @@ function countPanel(session) {
 
 // ===== OPTIMIZED GRID - SMALLER, CACHED, PARALLEL LOAD =====
 async function loadWeaponImageCached(name, loadImage) {
-    if (weaponImageCache.has(name)) return weaponImageCache.get(name);
-    const iconPath = weaponIconPath(name);
-    if (iconPath) {
-        try {
-            const img = await loadImage(iconPath);
-            weaponImageCache.set(name, img);
-            return img;
-        } catch {}
+    if (weaponImageCache.has(name)) {
+        const cached = weaponImageCache.get(name);
+        weaponImageCache.delete(name);
+        weaponImageCache.set(name, cached);
+        return cached;
     }
-    // Fallback: try GitHub CDN (if local not found)
+    if (weaponImagePromises.has(name)) return weaponImagePromises.get(name);
+
+    const pending = (async () => {
+        const remember = img => {
+            weaponImageCache.set(name, img);
+            if (weaponImageCache.size > 32) weaponImageCache.delete(weaponImageCache.keys().next().value);
+            return img;
+        };
+        const iconPath = weaponIconPath(name);
+        if (iconPath) {
+            try { return remember(await loadImage(iconPath)); } catch {}
+        }
+        // Fallback: try GitHub CDN only when the local repository asset cannot be loaded.
+        try {
+            const cdnUrl = getWeaponCdnUrl(name);
+            const res = await axios.get(cdnUrl, { responseType: 'arraybuffer', timeout: 3000, validateStatus: s => s >= 200 && s < 300 });
+            return remember(await loadImage(Buffer.from(res.data)));
+        } catch {}
+        return null;
+    })();
+
+    weaponImagePromises.set(name, pending);
     try {
-        const cdnUrl = getWeaponCdnUrl(name);
-        const res = await axios.get(cdnUrl, { responseType: 'arraybuffer', timeout: 3000, validateStatus: s => s >= 200 && s < 300 });
-        const buffer = Buffer.from(res.data);
-        const img = await loadImage(buffer);
-        weaponImageCache.set(name, img);
-        return img;
-    } catch {}
-    return null;
+        return await pending;
+    } finally {
+        if (weaponImagePromises.get(name) === pending) weaponImagePromises.delete(name);
+    }
 }
 
 async function buildWeaponGridImage(weapons, usedMap, currentRole, gridPage = 0) {
@@ -486,10 +501,11 @@ async function buildWeaponGridImage(weapons, usedMap, currentRole, gridPage = 0)
 
     // Four columns x four rows: fixed 16 weapons per image for readability.
     const cols = 4;
-    const cellW = 240;
-    const cellH = 220;
-    const padding = 12;
-    const headerH = 60;
+    // Keep 16 weapons per page while reducing PNG size and upload time.
+    const cellW = 200;
+    const cellH = 180;
+    const padding = 10;
+    const headerH = 48;
     const rows = Math.ceil(pageWeapons.length / cols);
     const width = cols * cellW + (cols + 1) * padding;
     const height = headerH + rows * cellH + (rows + 1) * padding;
@@ -497,7 +513,7 @@ async function buildWeaponGridImage(weapons, usedMap, currentRole, gridPage = 0)
     const ctx = canvas.getContext('2d');
     ctx.fillStyle = '#232428'; ctx.fillRect(0, 0, width, height);
     ctx.fillStyle = '#1e1f22'; ctx.fillRect(0, 0, width, headerH);
-    ctx.fillStyle = '#ffffff'; ctx.font = 'bold 24px sans-serif';
+    ctx.fillStyle = '#ffffff'; ctx.font = 'bold 22px sans-serif';
     ctx.fillText((ROLE_LABELS_SHORT[currentRole] || currentRole) + ' - ' + weapons.length + ' WEAPONS  |  PAGE ' + (safePage + 1) + '/' + totalPages, padding + 12, 38);
 
     // Load only this image page's weapon icons.
@@ -519,10 +535,10 @@ async function buildWeaponGridImage(weapons, usedMap, currentRole, gridPage = 0)
         ctx.strokeRect(x, y, cellW, cellH);
 
         const loadedImg = loadedImages[idx];
-        const iconSize = 160;
+        const iconSize = 130;
         if (loadedImg) {
             const ix = x + (cellW - iconSize) / 2;
-            const iy = y + 10;
+            const iy = y + 8;
             try { ctx.drawImage(loadedImg, ix, iy, iconSize, iconSize); } catch {}
         } else {
             ctx.fillStyle = '#2b2d31'; ctx.fillRect(x + (cellW-80)/2, y + 30, 80, 80);
@@ -530,17 +546,17 @@ async function buildWeaponGridImage(weapons, usedMap, currentRole, gridPage = 0)
             ctx.fillText('⚔️', x + cellW/2, y + 80); ctx.textAlign='left';
         }
         // ชื่ออาวุธใหญ่กว่าเดิม 3 เท่า และเอาคำใต้ชื่ออาวุธออกทั้งหมด
-        ctx.fillStyle = '#1a1b1e'; ctx.fillRect(x, y + 170, cellW, 50);
+        ctx.fillStyle = '#1a1b1e'; ctx.fillRect(x, y + 140, cellW, 40);
         ctx.fillStyle = isUsed ? '#f0c35a' : '#ffffff';
-        ctx.font = 'bold 31px sans-serif'; ctx.textAlign = 'center';
+        ctx.font = 'bold 26px sans-serif'; ctx.textAlign = 'center';
         const displayName = displayWeapon(wName);
         const shortName = displayName.length > 15 ? displayName.slice(0, 13) + '..' : displayName;
-        ctx.fillText(shortName, x + cellW / 2, y + 202, cellW - 10);
+        ctx.fillText(shortName, x + cellW / 2, y + 167, cellW - 10);
         ctx.textAlign = 'left';
     }
     const buffer = canvas.toBuffer('image/png');
     gridCache.set(cacheKey, buffer);
-    if (gridCache.size > 50) gridCache.delete(gridCache.keys().next().value);
+    if (gridCache.size > 24) gridCache.delete(gridCache.keys().next().value);
     return buffer;
 }
 
@@ -553,13 +569,14 @@ async function buildRosterSmallIconImage(event) {
     ensureCtaThaiFont(canvasLib);
     const { createCanvas, loadImage } = canvasLib;
     const slots = event.slots;
-    const cols = 3;
+    // Four columns keep a 22-player AVA roster compact instead of producing a tall image.
+    const cols = 4;
     const width = 1100;
     const padding = 12;
-    const gap = 10;
+    const gap = 8;
     const headerH = 54;
     const cardW = Math.floor((width - padding * 2 - gap * (cols - 1)) / cols);
-    const cardH = 132;
+    const cardH = 104;
     const rows = Math.ceil(slots.length / cols);
     const height = headerH + padding * 2 + rows * cardH + Math.max(0, rows - 1) * gap;
     const canvas = createCanvas(width, height);
@@ -581,9 +598,9 @@ async function buildRosterSmallIconImage(event) {
         ctx.lineWidth = slot.userId ? 2 : 1;
         ctx.strokeRect(x, y, cardW, cardH);
 
-        const iconS = 76;
-        const iconX = x + 12;
-        const iconY = y + 12;
+        const iconS = 60;
+        const iconX = x + 10;
+        const iconY = y + 10;
         ctx.fillStyle = '#1e1f22'; ctx.fillRect(iconX, iconY, iconS, iconS);
         const img = loadedImages[i];
         if (img) { try { ctx.drawImage(img, iconX + 2, iconY + 2, iconS - 4, iconS - 4); } catch {} }
@@ -596,13 +613,13 @@ async function buildRosterSmallIconImage(event) {
             ctx.fillStyle = '#23a559'; ctx.beginPath(); ctx.arc(iconX + iconS - 2, iconY + iconS - 2, 9, 0, Math.PI * 2); ctx.fill();
             // The green status dot and border indicate the slot is occupied; avoid special glyphs.
         }
-        const textX = iconX + iconS + 14;
+        const textX = iconX + iconS + 10;
         const textW = cardW - (textX - x) - 10;
         const roleText = (i + 1) + '. ' + (ROLE_LABELS_SHORT[slot.role] || slot.role).toUpperCase();
-        ctx.fillStyle = '#f2f3f5'; ctx.font = 'bold 18px sans-serif';
-        ctx.fillText(roleText, textX, y + 31, textW);
-        ctx.fillStyle = '#ffd166'; ctx.font = 'bold 17px sans-serif';
-        ctx.fillText(slot.weapon ? displayWeapon(slot.weapon) : 'WEAPON NOT SET', textX, y + 57, textW);
+        ctx.fillStyle = '#f2f3f5'; ctx.font = 'bold 15px sans-serif';
+        ctx.fillText(roleText, textX, y + 25, textW);
+        ctx.fillStyle = '#ffd166'; ctx.font = 'bold 14px sans-serif';
+        ctx.fillText(slot.weapon ? displayWeapon(slot.weapon) : 'WEAPON NOT SET', textX, y + 47, textW);
         const actualPlayerName = String(slot.userName || '').trim();
         const playerNameHasThai = /[\u0E00-\u0E7F]/.test(actualPlayerName);
         const canRenderPlayerName = !!slot.userId && !!actualPlayerName && (!playerNameHasThai || ctaThaiFontRegistered);
@@ -611,15 +628,15 @@ async function buildRosterSmallIconImage(event) {
             : 'WAITING FOR PLAYER';
         ctx.fillStyle = slot.userId ? '#ffffff' : '#a0a3ad';
         ctx.font = playerNameHasThai && ctaThaiFontRegistered
-            ? 'bold 16px "CtaThai", sans-serif'
-            : 'bold 16px sans-serif';
-        ctx.fillText(playerText, textX, y + 88, textW);
+            ? 'bold 13px "CtaThai", sans-serif'
+            : 'bold 13px sans-serif';
+        ctx.fillText(playerText, textX, y + 68, textW);
         ctx.fillStyle = slot.userId ? '#23a559' : '#6d6f78'; ctx.font = 'bold 12px sans-serif';
-        ctx.fillText(slot.userId ? 'JOINED' : 'OPEN SLOT', textX, y + 112, textW);
+        ctx.fillText(slot.userId ? 'JOINED' : 'OPEN SLOT', textX, y + 89, textW);
     }
     const buffer = canvas.toBuffer('image/png');
     rosterCache.set(cacheKey, buffer);
-    if (rosterCache.size > 30) rosterCache.delete(rosterCache.keys().next().value);
+    if (rosterCache.size > 12) rosterCache.delete(rosterCache.keys().next().value);
     return buffer;
 }
 
@@ -688,13 +705,14 @@ async function renderRosterBatches(event, deps) {
     const timeUTCStr = new Date(event.startAt).toISOString().slice(11, 16);
     const localDate = new Date(event.startAt); localDate.setHours(localDate.getHours() + 7);
     const timeLocalStr = localDate.toISOString().slice(11, 16);
-    let emojiMap = new Map();
-    try {
-        if (deps && deps.client) {
-            const guild = await deps.client.guilds.fetch(event.guildId).catch(() => null);
-            if (guild) { await guild.emojis.fetch().catch(() => {}); for (const [id, emoji] of guild.emojis.cache) { emojiMap.set(emoji.name.toLowerCase(), '<:' + emoji.name + ':' + id + '>'); } }
+    // Read READY guild/emoji cache only; roster refreshes must not issue extra Discord REST calls.
+    const emojiMap = new Map();
+    const guild = deps?.client?.guilds?.cache?.get(String(event.guildId));
+    if (guild?.emojis?.cache) {
+        for (const [id, emoji] of guild.emojis.cache) {
+            emojiMap.set(emoji.name.toLowerCase(), '<:' + emoji.name + ':' + id + '>');
         }
-    } catch {}
+    }
     function getWeaponEmoji(weaponName) {
         if (!weaponName) return '🟩';
         const key = weaponName.toLowerCase();
@@ -745,7 +763,7 @@ async function weaponPanelPayload(session) {
     const description = [
         '📍 **ตำแหน่ง:** ' + (ROLE_LABELS[slot.role] || slot.role),
         '🗡️ **ช่อง:** ' + (session.slotIndex + 1) + '/' + session.slots.length + ' | **เลือกแล้ว:** ' + selected + '/' + session.slots.length,
-        roleSummary, '', '**สรุปช่อง**', ...slotSummary.slice(0, 20)
+        roleSummary, '', '**สรุปช่อง**', ...slotSummary.slice(0, 22)
     ].filter(Boolean);
     const infoEmbed = new EmbedBuilder().setColor(0xd99a3d).setTitle('🗡️ กำหนดอาวุธ — ' + (ROLE_LABELS[slot.role] || slot.role)).setDescription(description.join('\n').slice(0, 4000)).setFooter({ text: 'Fuzzy Search: blaz → Blazing, bracer → Battle Bracers' });
     let gridBuffer = null;
@@ -793,7 +811,6 @@ async function publishEvent(session, deps) {
     const batches = await renderRosterBatches(event, deps);
     const channel = await deps.client.channels.fetch(session.channelId).catch(() => null);
     if (!channel) throw new Error('ไม่พบห้อง');
-    const sent = await channel.messages.fetch().catch(() => null);
     const payload = batches[0];
     const message = await channel.send({ ...payload, components: eventButtons(event) });
     event.messageId = message.id;
@@ -1161,4 +1178,4 @@ async function handleInteraction(interaction, deps) {
     return false;
 }
 
-module.exports = { commandBuilders, handleInteraction, WEAPONS, PRESETS, startLifecycle: ensureLifecycleRunner };
+module.exports = { commandBuilders, handleInteraction, WEAPONS, PRESETS, getMetaWarnings, buildWeaponGridImage, buildRosterSmallIconImage, startLifecycle: ensureLifecycleRunner };
