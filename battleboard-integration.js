@@ -449,7 +449,7 @@ function createBattleboardIntegration(deps = {}) {
     }
     return true;
   }
-  function enqueuePendingEvent(state, event, reason) {
+  function enqueuePendingEvent(serverId, state, event, reason) {
     const battleId = String(event && event.battle_id || '').trim();
     if (!/^\d+$/.test(battleId)) return false;
     if (!Array.isArray(state.pendingEvents)) state.pendingEvents = [];
@@ -469,18 +469,21 @@ function createBattleboardIntegration(deps = {}) {
     if (state.pendingEvents.length > MAX_PENDING_EVENTS) {
       const dropped = state.pendingEvents.splice(0, state.pendingEvents.length - MAX_PENDING_EVENTS);
       console.warn('⚠️ [Auto-Battle] คิวรอรายละเอียดเต็ม จึงนำรายการเก่าที่สุดออก | เซิร์ฟเวอร์=' +
-        (state.guildId || 'ไม่ทราบ') + ' | จำนวน=' + dropped.length);
+        serverId + ' | จำนวน=' + dropped.length);
     }
     const battleStartMs = timestampMs(event && event.battle_start_time);
     const elapsedSinceStart = battleStartMs === null || Date.now() < battleStartMs
       ? null
       : formatThaiDuration(Date.now() - battleStartMs);
+    const reasonText = reason === 'detail-not-ready' ? 'รายละเอียด Battle ยังไม่ครบ'
+      : reason === 'deferred-after-transient-error' ? 'รอประมวลผลต่อหลังเกิดข้อผิดพลาดชั่วคราว'
+      : String(reason || 'รอรายละเอียดไม่ครบ').slice(0, 120);
     console.warn(
       '⏳ [Auto-Battle] รายละเอียด Battle ยังไม่พร้อม จัดเข้าคิวรอข้อมูลแล้ว' +
-      ' | เซิร์ฟเวอร์=' + (state.guildId || 'ไม่ทราบ') +
+      ' | เซิร์ฟเวอร์=' + serverId +
       ' | Battle ID=' + battleId +
       (elapsedSinceStart === null ? '' : ' | ผ่านมาตั้งแต่เริ่ม Battle=' + elapsedSinceStart) +
-      ' | เหตุผล=' + String(reason || 'รอรายละเอียดไม่ครบ').slice(0, 120)
+      ' | เหตุผล=' + reasonText
     );
     persist();
     return true;
@@ -573,14 +576,14 @@ function createBattleboardIntegration(deps = {}) {
     let deferRemaining = false;
     for (const event of events) {
       if (deferRemaining) {
-        enqueuePendingEvent(state, event, 'deferred-after-transient-error');
+        enqueuePendingEvent(serverId, state, event, 'deferred-after-transient-error');
       } else {
         try {
           const complete = await processEvent(serverId, guildConfig, state, event);
-          if (!complete) enqueuePendingEvent(state, event, 'detail-not-ready');
+          if (!complete) enqueuePendingEvent(serverId, state, event, 'detail-not-ready');
         } catch (error) {
           if ([401, 403].includes(Number(error && error.status))) throw error;
-          enqueuePendingEvent(state, event, String(error && error.message || error));
+          enqueuePendingEvent(serverId, state, event, String(error && error.message || error));
           deferRemaining = true;
           console.warn('⚠️ [Auto-Battle] ประมวลผล Battle ไม่สำเร็จ จัดเข้าคิวเพื่อลองใหม่' +
             ' | เซิร์ฟเวอร์=' + serverId +
