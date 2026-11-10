@@ -616,3 +616,213 @@ test('frequent updates do not postpone a scheduled retry after a failed backup',
     scheduler.stop();
   }
 });
+
+test('startup API preflight rejects an unauthorized Events Feed so the Official API fallback stays available', async () => {
+  const oldApiUrl = process.env.BATTLEBOARD_API_URL;
+  const oldApiKey = process.env.BOT_API_KEY;
+  const oldFetch = global.fetch;
+  const oldWarn = console.warn;
+  const oldError = console.error;
+  const availability = [];
+  const serverId = '1165745441120452638';
+  const config = {
+    guilds: [{ id: 'guild-plac', name: 'PLAC' }],
+    players: [],
+    autoBattles: [{ targetGuild: 'PLAC', targetGuildId: 'guild-plac', channelId: '99999999999999999', enabled: true }],
+    battleboardState: {},
+  };
+  process.env.BATTLEBOARD_API_URL = 'https://battleboard.example';
+  process.env.BOT_API_KEY = 'test-key-'.padEnd(40, 'x');
+  global.fetch = async () => ({ ok: false, status: 401, text: async () => JSON.stringify({ error: 'Unauthorized' }) });
+  console.warn = () => {};
+  console.error = () => {};
+  const integration = createBattleboardIntegration({
+    getAllGuildConfigs: () => [{ guildId: serverId, config }],
+    getGuildConfig: () => config,
+    saveData: () => {},
+    onServerAvailabilityChange: (id, active, details) => availability.push({ id, active, details }),
+  });
+  try {
+    assert.equal(await integration.start(), false);
+    assert.equal(integration.isServerActive(serverId), false);
+    assert.ok(availability.some(item => item.id === serverId && item.active === false && item.details.phase === 'startup-preflight-failed'));
+  } finally {
+    integration.stop();
+    global.fetch = oldFetch;
+    console.warn = oldWarn;
+    console.error = oldError;
+    if (oldApiUrl === undefined) delete process.env.BATTLEBOARD_API_URL;
+    else process.env.BATTLEBOARD_API_URL = oldApiUrl;
+    if (oldApiKey === undefined) delete process.env.BOT_API_KEY;
+    else process.env.BOT_API_KEY = oldApiKey;
+  }
+});
+
+test('startup API preflight activates only a tracked server whose Events Feed returns a valid schema', async () => {
+  const oldApiUrl = process.env.BATTLEBOARD_API_URL;
+  const oldApiKey = process.env.BOT_API_KEY;
+  const oldFetch = global.fetch;
+  const availability = [];
+  const serverId = '1165745441120452638';
+  const config = {
+    guilds: [{ id: 'guild-plac', name: 'PLAC' }],
+    players: [],
+    autoBattles: [{ targetGuild: 'PLAC', targetGuildId: 'guild-plac', channelId: '99999999999999999', enabled: true }],
+    battleboardState: {},
+  };
+  process.env.BATTLEBOARD_API_URL = 'https://battleboard.example';
+  process.env.BOT_API_KEY = 'test-key-'.padEnd(40, 'x');
+  global.fetch = async urlValue => {
+    const url = new URL(String(urlValue));
+    assert.equal(url.pathname, '/api/bot-tracked-entities');
+    assert.equal(url.searchParams.get('mode'), 'events');
+    assert.equal(url.searchParams.get('discordServerId'), serverId);
+    return { ok: true, status: 200, text: async () => JSON.stringify({ items: [], cursor: { after: '2026-11-11T00:00:00.000Z', afterBattleId: '0' } }) };
+  };
+  const integration = createBattleboardIntegration({
+    getAllGuildConfigs: () => [{ guildId: serverId, config }],
+    getGuildConfig: () => config,
+    saveData: () => {},
+    onServerAvailabilityChange: (id, active, details) => availability.push({ id, active, details }),
+  });
+  try {
+    assert.equal(await integration.start(), true);
+    assert.equal(integration.isServerActive(serverId), true);
+    assert.ok(availability.some(item => item.id === serverId && item.active === true && item.details.phase === 'startup-preflight'));
+  } finally {
+    integration.stop();
+    global.fetch = oldFetch;
+    if (oldApiUrl === undefined) delete process.env.BATTLEBOARD_API_URL;
+    else process.env.BATTLEBOARD_API_URL = oldApiUrl;
+    if (oldApiKey === undefined) delete process.env.BOT_API_KEY;
+    else process.env.BOT_API_KEY = oldApiKey;
+  }
+});
+
+test('switches a repeatedly failing server to Official API fallback after three failures without pending partial sends', async () => {
+  const oldApiUrl = process.env.BATTLEBOARD_API_URL;
+  const oldApiKey = process.env.BOT_API_KEY;
+  const oldFetch = global.fetch;
+  const oldWarn = console.warn;
+  const oldError = console.error;
+  const availability = [];
+  const serverId = '1165745441120452638';
+  const config = {
+    guilds: [{ id: 'guild-plac', name: 'PLAC' }],
+    players: [],
+    autoBattles: [{ targetGuild: 'PLAC', targetGuildId: 'guild-plac', channelId: '99999999999999999', enabled: true }],
+    battleboardState: {},
+  };
+  const items = buildTrackedItems(config);
+  Object.assign(config.battleboardState, {
+    snapshotInitialized: true,
+    snapshotFingerprint: snapshotFingerprint(items),
+    lastSnapshotSyncAt: new Date().toISOString(),
+    cursorInitialized: true,
+    eventCursor: { after: '2026-11-10T00:00:00.000Z', afterBattleId: '1000' },
+    delivered: [],
+    pendingEvents: [],
+  });
+  process.env.BATTLEBOARD_API_URL = 'https://battleboard.example';
+  process.env.BOT_API_KEY = 'test-key-'.padEnd(40, 'x');
+  global.fetch = async urlValue => {
+    const url = new URL(String(urlValue));
+    if (!url.searchParams.has('after')) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ items: [], cursor: { after: '2026-11-10T00:00:00.000Z', afterBattleId: '1000' } }) };
+    }
+    return { ok: false, status: 503, text: async () => JSON.stringify({ error: 'Service unavailable' }) };
+  };
+  console.warn = () => {};
+  console.error = () => {};
+  const integration = createBattleboardIntegration({
+    getAllGuildConfigs: () => [{ guildId: serverId, config }],
+    getGuildConfig: () => config,
+    saveData: () => {},
+    onServerAvailabilityChange: (id, active, details) => availability.push({ id, active, details }),
+  });
+  try {
+    assert.equal(await integration.start(), true);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      config.battleboardState.retryAfterAt = new Date(Date.now() - 1000).toISOString();
+      await integration.tick();
+    }
+    assert.equal(integration.isServerActive(serverId), false);
+    assert.ok(availability.some(item => item.id === serverId && item.active === false && item.details.phase === 'runtime-failure'));
+  } finally {
+    integration.stop();
+    global.fetch = oldFetch;
+    console.warn = oldWarn;
+    console.error = oldError;
+    if (oldApiUrl === undefined) delete process.env.BATTLEBOARD_API_URL;
+    else process.env.BATTLEBOARD_API_URL = oldApiUrl;
+    if (oldApiKey === undefined) delete process.env.BOT_API_KEY;
+    else process.env.BOT_API_KEY = oldApiKey;
+  }
+});
+
+test('skips an Events Feed battle already handled by the Official API source to avoid duplicates after recovery', async () => {
+  const oldApiUrl = process.env.BATTLEBOARD_API_URL;
+  const oldApiKey = process.env.BOT_API_KEY;
+  const oldFetch = global.fetch;
+  const serverId = '1165745441120452638';
+  const channelId = '99999999999999999';
+  const battleStartTime = '2026-11-10T17:00:00.000Z';
+  const config = {
+    guilds: [{ id: 'guild-plac', name: 'PLAC' }],
+    players: [],
+    autoBattles: [{ targetGuild: 'PLAC', targetGuildId: 'guild-plac', channelId, minFrames: 100000, enabled: true }],
+    battleboardState: {},
+  };
+  const items = buildTrackedItems(config);
+  Object.assign(config.battleboardState, {
+    snapshotInitialized: true,
+    snapshotFingerprint: snapshotFingerprint(items),
+    lastSnapshotSyncAt: new Date().toISOString(),
+    cursorInitialized: true,
+    eventCursor: { after: '2026-11-09T00:00:00.000Z', afterBattleId: '0' },
+    delivered: [],
+    pendingEvents: [],
+  });
+  process.env.BATTLEBOARD_API_URL = 'https://battleboard.example';
+  process.env.BOT_API_KEY = 'test-key-'.padEnd(40, 'x');
+  const sent = [];
+  const logs = [];
+  const oldLog = console.log;
+  console.log = (...args) => logs.push(args.join(' '));
+  global.fetch = async urlValue => {
+    const url = new URL(String(urlValue));
+    if (url.pathname === '/api/bot-tracked-entities') {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ items: [{
+        battle_id: '1001',
+        battle_start_time: battleStartTime,
+        checked_at: '2026-11-10T17:05:00.000Z',
+        first_seen_at: '2026-11-10T17:05:00.000Z',
+        matches: [{ type: 'guild', id: 'guild-plac', name: 'PLAC' }],
+      }] }) };
+    }
+    throw new Error('Detail API should not be called for a battle already handled by the fallback.');
+  };
+  const integration = createBattleboardIntegration({
+    client: { channels: { fetch: async () => ({ send: async payload => { sent.push(payload); return { id: 'unused' }; } }) } },
+    getAllGuildConfigs: () => [{ guildId: serverId, config }],
+    getGuildConfig: () => config,
+    saveData: () => {},
+    isBattleProcessed: (_id, battleId) => battleId === '1001',
+    buildBattleReportPayload: async () => { throw new Error('Report must not be built for a duplicate.'); },
+    formatFame: value => Number(value || 0).toLocaleString(),
+  });
+  try {
+    await integration.tick();
+    assert.equal(sent.length, 0);
+    assert.equal(config.battleboardState.eventCursor.afterBattleId, '1001');
+    assert.ok(logs.some(line => line.includes('ข้าม Battle ที่แหล่งตรวจจับก่อนหน้าประมวลผลแล้ว')));
+  } finally {
+    integration.stop();
+    global.fetch = oldFetch;
+    console.log = oldLog;
+    if (oldApiUrl === undefined) delete process.env.BATTLEBOARD_API_URL;
+    else process.env.BATTLEBOARD_API_URL = oldApiUrl;
+    if (oldApiKey === undefined) delete process.env.BOT_API_KEY;
+    else process.env.BOT_API_KEY = oldApiKey;
+  }
+});
