@@ -6667,8 +6667,16 @@ client.once('clientReady', async () => {
             if (!id) return;
             if (active) {
                 battleboardPrimaryServerIds.add(id);
-                console.log('🛡️ [Auto-Battle Source] Discord Server=' + id +
-                    ' | แหล่งหลัก=Battleboard Events | ตรวจ API ผ่านแล้ว');
+                if (details.phase === 'startup-hold-pending-delivery') {
+                    console.error('🛑 [Auto-Battle Source] Discord Server=' + id +
+                        ' | คง Battleboard ไว้ตรวจและส่งรายงานที่ค้างต่อ | API ยังไม่พร้อม | Official API fallback ถูกพักชั่วคราวเพื่อป้องกันรายงานซ้ำ');
+                } else if (details.phase === 'runtime-recovered') {
+                    console.log('✅ [Auto-Battle Source] Discord Server=' + id +
+                        ' | แหล่งหลัก=Battleboard Events | API กลับมาใช้งานได้แล้ว');
+                } else {
+                    console.log('🛡️ [Auto-Battle Source] Discord Server=' + id +
+                        ' | แหล่งหลัก=Battleboard Events | ตรวจ API ผ่านแล้ว');
+                }
                 return;
             }
             battleboardPrimaryServerIds.delete(id);

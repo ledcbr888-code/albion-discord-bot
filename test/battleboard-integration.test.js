@@ -888,3 +888,127 @@ test('runtime Events Feed with HTTP 200 but invalid schema fails over instead of
     else process.env.BOT_API_KEY = oldApiKey;
   }
 });
+
+test('startup preflight holds the Battleboard source when a delivered Battle is still newer than the saved Events cursor', async () => {
+  const oldApiUrl = process.env.BATTLEBOARD_API_URL;
+  const oldApiKey = process.env.BOT_API_KEY;
+  const oldFetch = global.fetch;
+  const oldWarn = console.warn;
+  const oldError = console.error;
+  const availability = [];
+  const serverId = '1165745441120452638';
+  const config = {
+    guilds: [{ id: 'guild-plac', name: 'PLAC' }],
+    players: [],
+    autoBattles: [{ targetGuild: 'PLAC', targetGuildId: 'guild-plac', channelId: '99999999999999999', enabled: true }],
+    battleboardState: {
+      cursorInitialized: true,
+      eventCursor: { after: '2026-11-10T00:00:00.000Z', afterBattleId: '1000' },
+      pendingEvents: [{ battleId: '1001', queuedAt: new Date().toISOString(), event: { battle_id: '1001' }, attempts: 1 }],
+      delivered: [{
+        key: '1001:99999999999999999',
+        battleId: '1001',
+        channelId: '99999999999999999',
+        status: 'sent',
+        partsSent: 1,
+        eventCheckedAt: '2026-11-10T00:05:00.000Z',
+      }],
+    },
+  };
+  process.env.BATTLEBOARD_API_URL = 'https://battleboard.example';
+  process.env.BOT_API_KEY = 'test-key-'.padEnd(40, 'x');
+  global.fetch = async () => ({ ok: false, status: 503, text: async () => JSON.stringify({ error: 'Service unavailable' }) });
+  console.warn = () => {};
+  console.error = () => {};
+  const integration = createBattleboardIntegration({
+    getAllGuildConfigs: () => [{ guildId: serverId, config }],
+    getGuildConfig: () => config,
+    saveData: () => {},
+    onServerAvailabilityChange: (id, active, details) => availability.push({ id, active, details }),
+  });
+  try {
+    assert.equal(await integration.start(), true);
+    assert.equal(integration.isServerActive(serverId), true);
+    assert.ok(availability.some(item => item.id === serverId && item.active === true &&
+      item.details.phase === 'startup-hold-pending-delivery' && item.details.apiAvailable === false));
+  } finally {
+    integration.stop();
+    global.fetch = oldFetch;
+    console.warn = oldWarn;
+    console.error = oldError;
+    if (oldApiUrl === undefined) delete process.env.BATTLEBOARD_API_URL;
+    else process.env.BATTLEBOARD_API_URL = oldApiUrl;
+    if (oldApiKey === undefined) delete process.env.BOT_API_KEY;
+    else process.env.BOT_API_KEY = oldApiKey;
+  }
+});
+
+test('runtime failover is held when a delivered Battle is still newer than the saved Events cursor', async () => {
+  const oldApiUrl = process.env.BATTLEBOARD_API_URL;
+  const oldApiKey = process.env.BOT_API_KEY;
+  const oldFetch = global.fetch;
+  const oldWarn = console.warn;
+  const oldError = console.error;
+  const availability = [];
+  const serverId = '1165745441120452638';
+  const config = {
+    guilds: [{ id: 'guild-plac', name: 'PLAC' }],
+    players: [],
+    autoBattles: [{ targetGuild: 'PLAC', targetGuildId: 'guild-plac', channelId: '99999999999999999', enabled: true }],
+    battleboardState: {
+      cursorInitialized: true,
+      eventCursor: { after: '2026-11-10T00:00:00.000Z', afterBattleId: '1000' },
+      pendingEvents: [{ battleId: '1001', queuedAt: new Date().toISOString(), event: {
+        battle_id: '1001',
+        checked_at: '2026-11-10T00:05:00.000Z',
+        first_seen_at: '2026-11-10T00:05:00.000Z',
+      }, attempts: 1 }],
+      delivered: [{
+        key: '1001:99999999999999999',
+        battleId: '1001',
+        channelId: '99999999999999999',
+        status: 'sent',
+        partsSent: 1,
+        eventCheckedAt: '2026-11-10T00:05:00.000Z',
+      }],
+    },
+  };
+  const items = buildTrackedItems(config);
+  config.battleboardState.snapshotInitialized = true;
+  config.battleboardState.snapshotFingerprint = snapshotFingerprint(items);
+  config.battleboardState.lastSnapshotSyncAt = new Date().toISOString();
+  process.env.BATTLEBOARD_API_URL = 'https://battleboard.example';
+  process.env.BOT_API_KEY = 'test-key-'.padEnd(40, 'x');
+  global.fetch = async urlValue => {
+    const url = new URL(String(urlValue));
+    if (url.pathname === '/api/bot-tracked-entities' && !url.searchParams.has('after')) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ items: [], cursor: { after: '2026-11-10T00:00:00.000Z', afterBattleId: '1000' } }) };
+    }
+    return { ok: false, status: 503, text: async () => JSON.stringify({ error: 'Service unavailable' }) };
+  };
+  console.warn = () => {};
+  console.error = () => {};
+  const integration = createBattleboardIntegration({
+    getAllGuildConfigs: () => [{ guildId: serverId, config }],
+    getGuildConfig: () => config,
+    saveData: () => {},
+    onServerAvailabilityChange: (id, active, details) => availability.push({ id, active, details }),
+  });
+  try {
+    assert.equal(await integration.start(), true);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      config.battleboardState.retryAfterAt = new Date(Date.now() - 1000).toISOString();
+      await integration.tick();
+    }
+    assert.equal(integration.isServerActive(serverId), true);
+    assert.ok(!availability.some(item => item.id === serverId && item.active === false &&
+      item.details.phase === 'runtime-failure'));
+  } finally {
+    integration.stop();
+    global.fetch = oldFetch;
+    console.warn = oldWarn;
+    console.error = oldError;
+    if (oldApiUrl === undefined) delete process.env.BATTLEBOARD_API_URL;
+    else process.env.BOT_API_KEY = oldApiKey;
+  }
+});

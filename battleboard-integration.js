@@ -243,6 +243,7 @@ function createBattleboardIntegration(deps = {}) {
   const markBattleProcessed = typeof deps.markBattleProcessed === 'function'
     ? deps.markBattleProcessed : () => {};
   const activeServerIds = new Set();
+  const preflightPassedServerIds = new Set();
   const SERVER_FAILURES_BEFORE_FAILOVER = 3;
   let started = false;
   let running = false;
@@ -255,10 +256,32 @@ function createBattleboardIntegration(deps = {}) {
         String(serverId) + ' | Error=' + String(error && error.message || error).slice(0, 180));
     }
   }
-  function hasPartialDelivery(state = {}) {
-    return (Array.isArray(state.delivered) ? state.delivered : []).some(record =>
-      record && record.status !== 'sent' && Number(record.partsSent) > 0
+  function hasUnfinishedDeliveryBeforeCursor(state = {}) {
+    const pendingBattleIds = new Set(
+      (Array.isArray(state.pendingEvents) ? state.pendingEvents : [])
+        .map(entry => String(entry && entry.battleId || '').trim())
+        .filter(id => /^\d+$/.test(id))
     );
+    const cursorMs = timestampMs(state.eventCursor && state.eventCursor.after);
+    const cursorBattleId = String(state.eventCursor && state.eventCursor.afterBattleId || '0');
+    return (Array.isArray(state.delivered) ? state.delivered : []).some(record => {
+      if (!record || !/^\d+$/.test(String(record.battleId || ''))) return false;
+      if (record.status === 'below-threshold') return false;
+      const partAttempts = Array.isArray(record.partResults) &&
+        record.partResults.some(part => Number(part && part.attempts) > 0);
+      const hasDeliveryProgress = record.status === 'sent' ||
+        record.status === 'sending' || record.status === 'failed' ||
+        Number(record.partsSent) > 0 || partAttempts;
+      if (!hasDeliveryProgress) return false;
+      const battleId = String(record.battleId);
+      if (pendingBattleIds.has(battleId)) return true;
+      const eventMs = timestampMs(record.eventCheckedAt);
+      if (cursorMs === null || eventMs === null) return false;
+      if (eventMs > cursorMs) return true;
+      if (eventMs < cursorMs) return false;
+      try { return BigInt(battleId) > BigInt(cursorBattleId); }
+      catch { return false; }
+    });
   }
 
   function getApiConfig() {
@@ -394,6 +417,9 @@ function createBattleboardIntegration(deps = {}) {
     const reportAttemptStartedAtMs = Date.now();
     const discordSendThisRunStartedAtMs = reportAttemptStartedAtMs;
     if (!record.firstAttemptAt) record.firstAttemptAt = new Date(reportAttemptStartedAtMs).toISOString();
+    if (event && (event.checked_at || event.checkedAt)) {
+      record.eventCheckedAt = String(event.checked_at || event.checkedAt);
+    }
     if (!Array.isArray(record.partResults)) record.partResults = [];
     record.auditVersion = 2;
     record.lastAttemptAt = new Date(reportAttemptStartedAtMs).toISOString();
@@ -1068,7 +1094,10 @@ function createBattleboardIntegration(deps = {}) {
           const complete = await processEventWithSharedDedupe(serverId, guildConfig, state, event);
           if (!complete) enqueuePendingEvent(serverId, state, event, 'detail-not-ready');
         } catch (error) {
-          if ([401, 403].includes(Number(error && error.status))) throw error;
+          if ([401, 403].includes(Number(error && error.status))) {
+            enqueuePendingEvent(serverId, state, event, String(error && error.message || error));
+            throw error;
+          }
           enqueuePendingEvent(serverId, state, event, String(error && error.message || error));
           deferRemaining = true;
           console.warn('⚠️ [Auto-Battle] ประมวลผล Battle ไม่สำเร็จ จัดเข้าคิวเพื่อลองใหม่' +
@@ -1105,6 +1134,11 @@ function createBattleboardIntegration(deps = {}) {
         if (Number.isFinite(retryAfter) && retryAfter > Date.now()) continue;
         try {
           await pollServer(serverId, config);
+          if (!preflightPassedServerIds.has(serverId)) {
+            preflightPassedServerIds.add(serverId);
+            notifyServerAvailability(serverId, true, { phase: 'runtime-recovered', apiAvailable: true });
+            console.log('✅ [Battleboard] API กลับมาใช้งานได้หลังช่วงพักรอรายงานค้าง | Discord Server=' + serverId);
+          }
           if (Number(state.consecutiveFailures) > 0 || state.retryAfterAt) {
             delete state.consecutiveFailures;
             delete state.retryAfterAt;
@@ -1122,13 +1156,14 @@ function createBattleboardIntegration(deps = {}) {
             (Number.isFinite(Number(error && error.autoBattleStageMs)) ? ' | ใช้เวลา=' + formatPreciseDuration(Number(error && error.autoBattleStageMs)) : '') +
             ' | สาเหตุ=' + String(error && error.message || error).slice(0, 260));
           if (started && activeServerIds.has(serverId) && failures >= SERVER_FAILURES_BEFORE_FAILOVER) {
-            if (hasPartialDelivery(state)) {
+            if (hasUnfinishedDeliveryBeforeCursor(state)) {
               if (failures === SERVER_FAILURES_BEFORE_FAILOVER || failures % 5 === 0) {
                 console.error('🛑 [Auto-Battle] ยังไม่สลับไป Official API เพราะมีรายงานส่งค้างบางส่วน; คง Battleboard เป็นแหล่งหลักเพื่อไม่ให้เกิดรายงานซ้ำ' +
                   ' | เซิร์ฟเวอร์=' + serverId + ' | Failure=' + failures);
               }
             } else {
               activeServerIds.delete(serverId);
+              preflightPassedServerIds.delete(serverId);
               const reason = String(error && error.message || error).replace(/https?:\/\/\S+/gi, '[URL]').slice(0, 180);
               notifyServerAvailability(serverId, false, {
                 phase: 'runtime-failure',
@@ -1159,6 +1194,7 @@ function createBattleboardIntegration(deps = {}) {
       delete state.consecutiveFailures;
       delete state.retryAfterAt;
       activeServerIds.add(String(serverId));
+      preflightPassedServerIds.add(String(serverId));
       persist();
       notifyServerAvailability(serverId, true, {
         phase: 'startup-preflight',
@@ -1170,10 +1206,24 @@ function createBattleboardIntegration(deps = {}) {
         ' | Event ตัวอย่าง=' + result.items.length);
       return true;
     } catch (error) {
-      activeServerIds.delete(String(serverId));
+      preflightPassedServerIds.delete(String(serverId));
       const reason = String(error && error.message || error).replace(/https?:\/\/\S+/gi, '[URL]').slice(0, 180);
+      if (hasUnfinishedDeliveryBeforeCursor(getState(config))) {
+        activeServerIds.add(String(serverId));
+        notifyServerAvailability(serverId, true, {
+          phase: 'startup-hold-pending-delivery',
+          apiAvailable: false,
+          reason,
+          responseMs: Date.now() - startedAtMs,
+        });
+        console.error('🛑 [Battleboard] API preflight ไม่ผ่าน แต่ยังมีรายงานที่ส่งค้าง/ส่งบางส่วน; ระงับ Official API fallback สำหรับเซิร์ฟเวอร์นี้ชั่วคราวเพื่อป้องกันรายงานซ้ำ และลอง API ใหม่ทุก 30 วินาที' +
+          ' | Discord Server=' + serverId + ' | สาเหตุ=' + reason);
+        return true;
+      }
+      activeServerIds.delete(String(serverId));
       notifyServerAvailability(serverId, false, {
         phase: 'startup-preflight-failed',
+        apiAvailable: false,
         reason,
         responseMs: Date.now() - startedAtMs,
       });
@@ -1214,7 +1264,9 @@ function createBattleboardIntegration(deps = {}) {
       return false;
     }
     console.log('🌐 [Battleboard] API integration enabled | Asia | Poll=30s | Preflight ผ่าน=' +
-      activeServerIds.size + '/' + candidates.length + ' server(s); failover แยกตาม Discord Server');
+      preflightPassedServerIds.size + ' server(s) | พักรอรายงานค้าง=' +
+      (activeServerIds.size - preflightPassedServerIds.size) +
+      ' server(s) | failover แยกตาม Discord Server');
     timer = setTimeout(tick, 2000);
     return true;
   }
@@ -1222,6 +1274,8 @@ function createBattleboardIntegration(deps = {}) {
     if (timer) clearTimeout(timer);
     timer = null;
     started = false;
+    activeServerIds.clear();
+    preflightPassedServerIds.clear();
   }
   return { start, stop, isConfigured, tick, isServerActive: serverId => activeServerIds.has(String(serverId)) };
 }
