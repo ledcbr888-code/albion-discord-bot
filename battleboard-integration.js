@@ -1022,8 +1022,14 @@ function createBattleboardIntegration(deps = {}) {
       throw error;
     }
     const eventsApiMs = Date.now() - eventsRequestStartedAtMs;
+    if (!result || !Array.isArray(result.items)) {
+      const error = new Error('Battleboard Events Feed response schema is invalid.');
+      error.autoBattleStage = 'ตรวจสอบรูปแบบ Events Feed';
+      error.autoBattleStageMs = eventsApiMs;
+      throw error;
+    }
     const botReceivedAt = new Date().toISOString();
-    const events = Array.isArray(result.items) ? result.items : [];
+    const events = result.items;
     if (events.length) {
       state.lastEventsPollSuccessLogAt = botReceivedAt;
       console.log('📥 [Auto-Battle] รับ Events feed จาก Battleboard | เซิร์ฟเวอร์=' + serverId +

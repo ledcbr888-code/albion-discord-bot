@@ -826,3 +826,65 @@ test('skips an Events Feed battle already handled by the Official API source to 
     else process.env.BOT_API_KEY = oldApiKey;
   }
 });
+
+test('runtime Events Feed with HTTP 200 but invalid schema fails over instead of being treated as an empty poll', async () => {
+  const oldApiUrl = process.env.BATTLEBOARD_API_URL;
+  const oldApiKey = process.env.BOT_API_KEY;
+  const oldFetch = global.fetch;
+  const oldWarn = console.warn;
+  const oldError = console.error;
+  const availability = [];
+  const serverId = '1165745441120452638';
+  const config = {
+    guilds: [{ id: 'guild-plac', name: 'PLAC' }],
+    players: [],
+    autoBattles: [{ targetGuild: 'PLAC', targetGuildId: 'guild-plac', channelId: '99999999999999999', enabled: true }],
+    battleboardState: {},
+  };
+  const items = buildTrackedItems(config);
+  Object.assign(config.battleboardState, {
+    snapshotInitialized: true,
+    snapshotFingerprint: snapshotFingerprint(items),
+    lastSnapshotSyncAt: new Date().toISOString(),
+    cursorInitialized: true,
+    eventCursor: { after: '2026-11-10T00:00:00.000Z', afterBattleId: '1000' },
+    delivered: [],
+    pendingEvents: [],
+  });
+  process.env.BATTLEBOARD_API_URL = 'https://battleboard.example';
+  process.env.BOT_API_KEY = 'test-key-'.padEnd(40, 'x');
+  global.fetch = async urlValue => {
+    const url = new URL(String(urlValue));
+    if (!url.searchParams.has('after')) {
+      return { ok: true, status: 200, text: async () => JSON.stringify({ items: [], cursor: { after: '2026-11-10T00:00:00.000Z', afterBattleId: '1000' } }) };
+    }
+    return { ok: true, status: 200, text: async () => JSON.stringify({ events: [] }) };
+  };
+  console.warn = () => {};
+  console.error = () => {};
+  const integration = createBattleboardIntegration({
+    getAllGuildConfigs: () => [{ guildId: serverId, config }],
+    getGuildConfig: () => config,
+    saveData: () => {},
+    onServerAvailabilityChange: (id, active, details) => availability.push({ id, active, details }),
+  });
+  try {
+    assert.equal(await integration.start(), true);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      config.battleboardState.retryAfterAt = new Date(Date.now() - 1000).toISOString();
+      await integration.tick();
+    }
+    assert.equal(integration.isServerActive(serverId), false);
+    assert.ok(availability.some(item => item.id === serverId && item.active === false && item.details.phase === 'runtime-failure'));
+    assert.equal(config.battleboardState.consecutiveFailures, 3);
+  } finally {
+    integration.stop();
+    global.fetch = oldFetch;
+    console.warn = oldWarn;
+    console.error = oldError;
+    if (oldApiUrl === undefined) delete process.env.BATTLEBOARD_API_URL;
+    else process.env.BATTLEBOARD_API_URL = oldApiUrl;
+    if (oldApiKey === undefined) delete process.env.BOT_API_KEY;
+    else process.env.BOT_API_KEY = oldApiKey;
+  }
+});
