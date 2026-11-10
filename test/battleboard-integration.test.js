@@ -629,7 +629,10 @@ test('startup API preflight rejects an unauthorized Events Feed so the Official 
     guilds: [{ id: 'guild-plac', name: 'PLAC' }],
     players: [],
     autoBattles: [{ targetGuild: 'PLAC', targetGuildId: 'guild-plac', channelId: '99999999999999999', enabled: true }],
-    battleboardState: {},
+    battleboardState: {
+      cursorInitialized: true,
+      eventCursor: { after: '2026-11-10T00:00:00.000Z', afterBattleId: '1000' },
+    },
   };
   process.env.BATTLEBOARD_API_URL = 'https://battleboard.example';
   process.env.BOT_API_KEY = 'test-key-'.padEnd(40, 'x');
@@ -645,7 +648,8 @@ test('startup API preflight rejects an unauthorized Events Feed so the Official 
   try {
     assert.equal(await integration.start(), false);
     assert.equal(integration.isServerActive(serverId), false);
-    assert.ok(availability.some(item => item.id === serverId && item.active === false && item.details.phase === 'startup-preflight-failed'));
+    assert.ok(availability.some(item => item.id === serverId && item.active === false &&
+      item.details.phase === 'startup-preflight-failed' && item.details.cursorInitialized === true));
   } finally {
     integration.stop();
     global.fetch = oldFetch;

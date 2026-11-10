@@ -6681,7 +6681,8 @@ client.once('clientReady', async () => {
             }
             battleboardPrimaryServerIds.delete(id);
             const config = getGuildConfig(id, false);
-            if (details.phase === 'runtime-failure' && details.cursorInitialized === true && config) {
+            if (['runtime-failure', 'startup-preflight-failed'].includes(details.phase) &&
+                details.cursorInitialized === true && config) {
                 let changed = false;
                 for (const route of (Array.isArray(config.autoBattles) ? config.autoBattles : [])) {
                     if (route && route.baselineInitialized !== true) {
@@ -6725,7 +6726,7 @@ client.once('clientReady', async () => {
             String(error && error.message || error).slice(0, 200));
     }
     if (battleboardPrimary) {
-        console.log('🛡️ [Auto-Battle] Battleboard Events เป็นแหล่งหลักเฉพาะเซิร์ฟเวอร์ที่ API preflight ผ่าน; เซิร์ฟเวอร์อื่นใช้ Official API fallback');
+        console.log('🛡️ [Auto-Battle] Battleboard Events เป็นแหล่งหลักสำหรับเซิร์ฟเวอร์ที่ Preflight ผ่านหรือกำลังสะสางรายงานค้าง; เซิร์ฟเวอร์ที่เหลือใช้ Official API fallback');
     } else {
         console.log('🛡️ [Auto-Battle] Official API scanner เป็นแหล่งหลัก เพราะ Battleboard API preflight ไม่ผ่านหรือไม่มี tracking ที่ใช้ได้');
     }

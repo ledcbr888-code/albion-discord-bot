@@ -1207,8 +1207,9 @@ function createBattleboardIntegration(deps = {}) {
       return true;
     } catch (error) {
       preflightPassedServerIds.delete(String(serverId));
+      const state = getState(config);
       const reason = String(error && error.message || error).replace(/https?:\/\/\S+/gi, '[URL]').slice(0, 180);
-      if (hasUnfinishedDeliveryBeforeCursor(getState(config))) {
+      if (hasUnfinishedDeliveryBeforeCursor(state)) {
         activeServerIds.add(String(serverId));
         notifyServerAvailability(serverId, true, {
           phase: 'startup-hold-pending-delivery',
@@ -1225,6 +1226,7 @@ function createBattleboardIntegration(deps = {}) {
         phase: 'startup-preflight-failed',
         apiAvailable: false,
         reason,
+        cursorInitialized: state.cursorInitialized === true,
         responseMs: Date.now() - startedAtMs,
       });
       console.warn('⚠️ [Battleboard] API preflight ไม่ผ่าน; ใช้ Official API fallback สำหรับเซิร์ฟเวอร์นี้' +
