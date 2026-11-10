@@ -3,6 +3,7 @@ const { createHash } = require('node:crypto');
 const POLL_MS = 30000;
 const TIMEOUT_MS = 8000;
 const SNAPSHOT_SYNC_INTERVAL_MS = 5 * 60 * 1000;
+const EVENT_POLL_SUCCESS_LOG_INTERVAL_MS = 5 * 60 * 1000;
 const RETRY_BASE_MS = 30 * 1000;
 const RETRY_MAX_MS = 5 * 60 * 1000;
 const MAX_DELIVERIES = 2000;
@@ -977,10 +978,27 @@ function createBattleboardIntegration(deps = {}) {
     const botReceivedAt = new Date().toISOString();
     const events = Array.isArray(result.items) ? result.items : [];
     if (events.length) {
+      state.lastEventsPollSuccessLogAt = botReceivedAt;
       console.log('📥 [Auto-Battle] รับ Events feed จาก Battleboard | เซิร์ฟเวอร์=' + serverId +
         ' | จำนวน Event=' + events.length +
         ' | API ใช้เวลา=' + formatPreciseDuration(eventsApiMs) +
         ' | บอทได้รับข้อมูล=' + formatThaiTimestamp(botReceivedAt));
+    } else {
+      // Keep successful empty polls observable without creating a log every 30 seconds.
+      const lastSuccessLogAtMs = Date.parse(state.lastEventsPollSuccessLogAt || '');
+      const shouldLogEmptyPoll = !Number.isFinite(lastSuccessLogAtMs) ||
+        Date.now() - lastSuccessLogAtMs >= EVENT_POLL_SUCCESS_LOG_INTERVAL_MS;
+      if (shouldLogEmptyPoll) {
+        const cursor = state.eventCursor || {};
+        console.log('✅ [Auto-Battle] Events Feed Poll สำเร็จ ไม่มี Event ใหม่' +
+          ' | เซิร์ฟเวอร์=' + serverId +
+          ' | จำนวน Event=0' +
+          ' | API ใช้เวลา=' + formatPreciseDuration(eventsApiMs) +
+          ' | Cursor=' + String(cursor.after || 'ไม่ทราบ') + '/' + String(cursor.afterBattleId || '0') +
+          ' | ตรวจเมื่อ=' + formatThaiTimestamp(botReceivedAt));
+        state.lastEventsPollSuccessLogAt = botReceivedAt;
+        persist();
+      }
     }
     let deferRemaining = false;
     for (const rawEvent of events) {
