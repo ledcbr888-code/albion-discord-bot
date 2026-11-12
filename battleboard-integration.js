@@ -1061,6 +1061,7 @@ function createBattleboardIntegration(deps = {}) {
       console.log('📥 [Auto-Battle] รับ Events feed จาก Battleboard | เซิร์ฟเวอร์=' + serverId +
         ' | จำนวน Event=' + events.length +
         ' | API ใช้เวลา=' + formatPreciseDuration(eventsApiMs) +
+        ' | สถานะ=' + (activeSourceMode === 'fallback' ? 'Health Probe (ยังไม่ประมวลผล)' : 'Primary') +
         ' | บอทได้รับข้อมูล=' + formatThaiTimestamp(botReceivedAt));
     } else {
       // Keep successful empty polls observable without creating a log every 30 seconds.
@@ -1073,6 +1074,7 @@ function createBattleboardIntegration(deps = {}) {
           ' | เซิร์ฟเวอร์=' + serverId +
           ' | จำนวน Event=0' +
           ' | API ใช้เวลา=' + formatPreciseDuration(eventsApiMs) +
+          ' | สถานะ=' + (activeSourceMode === 'fallback' ? 'Health Probe' : 'Primary') +
           ' | Cursor=' + String(cursor.after || 'ไม่ทราบ') + '/' + String(cursor.afterBattleId || '0') +
           ' | ตรวจเมื่อ=' + formatThaiTimestamp(botReceivedAt));
         state.lastEventsPollSuccessLogAt = botReceivedAt;
