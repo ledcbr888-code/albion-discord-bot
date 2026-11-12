@@ -1016,7 +1016,9 @@ function createBattleboardIntegration(deps = {}) {
 
     // Retry old detail-pending events in a bounded batch, but never let an unavailable
     // Battle detail stop the cursor from advancing over newer Auto-Battle events.
-    await retryPendingEvents(serverId, guildConfig, state);
+    if ((runtimeSourceModes.get(serverId) || 'primary') === 'primary') {
+      await retryPendingEvents(serverId, guildConfig, state);
+    }
 
     const eventsRequestStartedAtMs = Date.now();
     let result;
