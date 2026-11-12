@@ -10,6 +10,8 @@ const MAX_DELIVERIES = 2000;
 const MAX_PENDING_EVENTS = 2000;
 const MAX_PENDING_RETRIES_PER_TICK = 10;
 const PENDING_EVENT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const SOURCE_FAILOVER_FAILURE_THRESHOLD = 3;
+const SOURCE_RECOVERY_SUCCESS_THRESHOLD = 2;
 function normalizeName(value) {
   return String(value == null ? '' : value).normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
 }
@@ -236,6 +238,8 @@ function createBattleboardIntegration(deps = {}) {
   const saveData = deps.saveData;
   const buildBattleReportPayload = deps.buildBattleReportPayload;
   const formatFame = deps.formatFame || (value => Number(value || 0).toLocaleString());
+  const onSourceChange = deps.onSourceChange;
+  const runtimeSourceModes = new Map();
   let started = false;
   let running = false;
   let timer = null;
@@ -282,6 +286,48 @@ function createBattleboardIntegration(deps = {}) {
     if (!Array.isArray(config.battleboardState.delivered)) config.battleboardState.delivered = [];
     if (!Array.isArray(config.battleboardState.pendingEvents)) config.battleboardState.pendingEvents = [];
     return config.battleboardState;
+  }
+  function isBattleProcessed(config, battleId) {
+    const id = String(battleId || '').trim();
+    if (!/^\d+$/.test(id)) return false;
+    const processed = config && config.processedBattles;
+    if (processed instanceof Set) return processed.has(id);
+    return Array.isArray(processed) && processed.map(String).includes(id);
+  }
+  function markBattleProcessed(config, battleId) {
+    const id = String(battleId || '').trim();
+    if (!config || !/^\d+$/.test(id) || isBattleProcessed(config, id)) return false;
+    const processed = config.processedBattles instanceof Set
+      ? [...config.processedBattles].map(String)
+      : (Array.isArray(config.processedBattles) ? config.processedBattles.map(String) : []);
+    processed.push(id);
+    config.processedBattles = [...new Set(processed)].slice(-1000);
+    persist();
+    return true;
+  }
+  function setRuntimeSourceMode(serverId, guildConfig, state, mode, reason) {
+    const id = String(serverId);
+    const current = runtimeSourceModes.get(id) || 'primary';
+    if (current === mode) return true;
+    if (typeof onSourceChange === 'function') {
+      let accepted = false;
+      try {
+        accepted = onSourceChange({ serverId: id, mode, reason: String(reason || ''), guildConfig, state }) !== false;
+      } catch (error) {
+        console.error('❌ [Battleboard] Source switch callback failed | เซิร์ฟเวอร์=' + id +
+          ' | เป้าหมาย=' + mode + ' | สาเหตุ=' + String(error && error.message || error).slice(0, 180));
+      }
+      if (!accepted) return false;
+    }
+    runtimeSourceModes.set(id, mode);
+    state.sourceMode = mode;
+    state.sourceModeChangedAt = new Date().toISOString();
+    state.consecutiveSuccesses = 0;
+    persist();
+    console.log((mode === 'primary' ? '✅' : '⚠️') + ' [Auto-Battle Source] เซิร์ฟเวอร์=' + id +
+      ' | แหล่งข้อมูล=' + (mode === 'primary' ? 'Battleboard Events PRIMARY' : 'Official Albion API FALLBACK') +
+      ' | เหตุผล=' + String(reason || 'สถานะเปลี่ยน'));
+    return true;
   }
   function findDelivery(state, key) { return state.delivered.find(item => item && item.key === key) || null; }
   function saveDelivery(state, record) {
@@ -584,6 +630,11 @@ function createBattleboardIntegration(deps = {}) {
   async function processEvent(serverId, guildConfig, state, event, options = {}) {
     const battleId = String(event && event.battle_id || '').trim();
     if (!/^\d+$/.test(battleId)) return true;
+    if (isBattleProcessed(guildConfig, battleId)) {
+      console.log('⏭️ [Auto-Battle] ข้าม Event เพราะ Official API เคยจัดการ Battle นี้แล้ว | เซิร์ฟเวอร์=' +
+        serverId + ' | Battle ID=' + battleId + ' | ป้องกันรายงานซ้ำระหว่าง Primary/Fallback');
+      return true;
+    }
 
     const pendingEntry = options.pendingEntry || null;
     const retryAttempt = pendingEntry ? Math.max(1, Number(pendingEntry.attempts) || 1) : 0;
@@ -669,6 +720,7 @@ function createBattleboardIntegration(deps = {}) {
         serverId + ' | Battle ID=' + battleId +
         ' | Detail API=' + formatPreciseDuration(event.__detailFetchTotalMs) +
         ' | ตรวจ Route=' + formatPreciseDuration(routeMatchMs));
+      markBattleProcessed(guildConfig, battleId);
       return true;
     }
     const players = trackedPlayers(guildConfig);
@@ -681,6 +733,7 @@ function createBattleboardIntegration(deps = {}) {
         ' | Detail API=' + formatPreciseDuration(event.__detailFetchTotalMs) +
         ' | ตรวจ Route=' + formatPreciseDuration(routeMatchMs)
       );
+      markBattleProcessed(guildConfig, battleId);
       return true;
     }
 
@@ -810,6 +863,7 @@ function createBattleboardIntegration(deps = {}) {
         channelFetchMs,
       });
     }
+    markBattleProcessed(guildConfig, battleId);
     return true;
   }
   function enqueuePendingEvent(serverId, state, event, reason) {
@@ -974,9 +1028,32 @@ function createBattleboardIntegration(deps = {}) {
       }
       throw error;
     }
+    if (!result || !Array.isArray(result.items)) {
+      const error = new Error('Battleboard Events Feed returned an invalid response.');
+      error.autoBattleStage = 'ตรวจโครงสร้าง Events Feed';
+      throw error;
+    }
     const eventsApiMs = Date.now() - eventsRequestStartedAtMs;
     const botReceivedAt = new Date().toISOString();
-    const events = Array.isArray(result.items) ? result.items : [];
+    const events = result.items;
+    state.consecutiveFailures = 0;
+    delete state.retryAfterAt;
+    const activeSourceMode = runtimeSourceModes.has(serverId)
+      ? runtimeSourceModes.get(serverId)
+      : 'primary';
+    if (activeSourceMode === 'fallback') {
+      state.consecutiveSuccesses = Math.max(0, Number(state.consecutiveSuccesses) || 0) + 1;
+      console.log('🔎 [Auto-Battle Source] ตรวจ Battleboard API เพื่อกลับเป็น Primary | เซิร์ฟเวอร์=' +
+        serverId + ' | สำเร็จ=' + state.consecutiveSuccesses + '/' + SOURCE_RECOVERY_SUCCESS_THRESHOLD +
+        ' | Events API=' + formatPreciseDuration(eventsApiMs));
+      if (state.consecutiveSuccesses < SOURCE_RECOVERY_SUCCESS_THRESHOLD ||
+          !setRuntimeSourceMode(serverId, guildConfig, state, 'primary', 'Battleboard Events Feed ผ่าน health check ต่อเนื่อง')) {
+        persist();
+        return true;
+      }
+    } else {
+      state.consecutiveSuccesses = 0;
+    }
     if (events.length) {
       state.lastEventsPollSuccessLogAt = botReceivedAt;
       console.log('📥 [Auto-Battle] รับ Events feed จาก Battleboard | เซิร์ฟเวอร์=' + serverId +
@@ -1050,19 +1127,21 @@ function createBattleboardIntegration(deps = {}) {
         if (Number.isFinite(retryAfter) && retryAfter > Date.now()) continue;
         try {
           await pollServer(serverId, config);
-          if (Number(state.consecutiveFailures) > 0 || state.retryAfterAt) {
-            delete state.consecutiveFailures;
-            delete state.retryAfterAt;
-            persist();
-          }
         } catch (error) {
           const failures = Math.max(0, Number(state.consecutiveFailures) || 0) + 1;
           const delay = retryDelayMs(failures);
           state.consecutiveFailures = failures;
+          state.consecutiveSuccesses = 0;
           state.retryAfterAt = new Date(Date.now() + delay).toISOString();
+          if (failures >= SOURCE_FAILOVER_FAILURE_THRESHOLD) {
+            setRuntimeSourceMode(serverId, config, state, 'fallback',
+              'Battleboard API ล้มเหลวต่อเนื่อง ' + failures + ' ครั้ง');
+          }
           persist();
           console.error('❌ [Auto-Battle] ตรวจสอบ Event ไม่สำเร็จ จะลองใหม่ใน ' + Math.ceil(delay / 1000) + ' วินาที' +
             ' | เซิร์ฟเวอร์=' + serverId +
+            ' | ล้มเหลวต่อเนื่อง=' + failures + '/' + SOURCE_FAILOVER_FAILURE_THRESHOLD +
+            ' | แหล่งข้อมูล=' + (runtimeSourceModes.get(serverId) || 'primary') +
             ' | ขั้นตอน=' + String(error && error.autoBattleStage || 'ซิงก์ Tracking / Poll') +
             (Number.isFinite(Number(error && error.autoBattleStageMs)) ? ' | ใช้เวลา=' + formatPreciseDuration(Number(error.autoBattleStageMs)) : '') +
             ' | สาเหตุ=' + String(error && error.message || error).slice(0, 260));
@@ -1080,7 +1159,30 @@ function createBattleboardIntegration(deps = {}) {
       console.log('ℹ️ [Battleboard] Not configured; existing Official API Auto-Battle scanner remains active.');
       return false;
     }
-    console.log('🌐 [Battleboard] API integration enabled | Asia | Poll=30s');
+    const servers = typeof getAllGuildConfigs === 'function' ? getAllGuildConfigs() : [];
+    for (const item of servers) {
+      const serverId = String(item && item.guildId || '').trim();
+      const config = item && item.config
+        ? item.config
+        : (typeof getGuildConfig === 'function' ? getGuildConfig(serverId, false) : null);
+      if (!validDiscordServerId(serverId) || !config) continue;
+      const state = getState(config);
+      runtimeSourceModes.set(serverId, 'fallback');
+      state.sourceMode = 'fallback';
+      state.consecutiveSuccesses = 0;
+      try {
+        if (typeof onSourceChange === 'function') {
+          const accepted = onSourceChange({ serverId, mode: 'fallback', reason: 'เริ่มระบบและรอตรวจสุขภาพ Battleboard API', guildConfig: config, state });
+          if (accepted === false) console.warn('⚠️ [Auto-Battle Source] ยังเปิด Official Fallback ไม่สำเร็จ | เซิร์ฟเวอร์=' + serverId);
+        }
+      } catch (error) {
+        console.error('❌ [Auto-Battle Source] Startup fallback callback failed | เซิร์ฟเวอร์=' + serverId +
+          ' | สาเหตุ=' + String(error && error.message || error).slice(0, 180));
+      }
+      console.log('🛟 [Auto-Battle Source] เริ่มต้นด้วย Official Albion API FALLBACK ระหว่างตรวจ Battleboard | เซิร์ฟเวอร์=' + serverId);
+    }
+    persist();
+    console.log('🌐 [Battleboard] API integration enabled | Asia | Poll=30s | Per-server health failover enabled');
     timer = setTimeout(tick, 2000);
     return true;
   }
@@ -1093,5 +1195,5 @@ function createBattleboardIntegration(deps = {}) {
 }
 module.exports = {
   createBattleboardIntegration,
-  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce, snapshotFingerprint, hasTrackedSnapshotChanged, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup, timestampMs, formatThaiDuration, formatThaiTimestamp, formatPreciseDuration, elapsedMsBetween, getBattleDelayMetrics, formatBattleDelayLines },
+  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce, snapshotFingerprint, hasTrackedSnapshotChanged, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup, timestampMs, formatThaiDuration, formatThaiTimestamp, formatPreciseDuration, elapsedMsBetween, getBattleDelayMetrics, formatBattleDelayLines, isBattleProcessed, markBattleProcessed, SOURCE_FAILOVER_FAILURE_THRESHOLD, SOURCE_RECOVERY_SUCCESS_THRESHOLD },
 };
