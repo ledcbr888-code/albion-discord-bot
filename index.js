@@ -6666,6 +6666,9 @@ client.once('clientReady', async () => {
             const id = String(serverId || '').trim();
             if (!id) return;
             if (active) {
+                // Do not return a recovering server to Primary while the Official scanner
+                // has already captured a fallback candidate batch for this or another server.
+                if (details.phase === 'runtime-recovered' && autoBattleCheckRunning) return false;
                 battleboardPrimaryServerIds.add(id);
                 if (details.phase === 'startup-hold-pending-delivery') {
                     console.error('🛑 [Auto-Battle Source] Discord Server=' + id +
@@ -6677,7 +6680,7 @@ client.once('clientReady', async () => {
                     console.log('🛡️ [Auto-Battle Source] Discord Server=' + id +
                         ' | แหล่งหลัก=Battleboard Events | ตรวจ API ผ่านแล้ว');
                 }
-                return;
+                return true;
             }
             battleboardPrimaryServerIds.delete(id);
             const config = getGuildConfig(id, false);
@@ -6700,6 +6703,7 @@ client.once('clientReady', async () => {
                 ' | แหล่งหลักเปลี่ยนเป็น Official API fallback' +
                 (details.phase === 'startup-preflight-failed' ? ' | เหตุผล=API preflight ไม่ผ่าน' : ' | เหตุผล=Battleboard API ล้มเหลวต่อเนื่อง') +
                 ' | รายละเอียด=' + String(details.reason || 'ไม่มีรายละเอียด').slice(0, 180));
+            return true;
         },
         isBattleProcessed: (serverId, battleId) => {
             const config = getGuildConfig(serverId, false);

@@ -10,6 +10,7 @@ const MAX_DELIVERIES = 2000;
 const MAX_PENDING_EVENTS = 2000;
 const MAX_PENDING_RETRIES_PER_TICK = 10;
 const PENDING_EVENT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const SOURCE_RECOVERY_SUCCESS_THRESHOLD = 2;
 function normalizeName(value) {
   return String(value == null ? '' : value).normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
 }
@@ -243,6 +244,7 @@ function createBattleboardIntegration(deps = {}) {
   const markBattleProcessed = typeof deps.markBattleProcessed === 'function'
     ? deps.markBattleProcessed : () => {};
   const activeServerIds = new Set();
+  const fallbackServerIds = new Set();
   const preflightPassedServerIds = new Set();
   const SERVER_FAILURES_BEFORE_FAILOVER = 3;
   let started = false;
@@ -250,10 +252,11 @@ function createBattleboardIntegration(deps = {}) {
   let timer = null;
 
   function notifyServerAvailability(serverId, active, details = {}) {
-    try { onServerAvailabilityChange(String(serverId), active === true, details); }
+    try { return onServerAvailabilityChange(String(serverId), active === true, details) !== false; }
     catch (error) {
       console.error('❌ [Battleboard] Source handoff callback failed | Discord Server=' +
         String(serverId) + ' | Error=' + String(error && error.message || error).slice(0, 180));
+      return false;
     }
   }
   function hasUnfinishedDeliveryBeforeCursor(state = {}) {
@@ -1116,6 +1119,60 @@ function createBattleboardIntegration(deps = {}) {
       persist();
     }
   }
+  async function probeFallbackServer(serverId, guildConfig, state) {
+    const probeStartedAtMs = Date.now();
+    try {
+      // Probe only the authenticated Events Feed endpoint. Do not read/move the saved
+      // cursor and do not process returned events until Primary ownership is restored.
+      const result = await request(eventsPath(serverId, null, 1));
+      if (!result || !Array.isArray(result.items)) {
+        const error = new Error('Battleboard Events Feed response schema is invalid during fallback recovery.');
+        error.autoBattleStage = 'ตรวจ Schema เพื่อกลับจาก Official Fallback';
+        throw error;
+      }
+      state.consecutiveFailures = 0;
+      delete state.retryAfterAt;
+      state.fallbackRecoverySuccesses = Math.max(0, Number(state.fallbackRecoverySuccesses) || 0) + 1;
+      console.log('🔎 [Auto-Battle Source] ตรวจ Battleboard เพื่อกลับเป็น Primary | เซิร์ฟเวอร์=' + serverId +
+        ' | สำเร็จ=' + state.fallbackRecoverySuccesses + '/' + SOURCE_RECOVERY_SUCCESS_THRESHOLD +
+        ' | API ใช้เวลา=' + formatPreciseDuration(Date.now() - probeStartedAtMs));
+
+      if (state.fallbackRecoverySuccesses >= SOURCE_RECOVERY_SUCCESS_THRESHOLD) {
+        const accepted = notifyServerAvailability(serverId, true, {
+          phase: 'runtime-recovered',
+          apiAvailable: true,
+          recoveryChecks: state.fallbackRecoverySuccesses,
+          responseMs: Date.now() - probeStartedAtMs,
+        });
+        if (accepted) {
+          activeServerIds.add(String(serverId));
+          fallbackServerIds.delete(String(serverId));
+          preflightPassedServerIds.add(String(serverId));
+          state.fallbackRecoverySuccesses = 0;
+          console.log('✅ [Auto-Battle RECOVERY] Battleboard กลับมาเป็น Primary แล้ว | เซิร์ฟเวอร์=' + serverId +
+            ' | Official API scanner จะหยุดเฉพาะเซิร์ฟเวอร์นี้ | คง Cursor เดิมเพื่ออ่าน Event backlog ต่อ');
+        } else {
+          console.log('⏸️ [Auto-Battle RECOVERY] API กลับมาแล้ว แต่ยังไม่สลับ Primary เพราะ Official API scanner กำลังทำงาน | เซิร์ฟเวอร์=' + serverId);
+        }
+      }
+      persist();
+      return true;
+    } catch (error) {
+      const failures = Math.max(0, Number(state.consecutiveFailures) || 0) + 1;
+      const delay = retryDelayMs(failures);
+      state.consecutiveFailures = failures;
+      state.fallbackRecoverySuccesses = 0;
+      state.retryAfterAt = new Date(Date.now() + delay).toISOString();
+      persist();
+      if (failures === 1 || failures % 5 === 0) {
+        console.warn('⚠️ [Auto-Battle RECOVERY] Battleboard ยังไม่พร้อม; คง Official API fallback และจะลองตรวจใหม่ใน ' +
+          Math.ceil(delay / 1000) + ' วินาที | เซิร์ฟเวอร์=' + serverId +
+          ' | Failure=' + failures + ' | สาเหตุ=' + String(error && error.message || error).slice(0, 180));
+      }
+      return false;
+    }
+  }
+
   async function tick() {
     if (running) return;
     if (timer) { clearTimeout(timer); timer = null; }
@@ -1128,8 +1185,16 @@ function createBattleboardIntegration(deps = {}) {
           ? item.config
           : (typeof getGuildConfig === 'function' ? getGuildConfig(serverId, false) : null);
         if (!config) continue;
-        if (started && !activeServerIds.has(serverId)) continue;
         const state = getState(config);
+
+        if (started && !activeServerIds.has(serverId)) {
+          if (!fallbackServerIds.has(serverId)) continue;
+          const retryAfter = Date.parse(state.retryAfterAt || '');
+          if (Number.isFinite(retryAfter) && retryAfter > Date.now()) continue;
+          await probeFallbackServer(serverId, config, state);
+          continue;
+        }
+
         const retryAfter = Date.parse(state.retryAfterAt || '');
         if (Number.isFinite(retryAfter) && retryAfter > Date.now()) continue;
         try {
@@ -1164,6 +1229,8 @@ function createBattleboardIntegration(deps = {}) {
             } else {
               activeServerIds.delete(serverId);
               preflightPassedServerIds.delete(serverId);
+              fallbackServerIds.add(serverId);
+              state.fallbackRecoverySuccesses = 0;
               const reason = String(error && error.message || error).replace(/https?:\/\/\S+/gi, '[URL]').slice(0, 180);
               notifyServerAvailability(serverId, false, {
                 phase: 'runtime-failure',
@@ -1171,7 +1238,7 @@ function createBattleboardIntegration(deps = {}) {
                 cursorInitialized: state.cursorInitialized === true,
               });
               console.error('🚨 [Auto-Battle FAILOVER] Battleboard API ล้มเหลวต่อเนื่อง ' + failures +
-                ' ครั้ง; สลับเซิร์ฟเวอร์นี้ไป Official API fallback และหยุด Event polling ของเซิร์ฟเวอร์นี้จนกว่าจะ Restart' +
+                ' ครั้ง; สลับเซิร์ฟเวอร์นี้ไป Official API fallback และจะตรวจการฟื้นตัวของเว็บไซต์เป็นระยะ' +
                 ' | เซิร์ฟเวอร์=' + serverId + ' | สาเหตุ=' + reason);
             }
           }
@@ -1179,7 +1246,7 @@ function createBattleboardIntegration(deps = {}) {
       }
     } finally {
       running = false;
-      if (started && activeServerIds.size > 0) timer = setTimeout(tick, POLL_MS);
+      if (started && (activeServerIds.size > 0 || fallbackServerIds.size > 0)) timer = setTimeout(tick, POLL_MS);
       else timer = null;
     }
   }
@@ -1193,6 +1260,8 @@ function createBattleboardIntegration(deps = {}) {
       const state = getState(config);
       delete state.consecutiveFailures;
       delete state.retryAfterAt;
+      state.fallbackRecoverySuccesses = 0;
+      fallbackServerIds.delete(String(serverId));
       activeServerIds.add(String(serverId));
       preflightPassedServerIds.add(String(serverId));
       persist();
@@ -1222,6 +1291,12 @@ function createBattleboardIntegration(deps = {}) {
         return true;
       }
       activeServerIds.delete(String(serverId));
+      fallbackServerIds.add(String(serverId));
+      state.fallbackRecoverySuccesses = 0;
+      const failures = Math.max(0, Number(state.consecutiveFailures) || 0) + 1;
+      state.consecutiveFailures = failures;
+      state.retryAfterAt = new Date(Date.now() + retryDelayMs(failures)).toISOString();
+      persist();
       notifyServerAvailability(serverId, false, {
         phase: 'startup-preflight-failed',
         apiAvailable: false,
@@ -1260,15 +1335,14 @@ function createBattleboardIntegration(deps = {}) {
         (typeof getGuildConfig === 'function' ? getGuildConfig(serverId, false) : null);
       await preflightServer(serverId, config);
     }
-    if (!activeServerIds.size) {
+    if (!activeServerIds.size && !fallbackServerIds.size) {
       started = false;
-      console.warn('🚨 [Battleboard] API preflight ไม่ผ่านทุกเซิร์ฟเวอร์; ไม่เปิด Event polling และใช้ Official API fallback ทั้งหมด');
+      console.warn('🚨 [Battleboard] ไม่มีเซิร์ฟเวอร์ที่พร้อมใช้งานหรือรอตรวจคืนสภาพ; Official API fallback ทำงานต่อ');
       return false;
     }
     console.log('🌐 [Battleboard] API integration enabled | Asia | Poll=30s | Preflight ผ่าน=' +
-      preflightPassedServerIds.size + ' server(s) | พักรอรายงานค้าง=' +
-      (activeServerIds.size - preflightPassedServerIds.size) +
-      ' server(s) | failover แยกตาม Discord Server');
+      preflightPassedServerIds.size + ' server(s) | Official Fallback=' + fallbackServerIds.size +
+      ' server(s) | failover/recovery แยกตาม Discord Server');
     timer = setTimeout(tick, 2000);
     return true;
   }
@@ -1277,9 +1351,14 @@ function createBattleboardIntegration(deps = {}) {
     timer = null;
     started = false;
     activeServerIds.clear();
+    fallbackServerIds.clear();
     preflightPassedServerIds.clear();
   }
-  return { start, stop, isConfigured, tick, isServerActive: serverId => activeServerIds.has(String(serverId)) };
+  return {
+    start, stop, isConfigured, tick,
+    isServerActive: serverId => activeServerIds.has(String(serverId)),
+    isServerInFallback: serverId => fallbackServerIds.has(String(serverId)),
+  };
 }
 module.exports = {
   createBattleboardIntegration,
