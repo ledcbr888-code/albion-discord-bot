@@ -207,6 +207,9 @@ let autoBattleCheckRunning = false;
 let banditSchedulerRunning = false;
 let avaPollRunning = false;
 const battleUrlRateLimit = new Map();
+// Runtime-only source ownership. Each Discord server is skipped by the Official scanner
+// only after that server's Battleboard Events Feed has passed its recovery health checks.
+const battleboardPrimaryServerIds = new Set();
 const avaUserRateLimit = new Map();
 const AVA_MAX_CONCURRENT = 2;
 const AVA_MAX_QUEUE = 12;
@@ -3563,7 +3566,9 @@ async function checkAutoBattles() {
     checkAutoBattles._eventFallbackBudget = new Map();
     const guilds = getAllGuildConfigs();
     for (const { guildId } of guilds) {
-        await guildContext.run({ guildId }, async () => {
+        const serverId = String(guildId || '').trim();
+        if (battleboardPrimaryServerIds.has(serverId)) continue;
+        await guildContext.run({ guildId: serverId }, async () => {
             await checkAutoBattlesForGuild();
         });
     }
@@ -6652,16 +6657,48 @@ async function pollAvaConfiguredChannels() {
 client.once('clientReady', async () => {
     console.log(`✅ Discord Gateway READY: ${client.user?.tag || client.user?.id || 'bot connected'}`);
     await migrateLegacyDataAfterReady();
-    const battleboardPrimary = createBattleboardIntegration({
+    const battleboardConfigured = createBattleboardIntegration({
         client,
         getAllGuildConfigs,
         getGuildConfig,
         saveData,
         buildBattleReportPayload,
-        formatFame
+        formatFame,
+        onSourceChange: ({ serverId, mode, guildConfig }) => {
+            const config = getGuildConfig(serverId, false) || guildConfig;
+            if (!config) return false;
+            // Never hand a server back to Battleboard while an Official API pass is active.
+            if (mode === 'primary' && autoBattleCheckRunning) return false;
+
+            if (mode === 'fallback') {
+                const records = Array.isArray(config.battleboardState?.delivered)
+                    ? config.battleboardState.delivered
+                    : [];
+                const processed = new Set(
+                    Array.isArray(config.processedBattles) ? config.processedBattles.map(String) : []
+                );
+                for (const record of records) {
+                    const battleId = String(record?.battleId || '').trim();
+                    if (!/^\\d+$/.test(battleId)) continue;
+                    // A sent, threshold-checked, or partially-sent report must not be emitted
+                    // again by the Official scanner during source handoff.
+                    if (record.status === 'sent' || record.status === 'below-threshold' ||
+                        Number(record.partsSent) > 0) processed.add(battleId);
+                }
+                config.processedBattles = [...processed].slice(-1000);
+                battleboardPrimaryServerIds.delete(String(serverId));
+            } else if (mode === 'primary') {
+                battleboardPrimaryServerIds.add(String(serverId));
+            } else {
+                return false;
+            }
+            return true;
+        }
     }).start();
-    if (battleboardPrimary) {
-        console.log('🛡️ [Auto-Battle] Battleboard Events เป็นแหล่งตรวจจับหลัก; พักตัวตรวจ Official API ภายในเพื่อป้องกันรายงานซ้ำ.');
+    if (battleboardConfigured) {
+        console.log('🛡️ [Auto-Battle] เปิด Battleboard Integration แล้ว; เลือก Primary/Fallback แยกแต่ละ Discord Server ตามผล Health Check.');
+    } else {
+        console.log('ℹ️ [Auto-Battle] Battleboard API ยังไม่พร้อม; ใช้ Official Albion API เป็นแหล่งหลักทุกเซิร์ฟเวอร์.');
     }
     // Resume CTA lifecycle timers after every bot restart so pending close/delete jobs are restored.
     try {
@@ -6676,42 +6713,42 @@ client.once('clientReady', async () => {
         console.log('✅ Slash commands registered.');
     } catch (err) { console.error('❌ Slash command registration error:', err); }
 
-    if (!battleboardPrimary) {
-        setTimeout(async () => {
-            let seeded = 0;
-            const serverConfigs = getAllGuildConfigs();
-            for (const { guildId, config } of serverConfigs) {
-                const serverAutoBattles = Array.isArray(config?.autoBattles) ? config.autoBattles : [];
-                if (!serverAutoBattles.length) continue;
-                try {
-                    seeded += await guildContext.run({ guildId }, async () =>
-                        primeAutoBattleHistoryForGuild(serverAutoBattles)
-                    );
-                } catch (err) {
-                    console.warn(`⚠️ Auto-Battle startup baseline failed for Discord server ${guildId}: ${err.message}`);
-                }
+    setTimeout(async () => {
+        let seeded = 0;
+        const serverConfigs = getAllGuildConfigs();
+        for (const { guildId, config } of serverConfigs) {
+            const serverId = String(guildId || '').trim();
+            if (battleboardPrimaryServerIds.has(serverId)) continue;
+            const serverAutoBattles = Array.isArray(config?.autoBattles) ? config.autoBattles : [];
+            if (!serverAutoBattles.length) continue;
+            try {
+                seeded += await guildContext.run({ guildId: serverId }, async () =>
+                    primeAutoBattleHistoryForGuild(serverAutoBattles)
+                );
+            } catch (err) {
+                console.warn(`⚠️ Auto-Battle startup baseline failed for Discord server ${serverId}: ${err.message}`);
             }
-            console.log(`🛡️ Auto-Battle initialization pass complete: newly marked ${seeded} existing battle(s) across ${serverConfigs.length} Discord server configuration(s); previously initialized trackers keep their saved baseline, and pending trackers will retry during polling.`);
-        }, 5000);
-    
-        function getAutoBattleIntervalMs() {
-            const intervalMs = 60 * 1000;
-            console.log('⏱️ รอบตรวจ Auto-Battle ถัดไปใน 60 วินาที');
-            return intervalMs;
         }
-    
-        function scheduleNextAutoBattleCheck() {
-            const ms = getAutoBattleIntervalMs();
-            setTimeout(async () => {
-                try { await checkAutoBattles(); } 
-                catch (err) { console.error('❌ Auto-Battle scheduler error:', err); }
-                finally { scheduleNextAutoBattleCheck(); }
-            }, ms);
-        }
-        scheduleNextAutoBattleCheck();
-    } else {
-        console.log('⏸️ [Auto-Battle] Official API scanner paused while Battleboard event polling is active.');
+        console.log(`🛡️ Auto-Battle initialization pass complete: newly marked ${seeded} existing battle(s) across ${serverConfigs.length} Discord server configuration(s); previously initialized trackers keep their saved baseline, and pending trackers will retry during polling.`);
+    }, 5000);
+
+    function getAutoBattleIntervalMs() {
+        const intervalMs = 60 * 1000;
+        console.log('⏱️ รอบตรวจ Auto-Battle ถัดไปใน 60 วินาที');
+        return intervalMs;
     }
+
+    function scheduleNextAutoBattleCheck() {
+        const ms = getAutoBattleIntervalMs();
+        setTimeout(async () => {
+            try { await checkAutoBattles(); }
+            catch (err) { console.error('❌ Auto-Battle scheduler error:', err); }
+            finally { scheduleNextAutoBattleCheck(); }
+        }, ms);
+    }
+    // The Official scanner always stays scheduled; it skips only servers whose
+    // Battleboard Events Feed has passed health checks and currently owns Primary.
+    scheduleNextAutoBattleCheck();
     setTimeout(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA initial poll error:', err)), 3000);
     setInterval(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA poll error:', err)), 5000);
     fetchBattleHubMapIndex()
