@@ -9,6 +9,7 @@ const {
     targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce,
     snapshotFingerprint, hasTrackedSnapshotChanged, timestampMs, formatThaiDuration, formatThaiTimestamp,
     formatPreciseDuration, elapsedMsBetween, getBattleDelayMetrics, formatBattleDelayLines,
+    isBattleProcessed, markBattleProcessed, SOURCE_FAILOVER_FAILURE_THRESHOLD, SOURCE_RECOVERY_SUCCESS_THRESHOLD,
   },
 } = require('../battleboard-integration');
 
@@ -188,6 +189,17 @@ test('creates stable idempotency keys per battle and channel', () => {
   assert.equal(deliveryKey('526764798', '12345678901234567'), '526764798:12345678901234567');
 });
 
+test('shares handled Battle IDs across Battleboard and Official API source handoffs', () => {
+  const config = { processedBattles: ['1001'] };
+  assert.equal(isBattleProcessed(config, '1001'), true);
+  assert.equal(isBattleProcessed(config, '1002'), false);
+  assert.equal(markBattleProcessed(config, '1002'), true);
+  assert.equal(markBattleProcessed(config, '1002'), false, 'the same Battle ID must not be added twice');
+  assert.deepEqual(config.processedBattles, ['1001', '1002']);
+  assert.equal(SOURCE_FAILOVER_FAILURE_THRESHOLD, 3);
+  assert.equal(SOURCE_RECOVERY_SUCCESS_THRESHOLD, 2);
+});
+
 
 test('creates a stable, distinct Discord nonce for every Battle, channel, and report part', () => {
   const first = deliveryNonce('526764798', '12345678901234567', 1);
@@ -340,6 +352,8 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
     assert.equal(sent[3].nonce, deliveryNonce('1001', channelId, 2));
     assert.match(sent[3].content, /ส่วนที่ 2\/2.*Battle ID: 1001/);
     assert.equal(config.battleboardState.pendingEvents.length, 0);
+    assert.ok(config.processedBattles.includes('1002'));
+    assert.ok(config.processedBattles.includes('1001'));
     assert.equal(detailCalls.get('1001'), 2);
     assert.equal(detailCalls.get('1002'), 2);
     assert.ok(capturedLogs.some(line => line.includes('รับ Events feed จาก Battleboard') && line.includes('API ใช้เวลา=')));
@@ -364,6 +378,120 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
       'a previously delivered event should state why it was skipped instead of silently continuing');
   } finally {
     if (integration) integration.stop();
+    console.log = oldConsoleLog;
+    console.warn = oldConsoleWarn;
+    console.error = oldConsoleError;
+    global.fetch = oldFetch;
+    if (oldApiUrl === undefined) delete process.env.BATTLEBOARD_API_URL;
+    else process.env.BATTLEBOARD_API_URL = oldApiUrl;
+    if (oldApiKey === undefined) delete process.env.BOT_API_KEY;
+    else process.env.BOT_API_KEY = oldApiKey;
+  }
+});
+
+test('fails over and recovers independently for each Discord server', async () => {
+  const oldApiUrl = process.env.BATTLEBOARD_API_URL;
+  const oldApiKey = process.env.BOT_API_KEY;
+  const oldFetch = global.fetch;
+  const serverA = '1165745441120452638';
+  const serverB = '1259860136923631716';
+  const makeConfig = (guildId) => {
+    const config = {
+      guilds: [{ id: 'guild-' + guildId, name: 'PLAC' }],
+      players: ['AD03E'],
+      autoBattles: [{ targetGuild: 'PLAC', targetGuildId: 'guild-' + guildId, channelId: '99999999999999999', minFrames: 100000, enabled: true }],
+      processedBattles: [],
+      battleboardState: { delivered: [], pendingEvents: [] },
+    };
+    const items = buildTrackedItems(config);
+    Object.assign(config.battleboardState, {
+      snapshotInitialized: true,
+      snapshotFingerprint: snapshotFingerprint(items),
+      lastSnapshotSyncAt: new Date().toISOString(),
+      cursorInitialized: true,
+      eventCursor: { after: '2026-11-13T00:00:00.000Z', afterBattleId: '0' },
+    });
+    return config;
+  };
+  const configA = makeConfig(serverA);
+  const configB = makeConfig(serverB);
+  const entries = [
+    { guildId: serverA, config: configA },
+    { guildId: serverB, config: configB },
+  ];
+  const modes = new Map();
+  const transitions = [];
+  let serverBUnavailable = true;
+  const capturedLogs = [];
+  const oldConsoleLog = console.log;
+  const oldConsoleWarn = console.warn;
+  const oldConsoleError = console.error;
+  console.log = (...args) => capturedLogs.push(args.join(' '));
+  console.warn = (...args) => capturedLogs.push(args.join(' '));
+  console.error = (...args) => capturedLogs.push(args.join(' '));
+  process.env.BATTLEBOARD_API_URL = 'https://battleboard.example';
+  process.env.BOT_API_KEY = 'test-key-'.padEnd(40, 'x');
+  global.fetch = async urlValue => {
+    const url = new URL(String(urlValue));
+    assert.equal(url.pathname, '/api/bot-tracked-entities');
+    assert.equal(url.searchParams.get('mode'), 'events');
+    const id = url.searchParams.get('discordServerId');
+    if (id === serverB && serverBUnavailable) {
+      return { ok: false, status: 503, text: async () => JSON.stringify({ error: 'temporary outage' }) };
+    }
+    return { ok: true, status: 200, text: async () => JSON.stringify({ items: [] }) };
+  };
+
+  const integration = createBattleboardIntegration({
+    client: { channels: { fetch: async () => { throw new Error('No Discord delivery expected in this health test.'); } } },
+    getAllGuildConfigs: () => entries,
+    getGuildConfig: id => entries.find(item => item.guildId === id)?.config || null,
+    saveData: () => {},
+    buildBattleReportPayload: async () => { throw new Error('No report should be built during empty health polls.'); },
+    onSourceChange: ({ serverId, mode }) => {
+      modes.set(serverId, mode);
+      transitions.push({ serverId, mode });
+      return true;
+    },
+  });
+
+  try {
+    assert.equal(integration.start(), true);
+    integration.stop();
+    assert.equal(modes.get(serverA), 'fallback');
+    assert.equal(modes.get(serverB), 'fallback');
+
+    await integration.tick();
+    integration.stop();
+    configB.battleboardState.retryAfterAt = new Date(0).toISOString();
+
+    await integration.tick();
+    integration.stop();
+    assert.equal(modes.get(serverA), 'primary', 'the healthy server should return to Primary after two successful feed checks');
+    assert.equal(modes.get(serverB), 'fallback', 'the failing server should remain on Official fallback');
+    assert.equal(configB.battleboardState.consecutiveFailures, 2);
+
+    configB.battleboardState.retryAfterAt = new Date(0).toISOString();
+    await integration.tick();
+    integration.stop();
+    assert.equal(configB.battleboardState.consecutiveFailures, 3);
+    assert.equal(modes.get(serverB), 'fallback');
+
+    serverBUnavailable = false;
+    configB.battleboardState.retryAfterAt = new Date(0).toISOString();
+    await integration.tick();
+    integration.stop();
+    assert.equal(modes.get(serverB), 'fallback', 'one successful recovery poll is not enough to fail back');
+
+    await integration.tick();
+    integration.stop();
+    assert.equal(modes.get(serverB), 'primary', 'the recovered server should return to Primary after two successful polls');
+    assert.ok(transitions.some(item => item.serverId === serverA && item.mode === 'primary'));
+    assert.ok(transitions.some(item => item.serverId === serverB && item.mode === 'primary'));
+    assert.ok(capturedLogs.some(line => line.includes('Official Albion API FALLBACK') && line.includes(serverB)));
+    assert.ok(capturedLogs.some(line => line.includes('Battleboard Events PRIMARY') && line.includes(serverA)));
+  } finally {
+    integration.stop();
     console.log = oldConsoleLog;
     console.warn = oldConsoleWarn;
     console.error = oldConsoleError;
