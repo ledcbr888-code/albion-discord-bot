@@ -6667,8 +6667,9 @@ client.once('clientReady', async () => {
         onSourceChange: ({ serverId, mode, guildConfig }) => {
             const config = getGuildConfig(serverId, false) || guildConfig;
             if (!config) return false;
-            // Never hand a server back to Battleboard while an Official API pass is active.
-            if (mode === 'primary' && autoBattleCheckRunning) return false;
+            // Do not change ownership while an Official API pass is in flight. This protects
+            // both handoff directions from a scan that already captured its candidate list.
+            if (autoBattleCheckRunning) return false;
 
             if (mode === 'fallback') {
                 const records = Array.isArray(config.battleboardState?.delivered)
