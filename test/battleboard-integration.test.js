@@ -764,6 +764,91 @@ test('switches a repeatedly failing server to Official API fallback after three 
   }
 });
 
+test('probes and automatically restores Battleboard Primary after two healthy checks while on Official fallback', async () => {
+  const oldApiUrl = process.env.BATTLEBOARD_API_URL;
+  const oldApiKey = process.env.BOT_API_KEY;
+  const oldFetch = global.fetch;
+  const oldWarn = console.warn;
+  const oldError = console.error;
+  const oldLog = console.log;
+  const availability = [];
+  const serverId = '1165745441120452638';
+  const config = {
+    guilds: [{ id: 'guild-plac', name: 'PLAC' }],
+    players: [],
+    autoBattles: [{ targetGuild: 'PLAC', targetGuildId: 'guild-plac', channelId: '99999999999999999', enabled: true }],
+    processedBattles: [],
+    battleboardState: {},
+  };
+  const items = buildTrackedItems(config);
+  Object.assign(config.battleboardState, {
+    snapshotInitialized: true,
+    snapshotFingerprint: snapshotFingerprint(items),
+    lastSnapshotSyncAt: new Date().toISOString(),
+    cursorInitialized: true,
+    eventCursor: { after: '2026-11-10T00:00:00.000Z', afterBattleId: '1000' },
+    delivered: [],
+    pendingEvents: [],
+  });
+  let healthy = false;
+  const logs = [];
+  process.env.BATTLEBOARD_API_URL = 'https://battleboard.example';
+  process.env.BOT_API_KEY = 'test-key-'.padEnd(40, 'x');
+  global.fetch = async urlValue => {
+    const url = new URL(String(urlValue));
+    if (!url.searchParams.has('after')) {
+      if (healthy) {
+        return { ok: true, status: 200, text: async () => JSON.stringify({ items: [] }) };
+      }
+      // Initial startup preflight succeeds; runtime cursor-based polls fail until recovery.
+      return { ok: true, status: 200, text: async () => JSON.stringify({ items: [], cursor: { after: '2026-11-10T00:00:00.000Z', afterBattleId: '1000' } }) };
+    }
+    if (!healthy) {
+      return { ok: false, status: 503, text: async () => JSON.stringify({ error: 'Service unavailable' }) };
+    }
+    return { ok: true, status: 200, text: async () => JSON.stringify({ items: [], cursor: { after: '2026-11-10T00:00:00.000Z', afterBattleId: '1000' } }) };
+  };
+  console.warn = () => {};
+  console.error = () => {};
+  console.log = (...args) => logs.push(args.join(' '));
+  const integration = createBattleboardIntegration({
+    getAllGuildConfigs: () => [{ guildId: serverId, config }],
+    getGuildConfig: () => config,
+    saveData: () => {},
+    onServerAvailabilityChange: (id, active, details) => availability.push({ id, active, details }),
+  });
+  try {
+    assert.equal(await integration.start(), true);
+    for (let attempt = 0; attempt < 3; attempt++) {
+      config.battleboardState.retryAfterAt = new Date(Date.now() - 1000).toISOString();
+      await integration.tick();
+    }
+    assert.equal(integration.isServerActive(serverId), false, 'three consecutive runtime failures should move the server to fallback');
+    assert.ok(availability.some(item => item.id === serverId && item.active === false && item.details.phase === 'runtime-failure'));
+
+    healthy = true;
+    config.battleboardState.retryAfterAt = new Date(Date.now() - 1000).toISOString();
+    await integration.tick();
+    assert.equal(integration.isServerActive(serverId), false, 'one healthy probe must not change source ownership');
+    config.battleboardState.retryAfterAt = new Date(Date.now() - 1000).toISOString();
+    await integration.tick();
+    assert.equal(integration.isServerActive(serverId), true, 'two healthy probes should restore Battleboard Primary');
+    assert.equal(config.battleboardState.eventCursor.afterBattleId, '1000', 'recovery probes must not advance the saved event cursor');
+    assert.ok(availability.some(item => item.id === serverId && item.active === true && item.details.phase === 'runtime-recovered'));
+    assert.ok(logs.some(line => line.includes('Battleboard กลับมาเป็น Primary แล้ว')));
+  } finally {
+    integration.stop();
+    global.fetch = oldFetch;
+    console.warn = oldWarn;
+    console.error = oldError;
+    console.log = oldLog;
+    if (oldApiUrl === undefined) delete process.env.BATTLEBOARD_API_URL;
+    else process.env.BATTLEBOARD_API_URL = oldApiUrl;
+    if (oldApiKey === undefined) delete process.env.BOT_API_KEY;
+    else process.env.BOT_API_KEY = oldApiKey;
+  }
+});
+
 test('skips an Events Feed battle already handled by the Official API source to avoid duplicates after recovery', async () => {
   const oldApiUrl = process.env.BATTLEBOARD_API_URL;
   const oldApiKey = process.env.BOT_API_KEY;
