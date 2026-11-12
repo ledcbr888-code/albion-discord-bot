@@ -6766,9 +6766,7 @@ client.once('clientReady', async () => {
     }, 5000);
 
     function getAutoBattleIntervalMs() {
-        const intervalMs = 60 * 1000;
-        console.log('⏱️ รอบตรวจ Auto-Battle ถัดไปใน 60 วินาที');
-        return intervalMs;
+        return 60 * 1000;
     }
 
     function scheduleNextAutoBattleCheck() {
@@ -6779,6 +6777,7 @@ client.once('clientReady', async () => {
             finally { scheduleNextAutoBattleCheck(); }
         }, ms);
     }
+    console.log('⏱️ Auto-Battle scheduler started | interval=60 seconds');
     scheduleNextAutoBattleCheck();
     setTimeout(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA initial poll error:', err)), 3000);
     setInterval(() => pollAvaConfiguredChannels().catch(err => console.error('❌ AVA poll error:', err)), 5000);
