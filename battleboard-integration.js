@@ -243,6 +243,7 @@ function createBattleboardIntegration(deps = {}) {
   const markBattleProcessed = typeof deps.markBattleProcessed === 'function'
     ? deps.markBattleProcessed : () => {};
   const activeServerIds = new Set();
+  const fallbackServerIds = new Set();
   const preflightPassedServerIds = new Set();
   const SERVER_FAILURES_BEFORE_FAILOVER = 3;
   let started = false;
@@ -250,10 +251,11 @@ function createBattleboardIntegration(deps = {}) {
   let timer = null;
 
   function notifyServerAvailability(serverId, active, details = {}) {
-    try { onServerAvailabilityChange(String(serverId), active === true, details); }
+    try { return onServerAvailabilityChange(String(serverId), active === true, details) !== false; }
     catch (error) {
       console.error('❌ [Battleboard] Source handoff callback failed | Discord Server=' +
         String(serverId) + ' | Error=' + String(error && error.message || error).slice(0, 180));
+      return false;
     }
   }
   function hasUnfinishedDeliveryBeforeCursor(state = {}) {
@@ -1193,6 +1195,8 @@ function createBattleboardIntegration(deps = {}) {
       const state = getState(config);
       delete state.consecutiveFailures;
       delete state.retryAfterAt;
+      state.fallbackRecoverySuccesses = 0;
+      fallbackServerIds.delete(String(serverId));
       activeServerIds.add(String(serverId));
       preflightPassedServerIds.add(String(serverId));
       persist();
@@ -1222,6 +1226,12 @@ function createBattleboardIntegration(deps = {}) {
         return true;
       }
       activeServerIds.delete(String(serverId));
+      fallbackServerIds.add(String(serverId));
+      state.fallbackRecoverySuccesses = 0;
+      const failures = Math.max(0, Number(state.consecutiveFailures) || 0) + 1;
+      state.consecutiveFailures = failures;
+      state.retryAfterAt = new Date(Date.now() + retryDelayMs(failures)).toISOString();
+      persist();
       notifyServerAvailability(serverId, false, {
         phase: 'startup-preflight-failed',
         apiAvailable: false,
