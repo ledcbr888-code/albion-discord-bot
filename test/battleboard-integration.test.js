@@ -646,8 +646,11 @@ test('startup API preflight rejects an unauthorized Events Feed so the Official 
     onServerAvailabilityChange: (id, active, details) => availability.push({ id, active, details }),
   });
   try {
-    assert.equal(await integration.start(), false);
+    // The integration remains running in fallback mode so it can automatically recover
+    // Battleboard Primary after health probes succeed.
+    assert.equal(await integration.start(), true);
     assert.equal(integration.isServerActive(serverId), false);
+    assert.equal(integration.isServerInFallback(serverId), true);
     assert.ok(availability.some(item => item.id === serverId && item.active === false &&
       item.details.phase === 'startup-preflight-failed' && item.details.cursorInitialized === true));
   } finally {
