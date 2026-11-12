@@ -10,6 +10,7 @@ const MAX_DELIVERIES = 2000;
 const MAX_PENDING_EVENTS = 2000;
 const MAX_PENDING_RETRIES_PER_TICK = 10;
 const PENDING_EVENT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const SOURCE_RECOVERY_SUCCESS_THRESHOLD = 2;
 function normalizeName(value) {
   return String(value == null ? '' : value).normalize('NFKC').trim().replace(/\s+/g, ' ').toLocaleLowerCase('en-US');
 }
