@@ -1118,6 +1118,60 @@ function createBattleboardIntegration(deps = {}) {
       persist();
     }
   }
+  async function probeFallbackServer(serverId, guildConfig, state) {
+    const probeStartedAtMs = Date.now();
+    try {
+      // Probe only the authenticated Events Feed endpoint. Do not read/move the saved
+      // cursor and do not process returned events until Primary ownership is restored.
+      const result = await request(eventsPath(serverId, null, 1));
+      if (!result || !Array.isArray(result.items)) {
+        const error = new Error('Battleboard Events Feed response schema is invalid during fallback recovery.');
+        error.autoBattleStage = 'ตรวจ Schema เพื่อกลับจาก Official Fallback';
+        throw error;
+      }
+      state.consecutiveFailures = 0;
+      delete state.retryAfterAt;
+      state.fallbackRecoverySuccesses = Math.max(0, Number(state.fallbackRecoverySuccesses) || 0) + 1;
+      console.log('🔎 [Auto-Battle Source] ตรวจ Battleboard เพื่อกลับเป็น Primary | เซิร์ฟเวอร์=' + serverId +
+        ' | สำเร็จ=' + state.fallbackRecoverySuccesses + '/' + SOURCE_RECOVERY_SUCCESS_THRESHOLD +
+        ' | API ใช้เวลา=' + formatPreciseDuration(Date.now() - probeStartedAtMs));
+
+      if (state.fallbackRecoverySuccesses >= SOURCE_RECOVERY_SUCCESS_THRESHOLD) {
+        const accepted = notifyServerAvailability(serverId, true, {
+          phase: 'runtime-recovered',
+          apiAvailable: true,
+          recoveryChecks: state.fallbackRecoverySuccesses,
+          responseMs: Date.now() - probeStartedAtMs,
+        });
+        if (accepted) {
+          activeServerIds.add(String(serverId));
+          fallbackServerIds.delete(String(serverId));
+          preflightPassedServerIds.add(String(serverId));
+          state.fallbackRecoverySuccesses = 0;
+          console.log('✅ [Auto-Battle RECOVERY] Battleboard กลับมาเป็น Primary แล้ว | เซิร์ฟเวอร์=' + serverId +
+            ' | Official API scanner จะหยุดเฉพาะเซิร์ฟเวอร์นี้ | คง Cursor เดิมเพื่ออ่าน Event backlog ต่อ');
+        } else {
+          console.log('⏸️ [Auto-Battle RECOVERY] API กลับมาแล้ว แต่ยังไม่สลับ Primary เพราะ Official API scanner กำลังทำงาน | เซิร์ฟเวอร์=' + serverId);
+        }
+      }
+      persist();
+      return true;
+    } catch (error) {
+      const failures = Math.max(0, Number(state.consecutiveFailures) || 0) + 1;
+      const delay = retryDelayMs(failures);
+      state.consecutiveFailures = failures;
+      state.fallbackRecoverySuccesses = 0;
+      state.retryAfterAt = new Date(Date.now() + delay).toISOString();
+      persist();
+      if (failures === 1 || failures % 5 === 0) {
+        console.warn('⚠️ [Auto-Battle RECOVERY] Battleboard ยังไม่พร้อม; คง Official API fallback และจะลองตรวจใหม่ใน ' +
+          Math.ceil(delay / 1000) + ' วินาที | เซิร์ฟเวอร์=' + serverId +
+          ' | Failure=' + failures + ' | สาเหตุ=' + String(error && error.message || error).slice(0, 180));
+      }
+      return false;
+    }
+  }
+
   async function tick() {
     if (running) return;
     if (timer) { clearTimeout(timer); timer = null; }
@@ -1130,8 +1184,16 @@ function createBattleboardIntegration(deps = {}) {
           ? item.config
           : (typeof getGuildConfig === 'function' ? getGuildConfig(serverId, false) : null);
         if (!config) continue;
-        if (started && !activeServerIds.has(serverId)) continue;
         const state = getState(config);
+
+        if (started && !activeServerIds.has(serverId)) {
+          if (!fallbackServerIds.has(serverId)) continue;
+          const retryAfter = Date.parse(state.retryAfterAt || '');
+          if (Number.isFinite(retryAfter) && retryAfter > Date.now()) continue;
+          await probeFallbackServer(serverId, config, state);
+          continue;
+        }
+
         const retryAfter = Date.parse(state.retryAfterAt || '');
         if (Number.isFinite(retryAfter) && retryAfter > Date.now()) continue;
         try {
@@ -1166,6 +1228,8 @@ function createBattleboardIntegration(deps = {}) {
             } else {
               activeServerIds.delete(serverId);
               preflightPassedServerIds.delete(serverId);
+              fallbackServerIds.add(serverId);
+              state.fallbackRecoverySuccesses = 0;
               const reason = String(error && error.message || error).replace(/https?:\/\/\S+/gi, '[URL]').slice(0, 180);
               notifyServerAvailability(serverId, false, {
                 phase: 'runtime-failure',
@@ -1173,7 +1237,7 @@ function createBattleboardIntegration(deps = {}) {
                 cursorInitialized: state.cursorInitialized === true,
               });
               console.error('🚨 [Auto-Battle FAILOVER] Battleboard API ล้มเหลวต่อเนื่อง ' + failures +
-                ' ครั้ง; สลับเซิร์ฟเวอร์นี้ไป Official API fallback และหยุด Event polling ของเซิร์ฟเวอร์นี้จนกว่าจะ Restart' +
+                ' ครั้ง; สลับเซิร์ฟเวอร์นี้ไป Official API fallback และจะตรวจการฟื้นตัวของเว็บไซต์เป็นระยะ' +
                 ' | เซิร์ฟเวอร์=' + serverId + ' | สาเหตุ=' + reason);
             }
           }
@@ -1181,7 +1245,7 @@ function createBattleboardIntegration(deps = {}) {
       }
     } finally {
       running = false;
-      if (started && activeServerIds.size > 0) timer = setTimeout(tick, POLL_MS);
+      if (started && (activeServerIds.size > 0 || fallbackServerIds.size > 0)) timer = setTimeout(tick, POLL_MS);
       else timer = null;
     }
   }
