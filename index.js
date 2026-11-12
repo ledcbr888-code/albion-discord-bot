@@ -6714,24 +6714,28 @@ client.once('clientReady', async () => {
         console.log('✅ Slash commands registered.');
     } catch (err) { console.error('❌ Slash command registration error:', err); }
 
-    setTimeout(async () => {
-        let seeded = 0;
-        const serverConfigs = getAllGuildConfigs();
-        for (const { guildId, config } of serverConfigs) {
-            const serverId = String(guildId || '').trim();
-            if (battleboardPrimaryServerIds.has(serverId)) continue;
-            const serverAutoBattles = Array.isArray(config?.autoBattles) ? config.autoBattles : [];
-            if (!serverAutoBattles.length) continue;
-            try {
-                seeded += await guildContext.run({ guildId: serverId }, async () =>
-                    primeAutoBattleHistoryForGuild(serverAutoBattles)
-                );
-            } catch (err) {
-                console.warn(`⚠️ Auto-Battle startup baseline failed for Discord server ${serverId}: ${err.message}`);
+    // Preserve the historical startup baseline only when the Battleboard integration
+    // is not configured. With Battleboard enabled, an unconditional Official baseline
+    // could mark recent Events as handled before the Events cursor gets to deliver them.
+    if (!battleboardConfigured) {
+        setTimeout(async () => {
+            let seeded = 0;
+            const serverConfigs = getAllGuildConfigs();
+            for (const { guildId, config } of serverConfigs) {
+                const serverId = String(guildId || '').trim();
+                const serverAutoBattles = Array.isArray(config?.autoBattles) ? config.autoBattles : [];
+                if (!serverAutoBattles.length) continue;
+                try {
+                    seeded += await guildContext.run({ guildId: serverId }, async () =>
+                        primeAutoBattleHistoryForGuild(serverAutoBattles)
+                    );
+                } catch (err) {
+                    console.warn(`⚠️ Auto-Battle startup baseline failed for Discord server ${serverId}: ${err.message}`);
+                }
             }
-        }
-        console.log(`🛡️ Auto-Battle initialization pass complete: newly marked ${seeded} existing battle(s) across ${serverConfigs.length} Discord server configuration(s); previously initialized trackers keep their saved baseline, and pending trackers will retry during polling.`);
-    }, 5000);
+            console.log(`🛡️ Auto-Battle initialization pass complete: newly marked ${seeded} existing battle(s) across ${serverConfigs.length} Discord server configuration(s); previously initialized trackers keep their saved baseline, and pending trackers will retry during polling.`);
+        }, 5000);
+    }
 
     function getAutoBattleIntervalMs() {
         const intervalMs = 60 * 1000;
