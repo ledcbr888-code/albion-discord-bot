@@ -1334,15 +1334,14 @@ function createBattleboardIntegration(deps = {}) {
         (typeof getGuildConfig === 'function' ? getGuildConfig(serverId, false) : null);
       await preflightServer(serverId, config);
     }
-    if (!activeServerIds.size) {
+    if (!activeServerIds.size && !fallbackServerIds.size) {
       started = false;
-      console.warn('🚨 [Battleboard] API preflight ไม่ผ่านทุกเซิร์ฟเวอร์; ไม่เปิด Event polling และใช้ Official API fallback ทั้งหมด');
+      console.warn('🚨 [Battleboard] ไม่มีเซิร์ฟเวอร์ที่พร้อมใช้งานหรือรอตรวจคืนสภาพ; Official API fallback ทำงานต่อ');
       return false;
     }
     console.log('🌐 [Battleboard] API integration enabled | Asia | Poll=30s | Preflight ผ่าน=' +
-      preflightPassedServerIds.size + ' server(s) | พักรอรายงานค้าง=' +
-      (activeServerIds.size - preflightPassedServerIds.size) +
-      ' server(s) | failover แยกตาม Discord Server');
+      preflightPassedServerIds.size + ' server(s) | Official Fallback=' + fallbackServerIds.size +
+      ' server(s) | failover/recovery แยกตาม Discord Server');
     timer = setTimeout(tick, 2000);
     return true;
   }
@@ -1351,9 +1350,14 @@ function createBattleboardIntegration(deps = {}) {
     timer = null;
     started = false;
     activeServerIds.clear();
+    fallbackServerIds.clear();
     preflightPassedServerIds.clear();
   }
-  return { start, stop, isConfigured, tick, isServerActive: serverId => activeServerIds.has(String(serverId)) };
+  return {
+    start, stop, isConfigured, tick,
+    isServerActive: serverId => activeServerIds.has(String(serverId)),
+    isServerInFallback: serverId => fallbackServerIds.has(String(serverId)),
+  };
 }
 module.exports = {
   createBattleboardIntegration,
