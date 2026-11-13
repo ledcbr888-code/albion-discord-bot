@@ -29,6 +29,8 @@ const express = require('express');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const ctaModule = require('./cta');
 const { createBattleboardIntegration } = require('./battleboard-integration');
+const { createBattleboardDiscoveryShadow } = require('./battleboard-discovery-shadow');
+const battleboardDiscoveryShadow = createBattleboardDiscoveryShadow();
 const battleboardPrimaryServerIds = new Set();
 const { createTrackingBackupScheduler, createThrottledSuccessLogger } = require('./tracking-backup-scheduler');
 let Fuse; try { Fuse = require('fuse.js'); } catch(e) { console.warn('fuse.js not installed, using fallback'); }
@@ -3252,6 +3254,11 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
                     .map(row => row?.BattleId ?? row?.battleId)
                     .map(id => String(id ?? '').trim())
                     .filter(id => /^\d+$/.test(id) && Number(id) > 0))];
+
+                // Optional, best-effort shadow observation. The flag defaults off,
+                // and any intake failure must never block Auto-Battle reporting.
+                void battleboardDiscoveryShadow.submit(ids);
+
                 officialEventCache.set(targetGuildId, {
                     valid: true, ids, expiresAt: Date.now() + 15000
                 });
