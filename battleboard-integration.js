@@ -1364,7 +1364,6 @@ function createBattleboardIntegration(deps = {}) {
       return false;
     }
     started = true;
-    lastOfficialEventsShadowStartedAtMs = Date.now();
     console.log('🧪 [Official Events Shadow] ' +
       (officialEventsShadowProbe && officialEventsShadowProbe.enabled === true
         ? 'เปิดใช้งานแบบ Shadow เท่านั้น' : 'ปิดอยู่ (ต้องตั้ง OFFICIAL_EVENTS_SHADOW_ENABLED=true และเตรียม Supabase table ก่อน)') +
