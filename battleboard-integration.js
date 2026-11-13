@@ -1,9 +1,9 @@
 'use strict';
 const { createHash } = require('node:crypto');
-const POLL_MS = 30000;
+const EVENT_POLL_INTERVAL_MS = 30_000; // Wait 30 seconds after each completed poll before the next Events Feed check.
 const TIMEOUT_MS = 8000;
 const SNAPSHOT_SYNC_INTERVAL_MS = 5 * 60 * 1000;
-const EVENT_POLL_SUCCESS_LOG_INTERVAL_MS = 5 * 60 * 1000;
+const EVENT_POLL_SUCCESS_LOG_INTERVAL_MS = 60_000; // Empty-poll logs are throttled separately from the 30-second poll cadence.
 const RETRY_BASE_MS = 30 * 1000;
 const RETRY_MAX_MS = 5 * 60 * 1000;
 const MAX_DELIVERIES = 2000;
@@ -1246,7 +1246,7 @@ function createBattleboardIntegration(deps = {}) {
       }
     } finally {
       running = false;
-      if (started && (activeServerIds.size > 0 || fallbackServerIds.size > 0)) timer = setTimeout(tick, POLL_MS);
+      if (started && (activeServerIds.size > 0 || fallbackServerIds.size > 0)) timer = setTimeout(tick, EVENT_POLL_INTERVAL_MS);
       else timer = null;
     }
   }
@@ -1340,7 +1340,9 @@ function createBattleboardIntegration(deps = {}) {
       console.warn('🚨 [Battleboard] ไม่มีเซิร์ฟเวอร์ที่พร้อมใช้งานหรือรอตรวจคืนสภาพ; Official API fallback ทำงานต่อ');
       return false;
     }
-    console.log('🌐 [Battleboard] API integration enabled | Asia | Poll=30s | Preflight ผ่าน=' +
+    console.log('🌐 [Battleboard] API integration enabled | Asia | Events Feed Poll=' +
+      Math.round(EVENT_POLL_INTERVAL_MS / 1000) + 's | Empty-poll Log=' +
+      Math.round(EVENT_POLL_SUCCESS_LOG_INTERVAL_MS / 1000) + 's | Preflight ผ่าน=' +
       preflightPassedServerIds.size + ' server(s) | Official Fallback=' + fallbackServerIds.size +
       ' server(s) | failover/recovery แยกตาม Discord Server');
     timer = setTimeout(tick, 2000);
