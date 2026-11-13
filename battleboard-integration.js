@@ -1,7 +1,11 @@
 'use strict';
 const { createHash } = require('node:crypto');
-const POLL_MS = 30000;
-const TIMEOUT_MS = 8000;
+const EVENT_POLL_IDLE_MS = 60_000;
+const EVENT_POLL_BURST_MS = 7_000;
+const MAX_CONSECUTIVE_BURST_POLLS = 6;
+const EVENTS_FEED_TIMEOUT_MS = 10_000;
+const SUMMARY_TIMEOUT_MS = 15_000;
+const DETAIL_TIMEOUT_MS = 30_000;
 const SNAPSHOT_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 const EVENT_POLL_SUCCESS_LOG_INTERVAL_MS = 5 * 60 * 1000;
 const RETRY_BASE_MS = 30 * 1000;
@@ -250,6 +254,10 @@ function createBattleboardIntegration(deps = {}) {
   let started = false;
   let running = false;
   let timer = null;
+  let consecutiveBurstPolls = 0;
+  const activeRequests = new Set();
+  let rateLimitUntilMs = 0;
+  let lastScheduledDelayMs = null;
 
   function notifyServerAvailability(serverId, active, details = {}) {
     try { return onServerAvailabilityChange(String(serverId), active === true, details) !== false; }
@@ -298,27 +306,58 @@ function createBattleboardIntegration(deps = {}) {
   async function request(path, options = {}) {
     const config = getApiConfig();
     if (!config) throw new Error('Battleboard API credentials are not configured.');
-    const response = await fetch(config.baseUrl + path, {
-      method: options.method || 'GET',
-      headers: {
-        Authorization: 'Bearer ' + config.apiKey,
-        Accept: 'application/json',
-        ...(options.body ? { 'Content-Type': 'application/json' } : {}),
-      },
-      ...(options.body ? { body: JSON.stringify(options.body) } : {}),
-      signal: AbortSignal.timeout(TIMEOUT_MS),
-    });
-    const bodyText = await response.text();
-    let data = {};
-    if (bodyText) {
-      try { data = JSON.parse(bodyText); } catch { data = { error: 'Invalid JSON response.' }; }
-    }
-    if (!response.ok) {
-      const error = new Error('Battleboard API HTTP ' + response.status + (data.error ? ': ' + String(data.error).slice(0, 160) : ''));
-      error.status = response.status;
+    const now = Date.now();
+    if (now < rateLimitUntilMs) {
+      const error = new Error('Battleboard API cooldown active');
+      error.status = 429;
+      error.retryAfterMs = rateLimitUntilMs - now;
       throw error;
     }
-    return data;
+    const timeoutMs = /(?:[?&]mode=events(?:&|$)|\/api\/bot-tracked-battle-events(?:\?|$))/.test(path)
+      ? EVENTS_FEED_TIMEOUT_MS
+      : /(?:\/api\/bot-battle-detail|\/api\/battle-detail)/.test(path)
+        ? DETAIL_TIMEOUT_MS : SUMMARY_TIMEOUT_MS;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(new Error('Battleboard API request timed out')), timeoutMs);
+    activeRequests.add(controller);
+    try {
+      const response = await fetch(config.baseUrl + path, {
+        method: options.method || 'GET',
+        headers: {
+          Authorization: 'Bearer ' + config.apiKey,
+          Accept: 'application/json',
+          ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+        },
+        ...(options.body ? { body: JSON.stringify(options.body) } : {}),
+        signal: controller.signal,
+      });
+      const bodyText = await response.text();
+      let data = {};
+      if (bodyText) {
+        try { data = JSON.parse(bodyText); } catch { data = { error: 'Invalid JSON response.' }; }
+      }
+      if (!response.ok) {
+        const error = new Error('Battleboard API HTTP ' + response.status + (data.error ? ': ' + String(data.error).slice(0, 160) : ''));
+        error.status = response.status;
+        if ([429, 503].includes(Number(response.status))) {
+          const retryAfter = response.headers && typeof response.headers.get === 'function'
+            ? response.headers.get('retry-after') : null;
+          const numeric = Number(retryAfter);
+          const date = retryAfter && Number.isNaN(numeric) ? Date.parse(retryAfter) : NaN;
+          const retryMs = retryAfter && Number.isFinite(numeric)
+            ? Math.max(0, numeric * 1000) : Number.isFinite(date) ? Math.max(0, date - Date.now()) : 0;
+          if (Number(response.status) === 429) {
+            error.retryAfterMs = Math.max(RETRY_BASE_MS, retryMs);
+            rateLimitUntilMs = Math.max(rateLimitUntilMs, Date.now() + error.retryAfterMs);
+          } else if (retryMs > 0) error.retryAfterMs = retryMs;
+        }
+        throw error;
+      }
+      return data;
+    } finally {
+      clearTimeout(timeout);
+      activeRequests.delete(controller);
+    }
   }
   function persist() {
     try { if (typeof saveData === 'function') saveData(); }
@@ -1165,6 +1204,7 @@ function createBattleboardIntegration(deps = {}) {
       // before the new composite cursor can be considered committed.
       await commitEventCursor(state, event);
     }
+    return events.length;
   }
   async function probeFallbackServer(serverId, guildConfig, state) {
     const probeStartedAtMs = Date.now();
@@ -1224,6 +1264,8 @@ function createBattleboardIntegration(deps = {}) {
     if (running) return;
     if (timer) { clearTimeout(timer); timer = null; }
     running = true;
+    let totalNewEvents = 0;
+    let hadFailure = false;
     try {
       const servers = typeof getAllGuildConfigs === 'function' ? getAllGuildConfigs() : [];
       for (const item of servers) {
@@ -1245,7 +1287,7 @@ function createBattleboardIntegration(deps = {}) {
         const retryAfter = Date.parse(state.retryAfterAt || '');
         if (Number.isFinite(retryAfter) && retryAfter > Date.now()) continue;
         try {
-          await pollServer(serverId, config);
+          totalNewEvents += Number(await pollServer(serverId, config)) || 0;
           if (!preflightPassedServerIds.has(serverId)) {
             preflightPassedServerIds.add(serverId);
             notifyServerAvailability(serverId, true, { phase: 'runtime-recovered', apiAvailable: true });
@@ -1257,8 +1299,9 @@ function createBattleboardIntegration(deps = {}) {
             persist();
           }
         } catch (error) {
+          hadFailure = true;
           const failures = Math.max(0, Number(state.consecutiveFailures) || 0) + 1;
-          const delay = retryDelayMs(failures);
+          const delay = Math.max(retryDelayMs(failures), Number(error && error.retryAfterMs) || 0);
           state.consecutiveFailures = failures;
           state.retryAfterAt = new Date(Date.now() + delay).toISOString();
           persist();
@@ -1293,7 +1336,11 @@ function createBattleboardIntegration(deps = {}) {
       }
     } finally {
       running = false;
-      if (started && (activeServerIds.size > 0 || fallbackServerIds.size > 0)) timer = setTimeout(tick, POLL_MS);
+      if (totalNewEvents > 0 && !hadFailure && consecutiveBurstPolls < MAX_CONSECUTIVE_BURST_POLLS) consecutiveBurstPolls++;
+      else consecutiveBurstPolls = 0;
+      const delay = Math.max(consecutiveBurstPolls > 0 ? EVENT_POLL_BURST_MS : EVENT_POLL_IDLE_MS, rateLimitUntilMs - Date.now());
+      lastScheduledDelayMs = delay;
+      if (started && (activeServerIds.size > 0 || fallbackServerIds.size > 0)) timer = setTimeout(tick, delay);
       else timer = null;
     }
   }
@@ -1387,16 +1434,18 @@ function createBattleboardIntegration(deps = {}) {
       console.warn('🚨 [Battleboard] ไม่มีเซิร์ฟเวอร์ที่พร้อมใช้งานหรือรอตรวจคืนสภาพ; Official API fallback ทำงานต่อ');
       return false;
     }
-    console.log('🌐 [Battleboard] API integration enabled | Asia | Poll=30s | Preflight ผ่าน=' +
+    console.log('🌐 [Battleboard] API integration enabled | Asia | Poll=60s idle / 7s burst (max 6) | Preflight ผ่าน=' +
       preflightPassedServerIds.size + ' server(s) | Official Fallback=' + fallbackServerIds.size +
       ' server(s) | failover/recovery แยกตาม Discord Server');
     timer = setTimeout(tick, 2000);
     return true;
   }
   function stop() {
+    started = false;
     if (timer) clearTimeout(timer);
     timer = null;
-    started = false;
+    consecutiveBurstPolls = 0;
+    for (const controller of activeRequests) controller.abort(new Error('Battleboard polling stopped'));
     activeServerIds.clear();
     fallbackServerIds.clear();
     preflightPassedServerIds.clear();
@@ -1405,9 +1454,10 @@ function createBattleboardIntegration(deps = {}) {
     start, stop, isConfigured, tick,
     isServerActive: serverId => activeServerIds.has(String(serverId)),
     isServerInFallback: serverId => fallbackServerIds.has(String(serverId)),
+    getPollStatus: () => ({ running, activeRequests: activeRequests.size, consecutiveBurstPolls, lastScheduledDelayMs }),
   };
 }
 module.exports = {
   createBattleboardIntegration,
-  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce, snapshotFingerprint, hasTrackedSnapshotChanged, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup, timestampMs, formatThaiDuration, formatThaiTimestamp, formatPreciseDuration, elapsedMsBetween, getBattleDelayMetrics, formatBattleDelayLines },
+  __test: { EVENT_POLL_IDLE_MS, EVENT_POLL_BURST_MS, MAX_CONSECUTIVE_BURST_POLLS, EVENTS_FEED_TIMEOUT_MS, SUMMARY_TIMEOUT_MS, DETAIL_TIMEOUT_MS, normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce, snapshotFingerprint, hasTrackedSnapshotChanged, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup, timestampMs, formatThaiDuration, formatThaiTimestamp, formatPreciseDuration, elapsedMsBetween, getBattleDelayMetrics, formatBattleDelayLines },
 };
