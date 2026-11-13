@@ -343,7 +343,7 @@ function createBattleboardIntegration(deps = {}) {
   // send Discord messages. Keep these independently persisted from discovery
   // observations and the existing report dedupe records.
   const deliveryAckEnabled=()=>process.env.BATTLEBOARD_DELIVERY_ACK_ENABLED==='true';
-  function queueDeliveryAck(state, serverId, battleId, channelId, partNumber, sentMessage, sentAt) {
+  function queueDeliveryAck(state, serverId, battleId, channelId, partNumber, partsTotal, sentMessage, sentAt) {
     if (!deliveryAckEnabled() || !sentMessage?.id) return;
     const eventId=String(serverId)+':'+String(battleId)+':'+String(channelId)+':'+partNumber;
     if (state.deliveryAckOutbox.some(item=>item?.payload?.eventId===eventId)) return;
@@ -353,7 +353,7 @@ function createBattleboardIntegration(deps = {}) {
     }
     state.deliveryAckOutbox.push({
       payload:{eventId,server:'asia',battleId:String(battleId),discordServerId:String(serverId),
-        channelId:String(channelId),partNumber,messageId:String(sentMessage.id),
+        channelId:String(channelId),partNumber,partsTotal,messageId:String(sentMessage.id),
         sentAt:sentAt.toISOString(),deliveryStatus:'sent'},
       attempts:0,nextAttemptAt:null,status:'pending'
     });
@@ -548,7 +548,7 @@ function createBattleboardIntegration(deps = {}) {
           record.messageIds[partNumber - 1] = String(sentMessage.id);
         }
         saveDelivery(state, record);
-        queueDeliveryAck(state, serverId, battleId, channelId, partNumber, sentMessage, sentAt);
+        queueDeliveryAck(state, serverId, battleId, channelId, partNumber, partsTotal, sentMessage, sentAt);
         console.log(
           '✅ [Auto-Battle] ส่งรายงานส่วนที่ ' + partNumber + '/' + partsTotal + ' เข้า Discord สำเร็จ' +
           ' | ' + partLabel + partNumber + '/' + partsTotal +
