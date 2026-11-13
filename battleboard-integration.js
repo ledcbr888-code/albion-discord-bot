@@ -252,6 +252,7 @@ function createBattleboardIntegration(deps = {}) {
   const preflightPassedServerIds = new Set();
   const SERVER_FAILURES_BEFORE_FAILOVER = 3;
   let started = false;
+  let shuttingDown = false;
   let running = false;
   let timer = null;
   let consecutiveBurstPolls = 0;
@@ -1299,6 +1300,7 @@ function createBattleboardIntegration(deps = {}) {
             persist();
           }
         } catch (error) {
+          if (shuttingDown) break;
           hadFailure = true;
           const failures = Math.max(0, Number(state.consecutiveFailures) || 0) + 1;
           const delay = Math.max(retryDelayMs(failures), Number(error && error.retryAfterMs) || 0);
@@ -1406,6 +1408,7 @@ function createBattleboardIntegration(deps = {}) {
   }
   async function start() {
     if (started) return activeServerIds.size > 0;
+    shuttingDown = false;
     if (!isConfigured()) {
       console.log('ℹ️ [Battleboard] ไม่ได้ตั้งค่า API/Key; คง Official API Auto-Battle scanner เป็นแหล่งตรวจจับหลัก');
       return false;
@@ -1441,6 +1444,7 @@ function createBattleboardIntegration(deps = {}) {
     return true;
   }
   function stop() {
+    shuttingDown = true;
     started = false;
     if (timer) clearTimeout(timer);
     timer = null;
