@@ -8,7 +8,7 @@ const LOG_THROTTLE_MS = 5 * 60 * 1000;
 
 function normalizeBattleId(value) {
   const id = String(value ?? '').trim();
-  if (!/^\\d{1,20}$/.test(id)) return null;
+  if (!/^\d{1,20}$/.test(id)) return null;
   try { return BigInt(id) > 0n ? id : null; }
   catch { return null; }
 }
@@ -45,7 +45,7 @@ function createBattleboardDiscoveryShadow(options = {}) {
     const enabled = String(env.BATTLEBOARD_DISCOVERY_SHADOW_ENABLED || '').trim().toLowerCase() === 'true';
     if (!enabled) return { enabled: false, reason: 'disabled' };
 
-    const baseUrl = String(env.BATTLEBOARD_API_URL || '').trim().replace(/\\/+$/, '');
+    const baseUrl = String(env.BATTLEBOARD_API_URL || '').trim().replace(/\/+$/, '');
     const apiKey = String(env.BOT_API_KEY || '').trim();
     if (!baseUrl || apiKey.length < 32) return { enabled: true, reason: 'missing-config' };
 
