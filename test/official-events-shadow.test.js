@@ -92,7 +92,8 @@ test('uses the Asia GameInfo Events endpoint and normalizes only one small row p
   });
   assert.equal(JSON.stringify(result.rows[0].raw_payload).includes('large-unused-payload'), false);
   assert.equal(result.rows[0].expires_at, '2026-11-16T10:00:00.000Z');
-  assert.equal(result.invalidBattleIdCount, 2);
+  assert.equal(result.invalidBattleIdCount, 1);
+  assert.equal(result.missingBattleIdCount, 1);
   assert.equal(result.missingEventIdCount, 0);
 });
 
