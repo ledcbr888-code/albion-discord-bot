@@ -852,6 +852,134 @@ test('probes and automatically restores Battleboard Primary after two healthy ch
   }
 });
 
+test('does not advance the Events cursor when the local tracking.json save fails', async () => {
+  const oldUrl = process.env.BATTLEBOARD_API_URL;
+  const oldKey = process.env.BOT_API_KEY;
+  const oldFetch = global.fetch;
+  const oldError = console.error;
+  const oldLog = console.log;
+  process.env.BATTLEBOARD_API_URL = 'https://battleboard.example';
+  process.env.BOT_API_KEY = 'test-key-'.padEnd(40, 'x');
+
+  const serverId = '1165745441120452638';
+  const config = {
+    guilds: [{ id: 'guild-id', name: 'PLAC' }],
+    players: [],
+    autoBattles: [{ targetGuild: 'PLAC', channelId: '99999999999999999', enabled: true }],
+    battleboardState: {},
+  };
+  const snapshot = buildTrackedItems(config);
+  Object.assign(config.battleboardState, {
+    snapshotInitialized: true,
+    snapshotFingerprint: snapshotFingerprint(snapshot),
+    lastSnapshotSyncAt: new Date().toISOString(),
+    cursorInitialized: true,
+    eventCursor: { after: '2026-11-11T00:00:00.000Z', afterBattleId: '528000000' },
+    delivered: [], pendingEvents: [],
+  });
+
+  let saveCalls = 0;
+  console.error = () => {};
+  console.log = () => {};
+  global.fetch = async rawUrl => {
+    const url = new URL(String(rawUrl));
+    if (url.searchParams.get('mode') === 'events') {
+      return { ok: true, status: 200, text: async () => JSON.stringify({
+        items: [{
+          battle_id: '528000001', checked_at: '2026-11-11T00:01:00.000Z',
+          battle_start_time: '2026-11-11T00:00:00.000Z',
+          matches: [{ type: 'guild', id: 'guild-id', name: 'PLAC' }],
+        }],
+      }) };
+    }
+    throw Error('Unexpected request ' + url);
+  };
+  const integration = createBattleboardIntegration({
+    client: {}, getAllGuildConfigs: () => [{ guildId: serverId, config }],
+    getGuildConfig: () => config,
+    saveData: () => { saveCalls++; return false; },
+    isBattleProcessed: (_server, id) => id === '528000001',
+    buildBattleReportPayload: async () => { throw Error('Already processed'); },
+    formatFame: value => String(value),
+  });
+  try {
+    await integration.tick();
+    assert.ok(saveCalls > 0);
+    assert.equal(config.battleboardState.eventCursor.afterBattleId, '528000000',
+      'local write failure must leave the saved feed position unchanged');
+    assert.equal(config.battleboardState.eventCursor.after, '2026-11-11T00:00:00.000Z');
+    assert.ok(config.battleboardState.consecutiveFailures >= 1);
+  } finally {
+    integration.stop();
+    console.error = oldError;
+    console.log = oldLog;
+    global.fetch = oldFetch;
+    if (oldUrl === undefined) delete process.env.BATTLEBOARD_API_URL;
+    else process.env.BATTLEBOARD_API_URL = oldUrl;
+    if (oldKey === undefined) delete process.env.BOT_API_KEY;
+    else process.env.BOT_API_KEY = oldKey;
+  }
+});
+
+test('malformed or out-of-order Events feed never commits a cursor or reports an empty poll', async () => {
+  const oldUrl = process.env.BATTLEBOARD_API_URL;
+  const oldKey = process.env.BOT_API_KEY;
+  const oldFetch = global.fetch;
+  const oldError = console.error;
+  const oldLog = console.log;
+  process.env.BATTLEBOARD_API_URL = 'https://battleboard.example';
+  process.env.BOT_API_KEY = 'test-key-'.padEnd(40, 'x');
+  const serverId = '1165745441120452638';
+  const config = {
+    guilds: [{ id: 'guild-id', name: 'PLAC' }],
+    players: [], autoBattles: [{ targetGuild: 'PLAC', channelId: '99999999999999999', enabled: true }],
+    battleboardState: {},
+  };
+  Object.assign(config.battleboardState, {
+    snapshotInitialized: true,
+    snapshotFingerprint: snapshotFingerprint(buildTrackedItems(config)),
+    lastSnapshotSyncAt: new Date().toISOString(),
+    cursorInitialized: true,
+    eventCursor: { after: '2026-11-11T00:00:00.000Z', afterBattleId: '528000000' },
+    pendingEvents: [], delivered: [],
+  });
+
+  let saves = 0;
+  console.error = () => {};
+  console.log = () => {};
+  global.fetch = async rawUrl => {
+    const url = new URL(String(rawUrl));
+    if (url.searchParams.get('mode') === 'events') {
+      return { ok: true, status: 200, text: async () => JSON.stringify({
+        items: [
+          { battle_id: '528000010', checked_at: '2026-11-11T00:02:00.000Z' },
+          { battle_id: '528000009', checked_at: '2026-11-11T00:01:00.000Z' },
+        ],
+      }) };
+    }
+    throw Error('Unexpected request ' + url);
+  };
+  const integration = createBattleboardIntegration({
+    client: {}, getAllGuildConfigs: () => [{ guildId: serverId, config }],
+    getGuildConfig: () => config, saveData: () => { saves++; return true; },
+  });
+  try {
+    await integration.tick();
+    assert.equal(config.battleboardState.eventCursor.afterBattleId, '528000000');
+    assert.equal(config.battleboardState.lastEventProcessedAt, undefined);
+    assert.ok(config.battleboardState.consecutiveFailures >= 1);
+  } finally {
+    integration.stop();
+    console.error = oldError;
+    console.log = oldLog;
+    global.fetch = oldFetch;
+    if (oldUrl === undefined) delete process.env.BATTLEBOARD_API_URL;
+    else process.env.BATTLEBOARD_API_URL = oldUrl;
+    if (oldKey === undefined) delete process.env.BOT_API_KEY;
+    else process.env.BOT_API_KEY = oldKey;
+  }
+});
+
 test('skips an Events Feed battle already handled by the Official API source to avoid duplicates after recovery', async () => {
   const oldApiUrl = process.env.BATTLEBOARD_API_URL;
   const oldApiKey = process.env.BOT_API_KEY;
