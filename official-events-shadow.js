@@ -10,6 +10,12 @@ const OFFICIAL_EVENTS_RETENTION_MS = 3 * 24 * 60 * 60 * 1000;
 const OFFICIAL_EVENTS_PRUNE_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const MAX_SIGNED_BIGINT = 9223372036854775807n;
 
+function stripTrailingSlashes(value) {
+  let result = String(value == null ? '' : value).trim();
+  while (result.endsWith('/')) result = result.slice(0, -1);
+  return result;
+}
+
 function validNumericId(value, maxLength = 20) {
   const raw = String(value == null ? '' : value).trim();
   if (!new RegExp('^\\d{1,' + maxLength + '}$').test(raw)) return null;
@@ -118,7 +124,7 @@ function createOfficialEventsShadowProbe(options = {}) {
   const logger = options.logger || console;
   const clock = typeof options.clock === 'function' ? options.clock : () => new Date();
 
-  const supabaseUrl = String(options.supabaseUrl ?? env.SUPABASE_URL ?? '').trim().replace(/\\/+$/, '');
+  const supabaseUrl = stripTrailingSlashes(options.supabaseUrl ?? env.SUPABASE_URL ?? '');
   const serviceRoleKey = String(options.serviceRoleKey ?? env.SUPABASE_SERVICE_ROLE_KEY ?? '').trim();
   const enabled = String(options.enabled ?? env.OFFICIAL_EVENTS_SHADOW_ENABLED ?? '').toLowerCase() === 'true';
   const enabledWithStorage = enabled && Boolean(supabaseUrl && serviceRoleKey);
