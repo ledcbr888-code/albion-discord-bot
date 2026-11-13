@@ -1104,3 +1104,58 @@ test('runtime failover is held when a delivered Battle is still newer than the s
     else process.env.BOT_API_KEY = oldApiKey;
   }
 });
+
+
+test('schedules Official Events Shadow in the existing bot process without changing the primary cursor', async () => {
+  const oldApiUrl = process.env.BATTLEBOARD_API_URL;
+  const oldApiKey = process.env.BOT_API_KEY;
+  const oldFetch = global.fetch;
+  const oldLog = console.log;
+  const serverId = '1165745441120452638';
+  const config = { guilds: ['Shadow Test Guild'], players: [], autoBattles: [], battleboardState: {} };
+  let shadowRuns = 0;
+  const logs = [];
+  console.log = (...args) => logs.push(args.join(' '));
+  process.env.BATTLEBOARD_API_URL = 'https://battleboard.example';
+  process.env.BOT_API_KEY = 'test-key-'.padEnd(40, 'x');
+  global.fetch = async urlValue => {
+    const url = new URL(String(urlValue));
+    assert.equal(url.hostname, 'battleboard.example');
+    assert.equal(url.pathname, '/api/bot-tracked-entities');
+    assert.equal(url.searchParams.get('mode'), 'events');
+    return { ok: true, status: 200, text: async () => JSON.stringify({ items: [] }) };
+  };
+
+  const integration = createBattleboardIntegration({
+    client: {},
+    getAllGuildConfigs: () => [{ guildId: serverId, config }],
+    getGuildConfig: () => config,
+    saveData: () => {},
+    buildBattleReportPayload: async () => ({ totalFame: 0, payload: { files: [] } }),
+    officialEventsShadowProbe: {
+      enabled: true,
+      runOnce: async () => { shadowRuns++; return { ok: true }; },
+    },
+  });
+
+  try {
+    assert.equal(integration.runOfficialEventsShadowProbe(), false, 'probe waits until existing integration starts');
+    assert.equal(await integration.start(), true);
+    assert.equal(integration.isServerActive(serverId), true);
+    assert.equal(integration.runOfficialEventsShadowProbe(), true);
+    assert.equal(integration.runOfficialEventsShadowProbe(), false, '120-second interval and in-flight lock suppress a duplicate');
+    await wait(0);
+    assert.equal(shadowRuns, 1);
+    assert.equal(config.battleboardState.cursorInitialized, undefined);
+    assert.equal(config.battleboardState.eventCursor, undefined);
+    assert.ok(logs.some(line => line.includes('Poll=120s')));
+  } finally {
+    integration.stop();
+    global.fetch = oldFetch;
+    console.log = oldLog;
+    if (oldApiUrl === undefined) delete process.env.BATTLEBOARD_API_URL;
+    else process.env.BATTLEBOARD_API_URL = oldApiUrl;
+    if (oldApiKey === undefined) delete process.env.BOT_API_KEY;
+    else process.env.BOT_API_KEY = oldApiKey;
+  }
+});
