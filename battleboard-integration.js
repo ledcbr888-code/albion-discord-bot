@@ -1,6 +1,8 @@
 'use strict';
 const { createHash } = require('node:crypto');
+const { createOfficialEventsShadowProbe } = require('./official-events-shadow');
 const POLL_MS = 30000;
+const OFFICIAL_EVENTS_SHADOW_INTERVAL_MS = 120 * 1000;
 const TIMEOUT_MS = 8000;
 const SNAPSHOT_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 const EVENT_POLL_SUCCESS_LOG_INTERVAL_MS = 5 * 60 * 1000;
@@ -246,10 +248,39 @@ function createBattleboardIntegration(deps = {}) {
   const activeServerIds = new Set();
   const fallbackServerIds = new Set();
   const preflightPassedServerIds = new Set();
+  const officialEventsShadowProbe = deps.officialEventsShadowProbe ||
+    createOfficialEventsShadowProbe({
+      http: deps.http,
+      fetchImpl: deps.fetchImpl,
+      logger: deps.logger || console,
+    });
   const SERVER_FAILURES_BEFORE_FAILOVER = 3;
   let started = false;
   let running = false;
   let timer = null;
+  let officialEventsShadowRunning = false;
+  let lastOfficialEventsShadowStartedAtMs = 0;
+
+  function maybeRunOfficialEventsShadowProbe() {
+    if (!started || !officialEventsShadowProbe || officialEventsShadowProbe.enabled !== true) return false;
+    if (officialEventsShadowRunning) return false;
+    const now = Date.now();
+    if (lastOfficialEventsShadowStartedAtMs &&
+        now - lastOfficialEventsShadowStartedAtMs < OFFICIAL_EVENTS_SHADOW_INTERVAL_MS) return false;
+
+    officialEventsShadowRunning = true;
+    lastOfficialEventsShadowStartedAtMs = now;
+    Promise.resolve()
+      .then(() => officialEventsShadowProbe.runOnce())
+      .catch(error => {
+        console.warn('[Official Events Shadow] Probe runner failed without affecting Battleboard polling | Error=' +
+          String(error && error.message || error).slice(0, 200));
+      })
+      .finally(() => {
+        officialEventsShadowRunning = false;
+      });
+    return true;
+  }
 
   function notifyServerAvailability(serverId, active, details = {}) {
     try { return onServerAvailabilityChange(String(serverId), active === true, details) !== false; }
@@ -1246,8 +1277,12 @@ function createBattleboardIntegration(deps = {}) {
       }
     } finally {
       running = false;
-      if (started && (activeServerIds.size > 0 || fallbackServerIds.size > 0)) timer = setTimeout(tick, POLL_MS);
-      else timer = null;
+      if (started && (activeServerIds.size > 0 || fallbackServerIds.size > 0)) {
+        // Run the Official Events experiment in the same long-lived bot process.
+        // It is fire-and-forget so it cannot hold up the primary 30-second feed poll.
+        maybeRunOfficialEventsShadowProbe();
+        timer = setTimeout(tick, POLL_MS);
+      } else timer = null;
     }
   }
   async function preflightServer(serverId, config) {
@@ -1329,6 +1364,11 @@ function createBattleboardIntegration(deps = {}) {
       return false;
     }
     started = true;
+    lastOfficialEventsShadowStartedAtMs = Date.now();
+    console.log('🧪 [Official Events Shadow] ' +
+      (officialEventsShadowProbe && officialEventsShadowProbe.enabled === true
+        ? 'เปิดใช้งานแบบ Shadow เท่านั้น' : 'ปิดอยู่ (ต้องตั้ง OFFICIAL_EVENTS_SHADOW_ENABLED=true และเตรียม Supabase table ก่อน)') +
+      ' | Server=Asia | Poll=120s | API=GameInfo /events | Production queue=ไม่เขียน');
     for (const item of candidates) {
       const serverId = String(item.guildId).trim();
       const config = item.config ||
@@ -1350,17 +1390,19 @@ function createBattleboardIntegration(deps = {}) {
     if (timer) clearTimeout(timer);
     timer = null;
     started = false;
+    lastOfficialEventsShadowStartedAtMs = 0;
     activeServerIds.clear();
     fallbackServerIds.clear();
     preflightPassedServerIds.clear();
   }
   return {
     start, stop, isConfigured, tick,
+    runOfficialEventsShadowProbe: maybeRunOfficialEventsShadowProbe,
     isServerActive: serverId => activeServerIds.has(String(serverId)),
     isServerInFallback: serverId => fallbackServerIds.has(String(serverId)),
   };
 }
 module.exports = {
   createBattleboardIntegration,
-  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce, snapshotFingerprint, hasTrackedSnapshotChanged, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup, timestampMs, formatThaiDuration, formatThaiTimestamp, formatPreciseDuration, elapsedMsBetween, getBattleDelayMetrics, formatBattleDelayLines },
+  __test: { OFFICIAL_EVENTS_SHADOW_INTERVAL_MS, normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce, snapshotFingerprint, hasTrackedSnapshotChanged, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup, timestampMs, formatThaiDuration, formatThaiTimestamp, formatPreciseDuration, elapsedMsBetween, getBattleDelayMetrics, formatBattleDelayLines },
 };
