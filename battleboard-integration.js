@@ -1353,7 +1353,7 @@ function createBattleboardIntegration(deps = {}) {
     }
   }
   function wakeForBattle(event) {
-    if (!started || shuttingDown || !/^\\d{1,20}$/.test(String(event?.battleId || ''))) return false;
+    if (!started || shuttingDown || !/^\d{1,20}$/.test(String(event?.battleId || ''))) return false;
     const now = Date.now();
     // Coalesce bursts from different Battle notifications to protect Hobby/Render API limits.
     if (now - lastWebhookWakeAt < 1_000) return true;
