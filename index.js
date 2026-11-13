@@ -3255,8 +3255,8 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
                     .map(id => String(id ?? '').trim())
                     .filter(id => /^\d+$/.test(id) && Number(id) > 0))];
 
-                // Optional, best-effort shadow observation. The flag defaults off,
-                // and any intake failure must never block Auto-Battle reporting.
+                // Optional, best-effort shadow observation. The flag defaults off.
+                // The helper handles failures internally and never blocks the report path.
                 void battleboardDiscoveryShadow.submit(ids);
 
                 officialEventCache.set(targetGuildId, {
