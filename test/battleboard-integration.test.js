@@ -7,12 +7,18 @@ const {
   __test: {
     normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds,
     targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce,
+    EVENT_POLL_INTERVAL_MS, EVENT_POLL_SUCCESS_LOG_INTERVAL_MS,
     snapshotFingerprint, hasTrackedSnapshotChanged, timestampMs, formatThaiDuration, formatThaiTimestamp,
     formatPreciseDuration, elapsedMsBetween, getBattleDelayMetrics, formatBattleDelayLines,
   },
 } = require('../battleboard-integration');
 
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+test('uses a 30-second Events Feed cadence and one-minute empty-poll log interval', () => {
+  assert.equal(EVENT_POLL_INTERVAL_MS, 30_000);
+  assert.equal(EVENT_POLL_SUCCESS_LOG_INTERVAL_MS, 60_000);
+});
 
 test('normalizes names consistently', () => {
   assert.equal(normalizeName('  PLAC   '), 'plac');
@@ -614,6 +620,73 @@ test('frequent updates do not postpone a scheduled retry after a failed backup',
     assert.deepEqual(writes, ['initial', 5]);
   } finally {
     scheduler.stop();
+  }
+});
+
+test('does not overlap Events Feed polls when tick is called during an in-flight request', async () => {
+  const oldApiUrl = process.env.BATTLEBOARD_API_URL;
+  const oldApiKey = process.env.BOT_API_KEY;
+  const oldFetch = global.fetch;
+  const serverId = '1165745441120452638';
+  const config = {
+    guilds: [{ id: 'guild-plac', name: 'PLAC' }],
+    players: [],
+    autoBattles: [{ targetGuild: 'PLAC', targetGuildId: 'guild-plac', channelId: '99999999999999999', enabled: true }],
+    battleboardState: {},
+  };
+  const items = buildTrackedItems(config);
+  Object.assign(config.battleboardState, {
+    snapshotInitialized: true,
+    snapshotFingerprint: snapshotFingerprint(items),
+    lastSnapshotSyncAt: new Date().toISOString(),
+    cursorInitialized: true,
+    eventCursor: { after: '2026-11-10T00:00:00.000Z', afterBattleId: '1000' },
+    delivered: [],
+    pendingEvents: [],
+    lastEventsPollSuccessLogAt: new Date().toISOString(),
+  });
+  process.env.BATTLEBOARD_API_URL = 'https://battleboard.example';
+  process.env.BOT_API_KEY = 'test-key-'.padEnd(40, 'x');
+
+  let eventPollCalls = 0;
+  let markRequestStarted;
+  const requestStarted = new Promise(resolve => { markRequestStarted = resolve; });
+  let releaseRequest;
+  const requestGate = new Promise(resolve => { releaseRequest = resolve; });
+  global.fetch = async urlValue => {
+    const url = new URL(String(urlValue));
+    assert.equal(url.pathname, '/api/bot-tracked-entities');
+    assert.equal(url.searchParams.get('mode'), 'events');
+    eventPollCalls++;
+    markRequestStarted();
+    await requestGate;
+    return { ok: true, status: 200, text: async () => JSON.stringify({ items: [] }) };
+  };
+
+  const integration = createBattleboardIntegration({
+    getAllGuildConfigs: () => [{ guildId: serverId, config }],
+    getGuildConfig: () => config,
+    saveData: () => {},
+  });
+  try {
+    const firstTick = integration.tick();
+    await requestStarted;
+
+    // A second call while the first request is blocked must exit at the running lock.
+    await integration.tick();
+    assert.equal(eventPollCalls, 1, 'the in-flight Events Feed request must not overlap');
+
+    releaseRequest();
+    await firstTick;
+    assert.equal(eventPollCalls, 1, 'only one Events Feed request should be made for this tick');
+  } finally {
+    releaseRequest();
+    integration.stop();
+    global.fetch = oldFetch;
+    if (oldApiUrl === undefined) delete process.env.BATTLEBOARD_API_URL;
+    else process.env.BATTLEBOARD_API_URL = oldApiUrl;
+    if (oldApiKey === undefined) delete process.env.BOT_API_KEY;
+    else process.env.BOT_API_KEY = oldApiKey;
   }
 });
 
