@@ -259,6 +259,8 @@ function createBattleboardIntegration(deps = {}) {
   const activeRequests = new Set();
   let rateLimitUntilMs = 0;
   let lastScheduledDelayMs = null;
+  let webhookWakePending = false;
+  let lastWebhookWakeAt = 0;
 
   function notifyServerAvailability(serverId, active, details = {}) {
     try { return onServerAvailabilityChange(String(serverId), active === true, details) !== false; }
@@ -1265,6 +1267,7 @@ function createBattleboardIntegration(deps = {}) {
     if (running) return;
     if (timer) { clearTimeout(timer); timer = null; }
     running = true;
+    webhookWakePending = false;
     let totalNewEvents = 0;
     let hadFailure = false;
     try {
@@ -1340,11 +1343,29 @@ function createBattleboardIntegration(deps = {}) {
       running = false;
       if (totalNewEvents > 0 && !hadFailure && consecutiveBurstPolls < MAX_CONSECUTIVE_BURST_POLLS) consecutiveBurstPolls++;
       else consecutiveBurstPolls = 0;
-      const delay = Math.max(consecutiveBurstPolls > 0 ? EVENT_POLL_BURST_MS : EVENT_POLL_IDLE_MS, rateLimitUntilMs - Date.now());
+      const requestedDelay = webhookWakePending && !hadFailure ? 1_000
+        : consecutiveBurstPolls > 0 ? EVENT_POLL_BURST_MS : EVENT_POLL_IDLE_MS;
+      webhookWakePending = false;
+      const delay = Math.max(requestedDelay, rateLimitUntilMs - Date.now());
       lastScheduledDelayMs = delay;
       if (started && (activeServerIds.size > 0 || fallbackServerIds.size > 0)) timer = setTimeout(tick, delay);
       else timer = null;
     }
+  }
+  function wakeForBattle(event) {
+    if (!started || shuttingDown || !/^\\d{1,20}$/.test(String(event?.battleId || ''))) return false;
+    const now = Date.now();
+    // Coalesce bursts from different Battle notifications to protect Hobby/Render API limits.
+    if (now - lastWebhookWakeAt < 1_000) return true;
+    lastWebhookWakeAt = now;
+    webhookWakePending = true;
+    if (!running) {
+      if (timer) clearTimeout(timer);
+      lastScheduledDelayMs = Math.max(1_000, rateLimitUntilMs - Date.now());
+      timer = setTimeout(tick, lastScheduledDelayMs);
+      webhookWakePending = false;
+    }
+    return true;
   }
   async function preflightServer(serverId, config) {
     const items = buildTrackedItems(config);
@@ -1449,13 +1470,14 @@ function createBattleboardIntegration(deps = {}) {
     if (timer) clearTimeout(timer);
     timer = null;
     consecutiveBurstPolls = 0;
+    webhookWakePending = false;
     for (const controller of activeRequests) controller.abort(new Error('Battleboard polling stopped'));
     activeServerIds.clear();
     fallbackServerIds.clear();
     preflightPassedServerIds.clear();
   }
   return {
-    start, stop, isConfigured, tick,
+    start, stop, isConfigured, tick, wakeForBattle,
     isServerActive: serverId => activeServerIds.has(String(serverId)),
     isServerInFallback: serverId => fallbackServerIds.has(String(serverId)),
     getPollStatus: () => ({ running, activeRequests: activeRequests.size, consecutiveBurstPolls, lastScheduledDelayMs }),
