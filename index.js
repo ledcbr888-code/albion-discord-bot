@@ -29,6 +29,7 @@ const express = require('express');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const ctaModule = require('./cta');
 const { createBattleboardIntegration } = require('./battleboard-integration');
+const { createOfficialEventsShadow } = require('./official-events-shadow');
 const battleboardPrimaryServerIds = new Set();
 const { createTrackingBackupScheduler, createThrottledSuccessLogger } = require('./tracking-backup-scheduler');
 let Fuse; try { Fuse = require('fuse.js'); } catch(e) { console.warn('fuse.js not installed, using fallback'); }
@@ -6721,6 +6722,11 @@ client.once('clientReady', async () => {
             saveData();
         },
     });
+    // Shadow observer is independent from Primary Delivery and Official fallback.
+    // It does not alter battleboardPrimaryServerIds, cursors, processedBattles or Discord sends.
+    const officialEventsShadow = createOfficialEventsShadow({ getGuildConfigs: getAllGuildConfigs });
+    officialEventsShadow.start();
+
     let battleboardPrimary = false;
     try {
         battleboardPrimary = await battleboardIntegration.start();
