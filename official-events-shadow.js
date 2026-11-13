@@ -46,13 +46,16 @@ function keepSmallPayload(event) {
 function normalizeOfficialEvents(events, observedAt, retentionMs = OFFICIAL_EVENTS_RETENTION_MS) {
   const grouped = new Map();
   let invalidBattleIdCount = 0;
+  let missingBattleIdCount = 0;
   let missingEventIdCount = 0;
 
   for (const event of Array.isArray(events) ? events : []) {
     if (!event || typeof event !== 'object' || Array.isArray(event)) continue;
     const payload = keepSmallPayload(event);
     if (!payload.battleId) {
-      invalidBattleIdCount++;
+      const rawBattleId = event.BattleId ?? event.battleId ?? event.battle_id;
+      if (rawBattleId === null || rawBattleId === undefined || rawBattleId === '') missingBattleIdCount++;
+      else invalidBattleIdCount++;
       continue;
     }
     if (!payload.eventId) missingEventIdCount++;
@@ -76,6 +79,7 @@ function normalizeOfficialEvents(events, observedAt, retentionMs = OFFICIAL_EVEN
     rows: [...grouped.values()],
     distinctBattleIds: grouped.size,
     invalidBattleIdCount,
+    missingBattleIdCount,
     missingEventIdCount,
   };
 }
@@ -203,11 +207,11 @@ function createOfficialEventsShadowProbe(options = {}) {
       });
       return { rows: Array.isArray(response.data) ? response.data : [], ok: true };
     } catch (error) {
-      logger.warn('[Official Events Shadow] Battle List lookup unavailable | HTTP=' +
+      logger.warn('[Official Events Shadow] Battle List lookup unavailable; skipping this sample to avoid writing into the wrong Supabase project | HTTP=' +
         Number(error && error.response && error.response.status || 0) +
         ' | Error=' + String(error && error.response && error.response.data && error.response.data.message ||
           error && error.message || error).slice(0, 180));
-      return { rows: [], ok: false };
+      throw new Error('Battle List table is unavailable for Shadow comparison; sample was not stored.');
     }
   }
 
@@ -268,7 +272,7 @@ function createOfficialEventsShadowProbe(options = {}) {
         .filter(row => !existingByBattleId.has(row.battle_id))
         .map(row => ({
           ...row,
-          is_new_battle: battleList.ok ? !battleListById.has(row.battle_id) : null,
+          is_new_battle: !battleListById.has(row.battle_id),
         }));
       const insertedRows = await insertObservations(rowsToInsert);
 
@@ -315,11 +319,12 @@ function createOfficialEventsShadowProbe(options = {}) {
           event.BattleId ?? event.battleId ?? event.battle_id
         ))).length,
         invalidBattleIdCount: normalized.invalidBattleIdCount,
+        missingBattleIdCount: normalized.missingBattleIdCount,
         missingEventIdCount: normalized.missingEventIdCount,
         distinctBattleIds: normalized.distinctBattleIds,
         insertedBattleRows: insertedRows.length,
-        battleListMatched: samples.filter(sample => sample.battleListSeen).length,
-        battleListLookupOk: battleList.ok,
+        battleListMatched: sampleRows.filter(row => Boolean(battleListById.get(String(row.battle_id))?.first_seen_at)).length,
+        battleListLookupOk: true,
         pageCapReached: events.length >= OFFICIAL_EVENTS_PAGE_LIMIT,
         pruneAttempted,
         pruneSucceeded,
