@@ -43,6 +43,7 @@ function createOfficialEventsShadow({
   const safeInterval=Math.max(MIN_INTERVAL_MS, Number(intervalMs)||MIN_INTERVAL_MS);
   const known=new Map();
   const nextByGuild=new Map();
+  const initializedGuilds=new Set();
   let timer=null,started=false,running=false,cursor=0,backoffUntil=0,successes=0;
   const enabled=()=>process.env.OFFICIAL_EVENTS_SHADOW_ENABLED==='true';
   function remember(id,time) {
@@ -89,7 +90,7 @@ function createOfficialEventsShadow({
           const seenAt=new Date(now()).toISOString();
           const ids=extractBattleIds(payload);
           const newIds=[];
-          if(successes>0 || known.size>0){
+          if(initializedGuilds.has(guildId)){
             for(const id of ids){
               if(!known.has(id)){
                 newIds.push(id);
@@ -100,11 +101,13 @@ function createOfficialEventsShadow({
             }
           }
           for(const id of ids) remember(id,seenAt);
+          const firstGuildPoll=!initializedGuilds.has(guildId);
+          initializedGuilds.add(guildId);
           successes++;
           logger.log('[Official Events Shadow] poll | guildId='+guildId+
             ' | events='+payload.length+' | uniqueBattleIds='+ids.length+
             ' | newBattleIds='+newIds.length+' | durationMs='+(now()-startedAt)+
-            ' | baseline='+String(successes===1));
+            ' | baseline='+String(firstGuildPoll));
         }catch(error){
           const reason=String(error?.name||error?.code||'network-error').slice(0,60);
           nextByGuild.set(guildId,now()+Math.max(safeInterval,120000));
