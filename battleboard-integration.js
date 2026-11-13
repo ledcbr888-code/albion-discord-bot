@@ -1364,5 +1364,5 @@ function createBattleboardIntegration(deps = {}) {
 }
 module.exports = {
   createBattleboardIntegration,
-  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce, snapshotFingerprint, hasTrackedSnapshotChanged, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup, timestampMs, formatThaiDuration, formatThaiTimestamp, formatPreciseDuration, elapsedMsBetween, getBattleDelayMetrics, formatBattleDelayLines },
+  __test: { EVENT_POLL_INTERVAL_MS, EVENT_POLL_SUCCESS_LOG_INTERVAL_MS, normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce, snapshotFingerprint, hasTrackedSnapshotChanged, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup, timestampMs, formatThaiDuration, formatThaiTimestamp, formatPreciseDuration, elapsedMsBetween, getBattleDelayMetrics, formatBattleDelayLines },
 };
