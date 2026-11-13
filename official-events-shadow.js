@@ -36,6 +36,7 @@ function extractBattleIds(payload) {
 
 function createOfficialEventsShadow({
   getGuildConfigs, fetchImpl=globalThis.fetch, logger=console,
+  onFirstObserved=async()=>{},
   now=()=>Date.now(), intervalMs=MIN_INTERVAL_MS,
 }={}) {
   if (typeof getGuildConfigs !== 'function') throw new Error('getGuildConfigs is required');
@@ -98,6 +99,17 @@ function createOfficialEventsShadow({
                   ' | source=official_events_shadow | observedAt='+seenAt+
                   ' | guildId='+guildId);
               }
+            }
+          }
+          // Observation persistence is independent from delivery and must not block the next Guild.
+          if(newIds.length){
+            try{
+              await onFirstObserved(newIds.map(battleId=>({
+                source:'official_events_shadow',battleId,guildId,observedAt:seenAt,
+              })));
+            }catch(error){
+              logger.warn('[Official Events Shadow] observation persistence failed | guildId='+
+                guildId+' | reason='+String(error?.name||'Error').slice(0,40));
             }
           }
           for(const id of ids) remember(id,seenAt);
