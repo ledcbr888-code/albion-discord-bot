@@ -328,6 +328,7 @@ function createBattleboardIntegration(deps = {}) {
     if (!config.battleboardState || typeof config.battleboardState !== 'object') config.battleboardState = {};
     if (!Array.isArray(config.battleboardState.delivered)) config.battleboardState.delivered = [];
     if (!Array.isArray(config.battleboardState.pendingEvents)) config.battleboardState.pendingEvents = [];
+    if (!Array.isArray(config.battleboardState.deliveryAckOutbox)) config.battleboardState.deliveryAckOutbox = [];
     return config.battleboardState;
   }
   function findDelivery(state, key) { return state.delivered.find(item => item && item.key === key) || null; }
@@ -337,6 +338,56 @@ function createBattleboardIntegration(deps = {}) {
     else state.delivered.push(record);
     if (state.delivered.length > MAX_DELIVERIES) state.delivered.splice(0, state.delivered.length - MAX_DELIVERIES);
     persist();
+  }
+  // Delivery Acks are evidence of a successful Discord send, not commands to
+  // send Discord messages. Keep these independently persisted from discovery
+  // observations and the existing report dedupe records.
+  const deliveryAckEnabled=()=>process.env.BATTLEBOARD_DELIVERY_ACK_ENABLED==='true';
+  function queueDeliveryAck(state, serverId, battleId, channelId, partNumber, partsTotal, sentMessage, sentAt) {
+    if (!deliveryAckEnabled() || !sentMessage?.id) return;
+    const eventId=String(serverId)+':'+String(battleId)+':'+String(channelId)+':'+partNumber;
+    if (state.deliveryAckOutbox.some(item=>item?.payload?.eventId===eventId)) return;
+    if (state.deliveryAckOutbox.length>=5000) {
+      console.warn('[Delivery Ack] outbox full; sent Discord message still preserved in delivery state');
+      return;
+    }
+    state.deliveryAckOutbox.push({
+      payload:{eventId,server:'asia',battleId:String(battleId),discordServerId:String(serverId),
+        channelId:String(channelId),partNumber,partsTotal,messageId:String(sentMessage.id),
+        sentAt:sentAt.toISOString(),deliveryStatus:'sent'},
+      attempts:0,nextAttemptAt:null,status:'pending'
+    });
+    persist();
+  }
+  async function flushDeliveryAcks(state) {
+    if (!deliveryAckEnabled() || !Array.isArray(state.deliveryAckOutbox) ||
+        !state.deliveryAckOutbox.length) return;
+    const due=state.deliveryAckOutbox.filter(item=>item?.status==='pending' &&
+      (!item.nextAttemptAt || Date.parse(item.nextAttemptAt)<=Date.now())).slice(0,2);
+    for (const item of due) {
+      try {
+        const response=await request('/api/bot-tracked-entities?mode=delivery-ack',{
+          method:'POST',body:item.payload});
+        if (response?.ok!==true) throw Error('Invalid delivery Ack receipt');
+        state.deliveryAckOutbox=state.deliveryAckOutbox.filter(x=>x!==item);
+        persist();
+      } catch(error) {
+        item.attempts=(Number(item.attempts)||0)+1;
+        item.lastStatus=Number(error?.status)||null;
+        item.lastError=String(error?.message||'transport').slice(0,140);
+        if ([400,401,403,404,405,409,422].includes(item.lastStatus)) {
+          item.status='blocked'; // never discard an unacknowledged Discord receipt
+          console.warn('[Delivery Ack] config/payload blocked; receipt retained | HTTP '+item.lastStatus);
+        } else {
+          const delayMs=Math.min(15*60_000,30_000*2**Math.min(5,item.attempts-1));
+          item.nextAttemptAt=new Date(Date.now()+delayMs).toISOString();
+          console.warn('[Delivery Ack] storage retry scheduled | status='+
+            (item.lastStatus||'network')+' | retryInMs='+delayMs);
+        }
+        persist();
+        break;
+      }
+    }
   }
   async function syncSnapshot(serverId, state, items) {
     if (!isSnapshotSyncDue(state, items)) return false;
@@ -497,6 +548,7 @@ function createBattleboardIntegration(deps = {}) {
           record.messageIds[partNumber - 1] = String(sentMessage.id);
         }
         saveDelivery(state, record);
+        queueDeliveryAck(state, serverId, battleId, channelId, partNumber, partsTotal, sentMessage, sentAt);
         console.log(
           '✅ [Auto-Battle] ส่งรายงานส่วนที่ ' + partNumber + '/' + partsTotal + ' เข้า Discord สำเร็จ' +
           ' | ' + partLabel + partNumber + '/' + partsTotal +
@@ -582,6 +634,7 @@ function createBattleboardIntegration(deps = {}) {
     const totalSendDurationMs = Math.max(0, Date.parse(record.sentAt) - Date.parse(record.firstAttemptAt || record.sentAt));
     record.totalSendDurationMs = totalSendDurationMs;
     saveDelivery(state, record);
+    await flushDeliveryAcks(state);
     console.log(
       '✅ [Auto-Battle] ส่งรายงานครบทุกส่วนเข้า Discord สำเร็จ' +
       ' | เซิร์ฟเวอร์=' + serverId +
@@ -1018,6 +1071,7 @@ function createBattleboardIntegration(deps = {}) {
   async function pollServer(serverId, guildConfig) {
     if (!validDiscordServerId(serverId) || !guildConfig) return;
     const state = getState(guildConfig);
+    await flushDeliveryAcks(state);
     const items = buildTrackedItems(guildConfig);
 
     // A Discord server with no tracking should not consume Vercel/Supabase

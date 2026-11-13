@@ -1104,3 +1104,64 @@ test('runtime failover is held when a delivered Battle is still newer than the s
     else process.env.BOT_API_KEY = oldApiKey;
   }
 });
+
+test('Discord delivery Ack stays in independent outbox after 503 and is retried without a second Discord send',async()=>{
+ const keys=['BATTLEBOARD_API_URL','BOT_API_KEY','BATTLEBOARD_DELIVERY_ACK_ENABLED'];
+ const env=Object.fromEntries(keys.map(k=>[k,process.env[k]]));const oldFetch=global.fetch;
+ const serverId='1165745441120452638',channelId='1165745442026422396',battleId='529092722';
+ const now=new Date(),start=new Date(now-900000).toISOString(),end=new Date(now-600000).toISOString();
+ const event={battle_id:battleId,checked_at:now.toISOString(),first_seen_at:new Date(now-700000).toISOString(),
+   matches:[{type:'guild',id:'guild-plac',name:'PLAC'}]};
+ const config={guilds:[{id:'guild-plac',name:'PLAC'}],players:['AD03E'],
+   autoBattles:[{targetGuild:'PLAC',targetGuildId:'guild-plac',channelId,minFrames:0,enabled:true}],
+   battleboardState:{}};
+ const items=buildTrackedItems(config);
+ Object.assign(config.battleboardState,{
+   snapshotInitialized:true,snapshotFingerprint:snapshotFingerprint(items),lastSnapshotSyncAt:now.toISOString(),
+   cursorInitialized:true,eventCursor:{after:new Date(now-30000).toISOString(),afterBattleId:'0'},
+   delivered:[],pendingEvents:[],deliveryAckOutbox:[]
+ });
+ process.env.BATTLEBOARD_API_URL='https://battleboard.example';
+ process.env.BOT_API_KEY='test-key-'.padEnd(40,'x');
+ process.env.BATTLEBOARD_DELIVERY_ACK_ENABLED='true';
+ let postedAcks=0,sends=0,eventCalls=0,ackReady=false;
+ global.fetch=async (urlValue,init)=>{
+   const url=new URL(String(urlValue));let body={};
+   if(url.pathname==='/api/bot-tracked-entities'&&url.searchParams.get('mode')==='delivery-ack'){
+     postedAcks++;const payload=JSON.parse(init.body);
+     assert.equal(payload.eventId,serverId+':'+battleId+':'+channelId+':1');
+     assert.equal(payload.messageId,'1570899488606781440');
+     assert.equal(payload.partsTotal,1);
+     if(!ackReady)return{ok:false,status:503,text:async()=>JSON.stringify({error:'temporarily unavailable'})};
+     body={ok:true,duplicate:false};
+   }else if(url.pathname==='/api/bot-tracked-entities'&&url.searchParams.get('mode')==='events'){
+     body={items:eventCalls++===0?[event]:[]};
+   }else if(url.pathname==='/api/bot-battle-detail'){
+     body={ready:true,detailSchemaVersion:5,detail:{startTime:start,endTime:end,
+       guilds:{'guild-plac':{id:'guild-plac',name:'PLAC'}}}};
+   }else throw Error('Unexpected URL: '+url.href);
+   return{ok:true,status:200,text:async()=>JSON.stringify(body)};
+ };
+ const integration=createBattleboardIntegration({
+  client:{channels:{fetch:async()=>({send:async()=>{sends++;return{id:'1570899488606781440'}}})}},
+  getAllGuildConfigs:()=>[{guildId:serverId,config}],getGuildConfig:()=>config,saveData:()=>{},
+  buildBattleReportPayload:async()=>({totalFame:500000,totalKills:2,totalDeaths:0,
+    battleUrl:'https://example.invalid/battle/'+battleId,payload:{files:[Buffer.from('image')],content:'report'}})
+ });
+ try{
+  await integration.tick();
+  assert.equal(sends,1);
+  assert.equal(postedAcks,1);
+  assert.equal(config.battleboardState.deliveryAckOutbox.length,1);
+  assert.equal(config.battleboardState.delivered[0].status,'sent');
+  ackReady=true;
+  config.battleboardState.deliveryAckOutbox[0].nextAttemptAt=new Date(Date.now()-1).toISOString();
+  integration.stop();await integration.tick();
+  assert.equal(postedAcks,2);
+  assert.equal(config.battleboardState.deliveryAckOutbox.length,0);
+  assert.equal(sends,1,'ack retry must never resend Discord report');
+ }finally{
+  integration.stop();global.fetch=oldFetch;
+  for(const [k,v] of Object.entries(env)){if(v===undefined)delete process.env[k];else process.env[k]=v;}
+ }
+});
