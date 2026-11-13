@@ -6724,7 +6724,29 @@ client.once('clientReady', async () => {
     });
     // Shadow observer is independent from Primary Delivery and Official fallback.
     // It does not alter battleboardPrimaryServerIds, cursors, processedBattles or Discord sends.
-    const officialEventsShadow = createOfficialEventsShadow({ getGuildConfigs: getAllGuildConfigs });
+    const officialEventsShadow = createOfficialEventsShadow({
+        getGuildConfigs: getAllGuildConfigs,
+        onFirstObserved: async items => {
+            const url = String(process.env.BATTLEBOARD_API_URL || '').trim().replace(/\/+$/, '');
+            const key = String(process.env.BOT_API_KEY || '');
+            if (!/^https:\/\//i.test(url) || key.length < 32) {
+                console.warn('[Official Events Shadow] observation POST skipped | Battleboard API credentials unavailable');
+                return;
+            }
+            const response = await fetch(url + '/api/bot-tracked-entities?mode=observations', {
+                method: 'POST',
+                headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ server: 'asia', items }),
+                signal: AbortSignal.timeout(4500),
+            });
+            if (!response.ok) {
+                console.warn('[Official Events Shadow] observation POST failed | HTTP ' + response.status +
+                    ' | count=' + items.length);
+                return;
+            }
+            console.log('[Official Events Shadow] observation POST accepted | count=' + items.length);
+        },
+    });
     officialEventsShadow.start();
 
     let battleboardPrimary = false;
