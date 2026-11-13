@@ -71,3 +71,19 @@ test('invalid JSON shape does not produce discovery claims',()=>withFlag(async()
  assert.ok(log.lines.some(x=>x.includes('Invalid events payload')));
  bot.stop();
 }));
+
+test('new discovery calls persistence observer without touching delivery flow',()=>withFlag(async()=>{
+ const delivered=[],seen=[],log=logger();let count=0;
+ const bot=createOfficialEventsShadow({
+  getGuildConfigs:()=>[{config:{autoBattles:[{targetGuildId:gid}]}}],
+  logger:log,now:(()=>{let t=100000;return()=>t+=61000})(),
+  fetchImpl:async()=>response(++count===1?[{BattleId:101}]:[{BattleId:101},{BattleId:102}]),
+  onFirstObserved:async rows=>seen.push(...rows),
+ });
+ bot.start();await bot.tick();await bot.tick();
+ assert.equal(seen.length,1);
+ assert.equal(seen[0].battleId,'102');
+ assert.equal(seen[0].source,'official_events_shadow');
+ assert.equal(delivered.length,0);
+ bot.stop();
+}));
