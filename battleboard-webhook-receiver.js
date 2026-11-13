@@ -45,10 +45,13 @@ function createBattleWebhookReceiver({ secret, onBattle, now = () => Date.now() 
       // Fail closed instead of silently evicting recent replay protection.
       return reply(503, 'Webhook replay cache is full');
     }
+    try {
+      if (wake({ battleId: id, server: 'asia', firstSeenAt: data.firstSeenAt, source: data.source }) !== true) {
+        return reply(503, 'Discovery poller is not ready');
+      }
+    } catch { return reply(503, 'Discovery wake unavailable'); }
     replay.set('nonce:' + nonce, current + MAX_SKEW_MS);
     replay.set('battle:' + idempotency, current + MAX_SKEW_MS);
-    try { wake({ battleId: id, server: 'asia', firstSeenAt: data.firstSeenAt, source: data.source }); }
-    catch { return reply(503, 'Discovery wake unavailable'); }
     return reply(202, 'Accepted');
   }
   return receive;
