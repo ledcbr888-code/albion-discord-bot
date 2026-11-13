@@ -324,6 +324,41 @@ function createBattleboardIntegration(deps = {}) {
     try { if (typeof saveData === 'function') saveData(); }
     catch (error) { console.error('❌ [Battleboard] Could not persist state:', error.message); }
   }
+  /**
+   * Commit the Events Feed cursor only after its Event has either been fully
+   * processed or durably put in pendingEvents. saveData() writes tracking.json
+   * atomically and returns false when the local write fails. Remote backups
+   * are asynchronous and are not claimed as committed here.
+   */
+  async function commitEventCursor(state, event) {
+    const checkedAt = String(event && event.checked_at || '').trim();
+    const battleId = String(event && event.battle_id || '').trim();
+    const eventMs = timestampMs(checkedAt);
+    const oldCursor = state.eventCursor || null;
+    const oldMs = timestampMs(oldCursor && oldCursor.after);
+    if (!/^\d+$/.test(battleId) || eventMs === null) {
+      throw new Error('Events Feed contains a malformed checked_at/Battle ID cursor; saved cursor was held.');
+    }
+    if (oldMs !== null && (eventMs < oldMs ||
+      (eventMs === oldMs && BigInt(battleId) <= BigInt(String(oldCursor.afterBattleId || '0'))))) {
+      throw new Error('Events Feed cursor is not increasing; saved cursor was held.');
+    }
+    const priorLastProcessed = state.lastEventProcessedAt;
+    state.eventCursor = { after: checkedAt, afterBattleId: battleId };
+    state.lastEventProcessedAt = new Date().toISOString();
+    try {
+      if (typeof saveData !== 'function') throw new Error('Tracking persistence is unavailable.');
+      const saved = await Promise.resolve(saveData());
+      if (saved === false) throw new Error('Tracking persistence returned false.');
+    } catch (error) {
+      state.eventCursor = oldCursor;
+      if (priorLastProcessed === undefined) delete state.lastEventProcessedAt;
+      else state.lastEventProcessedAt = priorLastProcessed;
+      const reason = String(error && error.message || error).slice(0, 180);
+      console.error('❌ [Auto-Battle] Events Cursor ไม่ถูกเลื่อน เพราะบันทึก Tracking ไม่สำเร็จ | Error=' + reason);
+      throw error;
+    }
+  }
   function getState(config) {
     if (!config.battleboardState || typeof config.battleboardState !== 'object') config.battleboardState = {};
     if (!Array.isArray(config.battleboardState.delivered)) config.battleboardState.delivered = [];
@@ -1059,6 +1094,21 @@ function createBattleboardIntegration(deps = {}) {
     }
     const botReceivedAt = new Date().toISOString();
     const events = result.items;
+    // Fail closed on malformed rows: do not silently skip a non-numeric ID,
+    // a missing timestamp, or a non-monotonic composite page.
+    let prior = state.eventCursor || null;
+    for (const event of events) {
+      const id = String(event && event.battle_id || '').trim();
+      const at = String(event && event.checked_at || '').trim();
+      const atMs = timestampMs(at);
+      const priorMs = timestampMs(prior && prior.after);
+      if (!/^\d+$/.test(id) || atMs === null ||
+        (priorMs !== null && (atMs < priorMs ||
+        (atMs === priorMs && BigInt(id) <= BigInt(String(prior.afterBattleId || '0')))))) {
+        throw new Error('Events Feed returned invalid or out-of-order checked_at/Battle ID; cursor held.');
+      }
+      prior = { after: at, afterBattleId: id };
+    }
     if (events.length) {
       state.lastEventsPollSuccessLogAt = botReceivedAt;
       console.log('📥 [Auto-Battle] รับ Events feed จาก Battleboard | เซิร์ฟเวอร์=' + serverId +
@@ -1111,12 +1161,9 @@ function createBattleboardIntegration(deps = {}) {
             ' | สาเหตุ=' + String(error && error.message || error).slice(0, 180));
         }
       }
-      state.eventCursor = {
-        after: String(event.checked_at || state.eventCursor.after),
-        afterBattleId: String(event.battle_id || state.eventCursor.afterBattleId || '0'),
-      };
-      state.lastEventProcessedAt = new Date().toISOString();
-      persist();
+      // The whole pendingEvents/delivery snapshot is written successfully
+      // before the new composite cursor can be considered committed.
+      await commitEventCursor(state, event);
     }
   }
   async function probeFallbackServer(serverId, guildConfig, state) {
