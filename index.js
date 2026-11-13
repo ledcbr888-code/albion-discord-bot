@@ -29,6 +29,7 @@ const express = require('express');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const ctaModule = require('./cta');
 const { createBattleboardIntegration } = require('./battleboard-integration');
+const { createBattleWebhookReceiver } = require('./battleboard-webhook-receiver');
 const { createBattleboardDiscoveryShadow } = require('./battleboard-discovery-shadow');
 const battleboardDiscoveryShadow = createBattleboardDiscoveryShadow();
 const battleboardPrimaryServerIds = new Set();
@@ -44,6 +45,14 @@ const app = express();
 const PORT = Number(process.env.PORT) || 3000;
 
 app.get('/', (_, res) => res.status(200).send('Albion Discord Bot is running.'));
+// Raw body is required for HMAC validation. An unconfigured endpoint fails closed.
+let wakeBattleboardPoll = null;
+app.post('/webhooks/battle', express.raw({ type: 'application/json', limit: '16kb' }),
+    createBattleWebhookReceiver({
+        secret: process.env.BATTLEBOARD_WEBHOOK_SECRET,
+        onBattle: event => wakeBattleboardPoll ? wakeBattleboardPoll(event) : false,
+    })
+);
 
 const webServer = app.listen(PORT, '0.0.0.0', () => {
     console.log(`🌐 Web server listening on port ${PORT}`);
@@ -6728,6 +6737,7 @@ client.once('clientReady', async () => {
             saveData();
         },
     });
+    wakeBattleboardPoll = event => battleboardIntegration.wakeForBattle(event);
     let battleboardPrimary = false;
     try {
         battleboardPrimary = await battleboardIntegration.start();
