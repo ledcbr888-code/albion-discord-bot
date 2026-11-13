@@ -1131,6 +1131,7 @@ test('Discord delivery Ack stays in independent outbox after 503 and is retried 
      postedAcks++;const payload=JSON.parse(init.body);
      assert.equal(payload.eventId,serverId+':'+battleId+':'+channelId+':1');
      assert.equal(payload.messageId,'1570899488606781440');
+     assert.equal(payload.partsTotal,1);
      if(!ackReady)return{ok:false,status:503,text:async()=>JSON.stringify({error:'temporarily unavailable'})};
      body={ok:true,duplicate:false};
    }else if(url.pathname==='/api/bot-tracked-entities'&&url.searchParams.get('mode')==='events'){
