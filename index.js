@@ -6727,11 +6727,12 @@ client.once('clientReady', async () => {
     const officialEventsShadow = createOfficialEventsShadow({
         getGuildConfigs: getAllGuildConfigs,
         onFirstObserved: async items => {
+            // A rejected POST must never acknowledge/drop unsaved observations.
+            // The independent Shadow outbox batches to <=20 items per call.
             const url = String(process.env.BATTLEBOARD_API_URL || '').trim().replace(/\/+$/, '');
             const key = String(process.env.BOT_API_KEY || '');
             if (!/^https:\/\//i.test(url) || key.length < 32) {
-                console.warn('[Official Events Shadow] observation POST skipped | Battleboard API credentials unavailable');
-                return;
+                throw new Error('Battleboard API credentials unavailable');
             }
             const response = await fetch(url + '/api/bot-tracked-entities?mode=observations', {
                 method: 'POST',
@@ -6740,9 +6741,16 @@ client.once('clientReady', async () => {
                 signal: AbortSignal.timeout(4500),
             });
             if (!response.ok) {
-                console.warn('[Official Events Shadow] observation POST failed | HTTP ' + response.status +
-                    ' | count=' + items.length);
-                return;
+                const error = new Error('Observation HTTP ' + response.status);
+                error.status = response.status;
+                const retryAfter = response.headers?.get?.('retry-after');
+                const seconds = Number(retryAfter);
+                if (retryAfter && Number.isFinite(seconds) && seconds >= 0) {
+                    error.retryAfterMs = seconds * 1000;
+                } else if (retryAfter && Number.isFinite(Date.parse(retryAfter))) {
+                    error.retryAfterMs = Math.max(0, Date.parse(retryAfter) - Date.now());
+                }
+                throw error;
             }
             console.log('[Official Events Shadow] observation POST accepted | count=' + items.length);
         },

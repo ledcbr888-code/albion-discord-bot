@@ -8,6 +8,9 @@ const BATTLE_ID = /^[1-9][0-9]{0,19}$/;
 const MIN_INTERVAL_MS = 60000;
 const MAX_GUILDS_PER_TICK = 2;
 const MAX_KNOWN_IDS = 1000;
+const MAX_PENDING_OBSERVATIONS = 1000;
+const OBSERVATION_BATCH_SIZE = 20;
+const MAX_OBSERVATION_BACKOFF_MS = 15 * 60 * 1000;
 
 function guildIdsFromConfigs(configs) {
   const ids = new Set();
@@ -43,18 +46,51 @@ function createOfficialEventsShadow({
   if (typeof fetchImpl !== 'function') throw new Error('fetch is required');
   const safeInterval=Math.max(MIN_INTERVAL_MS, Number(intervalMs)||MIN_INTERVAL_MS);
   const known=new Map();
+  // Keep original first-observed timestamps until the website acknowledges them.
+  // Discovery and Discord delivery remain independent of this observational outbox.
+  const pending=new Map();
   const nextByGuild=new Map();
   const initializedGuilds=new Set();
   let timer=null,started=false,running=false,cursor=0,backoffUntil=0,successes=0;
+  let observationBackoffUntil=0,observationFailures=0;
   const enabled=()=>process.env.OFFICIAL_EVENTS_SHADOW_ENABLED==='true';
   function remember(id,time) {
     known.set(id,time);
     while(known.size>MAX_KNOWN_IDS) known.delete(known.keys().next().value);
   }
+  async function flushObservations() {
+    if(!pending.size||now()<observationBackoffUntil)return;
+    // Acknowledged batches are removed immediately; an unacknowledged batch
+    // remains queued, preserving observedAt across retries and HTTP errors.
+    while(pending.size && now()>=observationBackoffUntil){
+      const batch=[...pending.values()].slice(0,OBSERVATION_BATCH_SIZE);
+      try{
+        await onFirstObserved(batch);
+        for(const item of batch)pending.delete(item.battleId);
+        observationFailures=0;
+        logger.log('[Official Events Shadow] observation batch acknowledged | count='+batch.length+
+          ' | pending='+pending.size);
+      }catch(error){
+        observationFailures++;
+        const retryAfter=Number(error?.retryAfterMs);
+        const exponential=Math.min(MAX_OBSERVATION_BACKOFF_MS,
+          30000*2**Math.min(5,observationFailures-1));
+        const delay=Math.min(MAX_OBSERVATION_BACKOFF_MS,
+          Math.max(exponential,Number.isFinite(retryAfter)&&retryAfter>=0?retryAfter:0));
+        observationBackoffUntil=now()+delay;
+        logger.warn('[Official Events Shadow] observation batch retained | count='+batch.length+
+          ' | pending='+pending.size+' | status='+(Number(error?.status)||'network')+
+          ' | retryInMs='+delay);
+        return;
+      }
+    }
+  }
   async function tick(){
     if(!started||!enabled()||running||now()<backoffUntil)return;
     running=true;
     try {
+      // Retry unsent observations even when no new Battle IDs arrive.
+      await flushObservations();
       const guilds=guildIdsFromConfigs(getGuildConfigs());
       if(!guilds.length)return;
       let fetched=0;
@@ -101,18 +137,23 @@ function createOfficialEventsShadow({
               }
             }
           }
-          // Observation persistence is independent from delivery and must not block the next Guild.
-          if(newIds.length){
-            try{
-              await onFirstObserved(newIds.map(battleId=>({
-                source:'official_events_shadow',battleId,guildId,observedAt:seenAt,
-              })));
-            }catch(error){
-              logger.warn('[Official Events Shadow] observation persistence failed | guildId='+
-                guildId+' | reason='+String(error?.name||'Error').slice(0,40));
+          // Queue the first-seen timestamp BEFORE sending; retry failures
+          // on subsequent ticks without claiming a later first-seen time.
+          // If the bounded outbox fills up, avoid marking the new ID as known
+          // so it can be discovered again rather than silently discarded.
+          for(const battleId of newIds){
+            if(pending.size>=MAX_PENDING_OBSERVATIONS){
+              logger.warn('[Official Events Shadow] observation outbox full | pending='+pending.size);
+              break;
             }
+            pending.set(battleId,{
+              source:'official_events_shadow',battleId,guildId,observedAt:seenAt,
+            });
           }
-          for(const id of ids) remember(id,seenAt);
+          for(const id of ids){
+            if(pending.has(id)||!newIds.includes(id))remember(id,seenAt);
+          }
+          await flushObservations();
           const firstGuildPoll=!initializedGuilds.has(guildId);
           initializedGuilds.add(guildId);
           successes++;
@@ -153,7 +194,8 @@ function createOfficialEventsShadow({
     return true;
   }
   function stop(){started=false;if(timer)clearTimeout(timer);timer=null;}
-  function stats(){return{enabled:started,known:known.size,successes,backoffUntil};}
+  function stats(){return{enabled:started,known:known.size,successes,backoffUntil,
+    pendingObservations:pending.size,observationBackoffUntil,observationFailures};}
   return{start,stop,tick,stats};
 }
 module.exports={createOfficialEventsShadow,guildIdsFromConfigs,extractBattleIds};
