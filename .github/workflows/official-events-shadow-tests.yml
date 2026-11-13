@@ -1,0 +1,36 @@
+name: Official Events Shadow Tests
+
+on:
+  pull_request:
+    paths:
+      - 'official-events-shadow.js'
+      - 'tests/official-events-shadow.test.js'
+      - 'index.js'
+      - '.github/workflows/official-events-shadow-tests.yml'
+  push:
+    branches:
+      - 'feat/official-events-shadow-observe-only-20261114'
+
+permissions:
+  contents: read
+
+jobs:
+  shadow-unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          persist-credentials: false
+      - name: Setup Node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4.4.0
+        with:
+          node-version: '22'
+      - name: Check syntax
+        run: |
+          node --check official-events-shadow.js
+          node --check index.js
+          node --check tests/official-events-shadow.test.js
+      - name: Shadow unit tests
+        run: node --test tests/official-events-shadow.test.js
