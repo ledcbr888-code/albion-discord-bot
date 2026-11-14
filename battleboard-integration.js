@@ -511,7 +511,6 @@ function createBattleboardIntegration(deps = {}) {
     const alertText =
       '🚨 **BOSS BOT Battleboard Alert!** ตรวจพบไฟต์ใหม่ของ **' + targets.join(', ') + '**\n' +
       '🆔 Battle ID: ' + battleId + '\n' +
-      '💰 Fame รวมของผู้ที่ติดตาม: ' + formatFame(report.totalFame) + '\n' +
       '⚔️ Kills: ' + Number(report.totalKills || 0).toLocaleString() + '\n' +
       '☠️ Deaths: ' + Number(report.totalDeaths || 0).toLocaleString() + '\n' +
       '➕ Kills + Deaths: ' + (Number(report.totalKills || 0) + Number(report.totalDeaths || 0)).toLocaleString() + '\n' +
@@ -631,9 +630,9 @@ function createBattleboardIntegration(deps = {}) {
           );
           continue;
         }
-        const continuationText =
-          '📎 **BOSS BOT Battle Report – ส่วนที่ ' + (index + 1) + '/' + partsTotal + '** | Battle ID: ' + battleId;
-        await sendPart(index + 1, { content: continuationText, files: [files[index]] });
+        // Files-only continuation: no repeated separator/header text between images.
+        // Every part retains its nonce, ACK and detailed server logs.
+        await sendPart(index + 1, { files: [files[index]] });
       }
     } else if ((Number(record.partsSent) || 0) < 1) {
       await sendPart(1, {
@@ -810,7 +809,12 @@ function createBattleboardIntegration(deps = {}) {
     let report;
     try {
       report = await buildBattleReportPayload(battleId, [], {
-        autoBattle: true, guildId: serverId, apiData: detail, trackedPlayers: players, trackedGuilds: guilds,
+        autoBattle: true, guildId: serverId, apiData: detail,
+        trackedPlayers: players, trackedGuilds: guilds,
+        // Display-only: include the matched Auto-Battle Guild in the image
+        // even when it ranks below the first four Guilds by Fame.
+        reportGuilds: routes.map(route => String(
+          route.targetGuild || route.targetGuildName || '').trim()).filter(Boolean),
       });
     } catch (error) {
       const reportBuildMs = Date.now() - reportBuildStartedAtMs;
