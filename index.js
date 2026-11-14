@@ -1754,7 +1754,10 @@ async function generatePlayerWeaponReportImage(players, battleInfo = {}) {
         ctx.textBaseline = 'alphabetic';
         ctx.font = `${weight} ${fs}px Arial, sans-serif`;
         ctx.fillStyle = color;
-        ctx.fillText(text, cx, y);
+        // Size is reduced by textFit; maxWidth also guarantees very long
+        // Guild names cannot extend into the next player's card.
+        if (Number.isFinite(maxWidth)) ctx.fillText(text, cx, y, maxWidth);
+        else ctx.fillText(text, cx, y);
         ctx.restore();
     }
 
