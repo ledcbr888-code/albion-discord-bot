@@ -29,7 +29,7 @@ const express = require('express');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const ctaModule = require('./cta');
 const { createBattleboardIntegration } = require('./battleboard-integration');
-const { selectAutoBattleGuildSummaryRows, WEAPON_CARD_TEXT_LAYOUT } = require('./battle-report-layout');
+const { selectAutoBattleGuildSummaryRows, summarizeEntireBattleForGuildPages, WEAPON_CARD_TEXT_LAYOUT } = require('./battle-report-layout');
 const { createOfficialEventsShadow } = require('./official-events-shadow');
 const battleboardPrimaryServerIds = new Set();
 const { createTrackingBackupScheduler, createThrottledSuccessLogger } = require('./tracking-backup-scheduler');
@@ -1713,6 +1713,15 @@ async function generatePlayerWeaponReportImage(players, battleInfo = {}) {
         if (f > mvp.fame) mvp = { name: p.displayName || p.name, fame: f };
     });
 
+    // Shared stats represent the entire Official Battle for /add guild
+    // Auto-Battle, not just the ten player cards rendered on this page.
+    // For manual and player-only reports preserve the existing per-page stats.
+    if (battleInfo.sharedBattleStats) {
+        ({
+            totalKills, totalDeaths, totalFame, topKiller, mvp
+        } = battleInfo.sharedBattleStats);
+    }
+
     const playersPerRow = 5;
     const cardWidth = 300;
     const cardHeight = 282;
@@ -1946,7 +1955,7 @@ async function generatePlayerWeaponReportImage(players, battleInfo = {}) {
     const badgeW = 184, badgeH = 62, badgeX = width - padding - badgeW, badgeY = 23;
     rounded(badgeX, badgeY, badgeW, badgeH, 14, '#08111f', '#334b70', 1.2);
     ctx.fillStyle = '#101c2f'; drawRoundRect(ctx, badgeX + 6, badgeY + 6, 54, badgeH - 12, 10); ctx.fill();
-    centerText(String(sortedPlayers.length), badgeX + 33, badgeY + 39, 25, '#f8fafc', '900');
+    centerText(String(battleInfo.sharedBattleStats?.playerCount ?? sortedPlayers.length), badgeX + 33, badgeY + 39, 25, '#f8fafc', '900');
     ctx.fillStyle = '#64748b'; ctx.font = '900 10px Arial, sans-serif'; ctx.fillText('PLAYERS', badgeX + 73, badgeY + 27);
     ctx.fillStyle = '#cbd5e1'; ctx.font = 'bold 11px Arial, sans-serif'; ctx.fillText('IN BATTLE', badgeX + 73, badgeY + 45);
 
@@ -1983,7 +1992,11 @@ async function generatePlayerWeaponReportImage(players, battleInfo = {}) {
         const row = Math.floor(i / playersPerRow);
         const x = padding + col * (cardWidth + gapX);
         const y = gridOffsetY + row * (cardHeight + gapY);
-        const isMVP = i === 0;
+        const isMVP = battleInfo.sharedBattleStats
+            ? String(p.displayName || p.name || '').trim().toLowerCase() ===
+                String(battleInfo.sharedBattleStats.mvp?.name || '').trim().toLowerCase()
+            : i === 0;
+        const cardRank = battleInfo.sharedBattleStats ? (Number(battleInfo.pageOffset) || 0) + i + 1 : i + 1;
         const k = Number(p.kills) || 0;
         const d = Number(p.deaths) || 0;
         const q = Math.max(1, Math.min(5, Number(p.weaponQuality) || 1));
@@ -2000,7 +2013,7 @@ async function generatePlayerWeaponReportImage(players, battleInfo = {}) {
         }
 
         rounded(x + 10, y + 10, 38, 23, 7, isMVP ? '#f59e0b' : '#142238', isMVP ? '#fcd34d' : '#2a405e', 1);
-        centerText(String(i + 1).padStart(2, '0'), x + 29, y + 26, 11, isMVP ? '#111827' : '#cbd5e1', '900');
+        centerText(String(cardRank).padStart(2, '0'), x + 29, y + 26, 11, isMVP ? '#111827' : '#cbd5e1', '900');
 
         if (isMVP) {
             ctx.fillStyle = '#fbbf24'; ctx.font = '900 9px Arial, sans-serif'; ctx.fillText('MVP', x + cardWidth - 40, y + 26);
@@ -2142,6 +2155,14 @@ async function generateBattleReportFallbackImage(players, battleInfo = {}) {
             totalFame += Number(p.fame) || 0;
         }
 
+        // Emergency/fallback PNG uses the SAME complete-Battle snapshot.
+        // Image rendering failures must not silently revert to page totals.
+        const sharedStats = battleInfo.sharedBattleStats;
+        if (sharedStats) {
+            totalKills = sharedStats.totalKills;
+            totalDeaths = sharedStats.totalDeaths;
+            totalFame = sharedStats.totalFame;
+        }
         const statY = padding + headerHeight;
         const statGap = 12;
         const statW = (width - padding * 2 - statGap * 4) / 5;
@@ -2149,7 +2170,7 @@ async function generateBattleReportFallbackImage(players, battleInfo = {}) {
             ['TOTAL KILLS', String(totalKills), '#ef4444'],
             ['TOTAL DEATHS', String(totalDeaths), '#f87171'],
             ['TOTAL FAME', formatFame(totalFame), '#fbbf24'],
-            ['PLAYERS', String(players.length), '#60a5fa'],
+            ['PLAYERS', String(sharedStats?.playerCount ?? players.length), '#60a5fa'],
             ['SERVER', 'EAST', '#d946ef']
         ];
 
@@ -2555,9 +2576,23 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
         reportPages.push(reportRosterRows.slice(offset, offset + playersPerReportPage));
     }
     if (!reportPages.length) reportPages.push([]);
+    // For tracked Guild Auto-Battle only: calculate this ONCE from all the
+    // battle participants (not the per-page subset and not merely the
+    // tracked-player alert metrics). Use Official Battle totals when present.
+    // Do not change tracking thresholds, alert counts, or manual reports.
+    const sharedBattleStats = options.autoBattle === true && hasTrackedGuilds
+        ? summarizeEntireBattleForGuildPages(allSortedRows, apiData)
+        : null;
     for (let pageIndex = 0; pageIndex < reportPages.length; pageIndex++) {
         const pageRows = reportPages[pageIndex];
-        const pageInfo = { matchId: matchId, battleTime: battleTime, page: pageIndex + 1, totalPages: reportPages.length };
+        const pageInfo = {
+            matchId, battleTime, page: pageIndex + 1,
+            totalPages: reportPages.length,
+            ...(sharedBattleStats ? {
+                sharedBattleStats,
+                pageOffset: pageIndex * playersPerReportPage
+            } : {})
+        };
         try {
             const playerReport = await generatePlayerWeaponReportImage(pageRows, pageInfo);
             if (playerReport) attachments.push(playerReport);
