@@ -332,7 +332,9 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
     assert.doesNotMatch(sent[0].content, /Fame ตามเงื่อนไขแต่ละ Guild|albionbb\.com\/battles/);
     assert.match(sent[0].content.trim().split('\n').at(-1), /^⏱️ Delay/);
     assert.equal(sent[1].nonce, deliveryNonce('1002', channelId, 2));
-    assert.match(sent[1].content, /ส่วนที่ 2\/2.*Battle ID: 1002/);
+    assert.equal(sent[1].content, undefined, 'continuation must have no separator text');
+    assert.equal(sent[1].files.length, 1, 'continuation must retain image');
+    assert.doesNotMatch(sent[0].content, /Fame รวมของผู้ที่ติดตาม|Fame ตามเงื่อนไขแต่ละ Guild/);
     assert.equal(config.battleboardState.eventCursor.afterBattleId, '1002');
     assert.deepEqual(config.battleboardState.pendingEvents.map(entry => entry.battleId), ['1001']);
 
@@ -342,7 +344,8 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
     assert.equal(sent[2].nonce, deliveryNonce('1001', channelId, 1));
     assert.match(sent[2].content, /Battle ID: 1001/);
     assert.equal(sent[3].nonce, deliveryNonce('1001', channelId, 2));
-    assert.match(sent[3].content, /ส่วนที่ 2\/2.*Battle ID: 1001/);
+    assert.equal(sent[3].content, undefined);
+    assert.equal(sent[3].files.length, 1);
     assert.equal(config.battleboardState.pendingEvents.length, 0);
     assert.equal(detailCalls.get('1001'), 2);
     assert.equal(detailCalls.get('1002'), 2);
