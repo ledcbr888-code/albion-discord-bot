@@ -22,6 +22,9 @@ test('bottom delay is calculated from verified Battle end to the Discord send ti
   const at = new Date('2026-11-14T12:13:34.000Z');
   assert.equal(formatDiscordBattleDelay(event, detail, at),
     '⏱️ Delay (Battle จบ → ส่งรายงาน): 8 นาที 34 วินาที');
+  // The public alert must show total minutes rather than switching to hours.
+  assert.equal(formatDiscordBattleDelay(event, detail, new Date('2026-11-14T13:13:34.000Z')),
+    '⏱️ Delay (Battle จบ → ส่งรายงาน): 68 นาที 34 วินาที');
 });
 
 test('invalid, missing, or future Battle end never invents a delay', () => {
