@@ -2188,31 +2188,32 @@ async function generateBattleReportFallbackImage(players, battleInfo = {}) {
             ctx.fillText('⚔', cx, cy + 8);
             ctx.textAlign = 'left';
 
+            // Keep fallback artwork readable too if weapon-icon rendering fails:
+            // name → Guild → K/D → Fame, each on its own band.
             let name = String(p.displayName || p.name || 'Unknown').trim();
-            if (name.length > 22) name = name.slice(0, 20) + '..';
+            if (name.length > 24) name = name.slice(0, 22) + '..';
+            ctx.textAlign = 'center';
             ctx.fillStyle = '#f8fafc';
             ctx.font = '900 15px Arial, sans-serif';
-            ctx.textAlign = 'center';
-            ctx.fillText(name, cx, y + 202);
+            ctx.fillText(name, cx, y + 136, cardWidth - 20);
 
             const guild = String(p.guild || '').trim();
-            if (guild) {
-                ctx.fillStyle = '#64748b';
-                ctx.font = 'bold 8px Arial, sans-serif';
-                ctx.fillText(guild.length > 21 ? guild.slice(0, 19) + '..' : guild, cx, y + 158);
-            }
+            ctx.fillStyle = '#a5b4c9';
+            ctx.font = 'bold 12px Arial, sans-serif';
+            ctx.fillText(guild ? (guild.length > 28 ? guild.slice(0, 26) + '..' : guild) : 'No Guild',
+                cx, y + 156, cardWidth - 20);
 
-            ctx.fillStyle = '#ef4444';
-            ctx.font = '900 12px Arial, sans-serif';
-            ctx.fillText(String(Number(p.kills) || 0), cx - 28, y + 181);
+            ctx.font = '900 13px Arial, sans-serif';
+            ctx.fillStyle = Number(p.kills) > 0 ? '#ef4444' : '#64748b';
+            ctx.fillText('K ' + String(Number(p.kills) || 0), cx - 36, y + 178);
             ctx.fillStyle = '#475569';
-            ctx.fillText('/', cx, y + 181);
-            ctx.fillStyle = '#f87171';
-            ctx.fillText(String(Number(p.deaths) || 0), cx + 22, y + 181);
+            ctx.fillText('/', cx, y + 178);
+            ctx.fillStyle = Number(p.deaths) > 0 ? '#f87171' : '#64748b';
+            ctx.fillText('D ' + String(Number(p.deaths) || 0), cx + 36, y + 178);
 
             ctx.fillStyle = '#fbbf24';
-            ctx.font = '900 11px Arial, sans-serif';
-            ctx.fillText(formatFame(p.fame || 0), cx, y + 202);
+            ctx.font = '900 13px Arial, sans-serif';
+            ctx.fillText(formatFame(p.fame || 0), cx, y + 201);
             ctx.textAlign = 'left';
         });
 
