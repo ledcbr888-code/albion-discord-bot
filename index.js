@@ -1517,21 +1517,20 @@ async function loadAlbionWeaponIcon(weapon, quality = 1) {
     const id = normalizeAlbionItemId(weapon);
     if (!id) return null;
 
-    const baseId = id.replace(/@\d+$/, '');
     const q = Math.max(1, Math.min(5, Number(quality) || 1));
-    const cacheKey = `${baseId}|Q${q}`;
+    // Cache must distinguish e.g. T5@3 and T5@4, even at equal quality.
+    // Using baseId here could show the wrong enchantment for another player.
+    const cacheKey = `${id}|Q${q}`;
 
     if (weaponIconCache.has(cacheKey)) return weaponIconCache.get(cacheKey);
 
     const encoded = encodeURIComponent(id);
-    const encodedBase = encodeURIComponent(baseId);
+    // Only query images of the *exact* recorded enchanted item. For @4,
+    // a base T4@0 fallback is not an accurate report of the player's weapon.
     const urls = [
         `https://render.albiononline.com/v1/item/${encoded}.png?quality=${q}&size=128`,
-        `https://render.albiononline.com/v1/item/${encodedBase}.png?quality=${q}&size=128`,
         `https://render.albiononline.com/v1/item/${encoded}.png?quality=${q}`,
-        `https://render.albiononline.com/v1/item/${encodedBase}.png?quality=${q}`,
-        `https://render.albiononline.com/v1/item/${encoded}.png`,
-        `https://render.albiononline.com/v1/item/${encodedBase}.png`
+        `https://render.albiononline.com/v1/item/${encoded}.png`
     ];
 
     for (const url of urls) {
