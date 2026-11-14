@@ -243,8 +243,14 @@ function formatDiscordBattleDelay(event, detail, when = new Date()) {
   const ms = getBattleDelayMetrics(event, detail, when).fromBattleEndMs;
   // The initial Discord alert is sent immediately after this timestamp;
   // full multi-part completion continues to be measured in the existing logs.
+  if (ms === null) {
+    return '⏱️ Delay (Battle จบ → ส่งรายงาน): ไม่มีข้อมูลเวลาจบ Battle ที่ใช้คำนวณได้';
+  }
+  // Always report total minutes, as requested, even beyond one hour.
+  const minutes = Math.floor(ms / 60000);
+  const seconds = Math.floor((ms % 60000) / 1000);
   return '⏱️ Delay (Battle จบ → ส่งรายงาน): ' +
-    (ms === null ? 'ไม่มีข้อมูลเวลาจบ Battle ที่ใช้คำนวณได้' : formatThaiDuration(ms));
+    minutes + ' นาที' + (seconds ? ' ' + seconds + ' วินาที' : '');
 }
 function createBattleboardIntegration(deps = {}) {
   const client = deps.client;
