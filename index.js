@@ -2506,8 +2506,11 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
         }
     }
 
-    const battleUrl = `https://east.albionbb.com/battles/${matchId}`;
-    const report = `🔗 **Battle Link:** <${battleUrl}>\n` + '```ansi\n' + header + body + footer + awardsText + '```';
+    const battleUrl = options.autoBattle
+        ? `https://albion-battleboard-clone-1.vercel.app/b/${encodeURIComponent(matchId)}`
+        : `https://east.albionbb.com/battles/${matchId}`;
+    const report = (options.autoBattle ? '' : `🔗 **Battle Link:** <${battleUrl}>\n`) +
+        '```ansi\n' + header + body + footer + awardsText + '```';
 
     const trackedPlayerNames = new Set(
         trackedPlayers.map(name => String(name || '').trim().toLowerCase()).filter(Boolean)
@@ -2559,7 +2562,9 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
         }
     }
 
-    if (performancePlayers.length) {
+    // Auto-Battle keeps the weapon/roster pages and Guild summary, but omits
+    // the optional DMG/HEAL percentage-bar attachment shown between them.
+    if (performancePlayers.length && !options.autoBattle) {
         try {
             const maxDamage = Math.max(1, ...performancePlayers.map(p => p.damage));
             const maxHealing = Math.max(1, ...performancePlayers.map(p => p.healing));
@@ -2640,7 +2645,9 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
     // Prefer the image report whenever one was successfully generated.
     // Keep the ANSI/text report as a fallback only when image generation fails.
     const responseContent = attachments.length > 0
-        ? `🔗 **Battle Link:** <${battleUrl}>\n🖼️ **Battle Report:** รายงานแบบรูปภาพด้านล่าง`
+        ? (options.autoBattle
+            ? `🔗 **Battle Link:** [${matchId}](${battleUrl})\n🖼️ **Battle Report:** รายงานแบบรูปภาพด้านล่าง`
+            : `🔗 **Battle Link:** <${battleUrl}>\n🖼️ **Battle Report:** รายงานแบบรูปภาพด้านล่าง`)
         : report;
 
     return {
