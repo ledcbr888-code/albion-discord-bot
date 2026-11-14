@@ -327,6 +327,10 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
     assert.equal(sent[0].nonce, deliveryNonce('1002', channelId, 1));
     assert.equal(sent[0].enforceNonce, true);
     assert.match(sent[0].content, /Battle ID: 1002/);
+    assert.match(sent[0].content, /🔗 Battle Link: \[1002\]\(https:\/\/albion-battleboard-clone-1\.vercel\.app\/b\/1002\)/);
+    assert.match(sent[0].content, /⏱️ Delay \(Battle จบ → ส่งรายงาน\): \d+ นาที/);
+    assert.doesNotMatch(sent[0].content, /Fame ตามเงื่อนไขแต่ละ Guild|albionbb\.com\/battles/);
+    assert.match(sent[0].content.trim().split('\n').at(-1), /^⏱️ Delay/);
     assert.equal(sent[1].nonce, deliveryNonce('1002', channelId, 2));
     assert.match(sent[1].content, /ส่วนที่ 2\/2.*Battle ID: 1002/);
     assert.equal(config.battleboardState.eventCursor.afterBattleId, '1002');
