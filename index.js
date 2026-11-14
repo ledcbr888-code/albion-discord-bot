@@ -29,6 +29,7 @@ const express = require('express');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const ctaModule = require('./cta');
 const { createBattleboardIntegration } = require('./battleboard-integration');
+const { selectAutoBattleGuildSummaryRows, WEAPON_CARD_TEXT_LAYOUT } = require('./battle-report-layout');
 const { createOfficialEventsShadow } = require('./official-events-shadow');
 const battleboardPrimaryServerIds = new Set();
 const { createTrackingBackupScheduler, createThrottledSuccessLogger } = require('./tracking-backup-scheduler');
@@ -2021,42 +2022,41 @@ async function generatePlayerWeaponReportImage(players, battleInfo = {}) {
             drawSwordIcon(cx, wy, 1.7, qm.color);
         }
 
-        const qText = `Q${q}  ${qm.label}`;
-        ctx.font = '900 12px Arial, sans-serif';
-        const qw = ctx.measureText(qText).width + 24;
-        rounded(cx - qw / 2, y + 151, qw, 24, 10, '#050b14', qm.color, 1);
-        centerText(qText, cx, y + 168, 12, qm.color, '900');
-
+        // No Q badge: dedicate its former band to the player name.
+        // Keep name, Guild and K/D on separate measured baselines so even
+        // long names cannot overlap or cover the Fame pill.
+        const layout = WEAPON_CARD_TEXT_LAYOUT;
         let name = String(p.displayName || p.name || 'Unknown').trim();
-        if (name.length > 22) name = `${name.slice(0, 20)}..`;
-        const nameSize = textFit(name, cardWidth - 28, 22, '900');
+        if (name.length > 26) name = `${name.slice(0, 24)}..`;
+        const nameSize = textFit(name, cardWidth - 28, layout.nameFontSize, '900');
         ctx.save();
         ctx.textAlign = 'center';
+        ctx.textBaseline = 'alphabetic';
         ctx.font = `900 ${nameSize}px Arial, sans-serif`;
         ctx.lineWidth = 3;
         ctx.strokeStyle = '#02060c';
-        ctx.strokeText(name, cx, y + 202);
+        ctx.strokeText(name, cx, y + layout.nameBaseline, cardWidth - 28);
         ctx.fillStyle = isMVP ? '#fef3c7' : '#f8fafc';
         ctx.shadowColor = isMVP ? 'rgba(245,158,11,.25)' : 'rgba(255,255,255,.10)';
         ctx.shadowBlur = 5;
-        ctx.fillText(name, cx, y + 202);
+        ctx.fillText(name, cx, y + layout.nameBaseline, cardWidth - 28);
         ctx.restore();
 
         const guild = String(p.guild || '').trim();
-        if (guild) {
-            let g = guild.length > 21 ? `${guild.slice(0, 19)}..` : guild;
-        }
+        const guildLabel = guild ? (guild.length > 35 ? `${guild.slice(0, 33)}..` : guild) : 'No Guild';
+        centerText(guildLabel, cx, y + layout.guildBaseline, layout.guildFontSize,
+            guild ? '#a5b4c9' : '#64748b', 'bold', cardWidth - 28);
 
-        const metricY = y + 224;
-        centerText('K ' + String(k), cx - 42, metricY, 17, k > 0 ? '#ef4444' : '#64748b', '900');
+        const metricY = y + layout.kdBaseline;
+        centerText('K ' + String(k), cx - 42, metricY, layout.kdFontSize, k > 0 ? '#ef4444' : '#64748b', '900');
         centerText('/', cx, metricY, 16, '#475569', '900');
-        centerText('D ' + String(d), cx + 42, metricY, 17, d > 0 ? '#f87171' : '#64748b', '900');
+        centerText('D ' + String(d), cx + 42, metricY, layout.kdFontSize, d > 0 ? '#f87171' : '#64748b', '900');
 
         const fameText = formatFame(p.fame || 0);
         const famePillW = 170;
         const famePillH = 30;
         const fameX = cx - famePillW / 2;
-        const fameY = y + cardHeight - 39;
+        const fameY = y + layout.famePillTop;
         rounded(fameX, fameY, famePillW, famePillH, 10, '#0b1422', isMVP ? '#8b6518' : '#263a55', 1);
         if (fameImg) {
             try { ctx.drawImage(fameImg, fameX + 12, fameY + 7, 17, 17); } catch (_) {}
@@ -2615,16 +2615,12 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
             });
 
             if (options.autoBattle) {
-                // AUTO-BATTLE guild summary: keep the image compact.
-                // Show ONLY the 4 guilds with the highest combined battle impact,
-                // ranked primarily by Fame, then Kills, then Deaths.
-                guildsData = guildsData
-                    .sort((a, b) =>
-                        (b.killFame || 0) - (a.killFame || 0) ||
-                        (b.kills || 0) - (a.kills || 0) ||
-                        (b.deaths || 0) - (a.deaths || 0)
-                    )
-                    .slice(0, 4);
+                // Top 4 by Fame, then append each verified tracked/alert Guild
+                // missing from Top 4. A tracked Guild inside Top 4 stays there,
+                // never repeated. This affects the image ONLY, not Fame checks.
+                const alertGuilds = Array.isArray(options.reportGuilds) ? options.reportGuilds : [];
+                guildsData = selectAutoBattleGuildSummaryRows(
+                    guildsData, [...guildNamesList, ...alertGuilds], 4);
             } else if (guildNamesList.length > 0) {
                 guildsData = guildsData.filter(g => isExactGuildMatch(g.name, guildNamesList));
             } else {
@@ -2632,7 +2628,7 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
             }
 
             guildSummaryData = guildsData;
-            guildSummaryAttachment = await generateGuildSummaryImage(guildsData, { includeAlliance: true });
+            guildSummaryAttachment = await generateGuildSummaryImage(guildsData, { includeAlliance: true, includeAll: options.autoBattle === true });
         }
     } catch (err) {
         console.error('❌ Guild summary image error:', err.message);
