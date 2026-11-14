@@ -1511,6 +1511,13 @@ function drawRoundRect(ctx, x, y, w, h, r) {
     ctx.closePath();
 }
 
+function weaponIconCacheKey(itemId, quality) {
+    // In particular, T5_2H_GLAIVE_CRYSTAL@3 and @4 must NOT share an icon.
+    const id = normalizeAlbionItemId(itemId);
+    const q = Math.max(1, Math.min(5, Number(quality) || 1));
+    return `${id}|Q${q}`;
+}
+
 const weaponIconCache = new Map();
 
 async function loadAlbionWeaponIcon(weapon, quality = 1) {
@@ -1520,7 +1527,7 @@ async function loadAlbionWeaponIcon(weapon, quality = 1) {
     const q = Math.max(1, Math.min(5, Number(quality) || 1));
     // Cache must distinguish e.g. T5@3 and T5@4, even at equal quality.
     // Using baseId here could show the wrong enchantment for another player.
-    const cacheKey = `${id}|Q${q}`;
+    const cacheKey = weaponIconCacheKey(id, q);
 
     if (weaponIconCache.has(cacheKey)) return weaponIconCache.get(cacheKey);
 
