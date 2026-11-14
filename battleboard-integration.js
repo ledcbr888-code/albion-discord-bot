@@ -1,6 +1,7 @@
 'use strict';
 const { createHash } = require('node:crypto');
 const POLL_MS = 30000;
+const BATTLEBOARD_PUBLIC_URL = 'https://albion-battleboard-clone-1.vercel.app';
 const TIMEOUT_MS = 8000;
 const SNAPSHOT_SYNC_INTERVAL_MS = 5 * 60 * 1000;
 const EVENT_POLL_SUCCESS_LOG_INTERVAL_MS = 5 * 60 * 1000;
@@ -230,6 +231,21 @@ function formatBattleDelayLines(event, detail, completedAt) {
   ];
 }
 
+// Discord masked link: display ONLY the numeric Battle ID but open the full
+// official BOSS BOT Battleboard detail page when clicked.
+function formatBattleboardLink(battleId) {
+  const id = String(battleId ?? '').trim();
+  return /^\d{1,20}$/.test(id)
+    ? '[' + id + '](' + BATTLEBOARD_PUBLIC_URL + '/b/' + id + ')'
+    : id;
+}
+function formatDiscordBattleDelay(event, detail, when = new Date()) {
+  const ms = getBattleDelayMetrics(event, detail, when).fromBattleEndMs;
+  // The initial Discord alert is sent immediately after this timestamp;
+  // full multi-part completion continues to be measured in the existing logs.
+  return '⏱️ Delay (Battle จบ → ส่งรายงาน): ' +
+    (ms === null ? 'ไม่มีข้อมูลเวลาจบ Battle ที่ใช้คำนวณได้' : formatThaiDuration(ms));
+}
 function createBattleboardIntegration(deps = {}) {
   const client = deps.client;
   const getAllGuildConfigs = deps.getAllGuildConfigs;
@@ -486,18 +502,15 @@ function createBattleboardIntegration(deps = {}) {
       ' | ห้อง=' + channelId +
       ' | จำนวนส่วน=' + partsTotal
     );
-    const routeSummary = (Array.isArray(routeChecks) ? routeChecks : [])
-      .map(check => check.targetGuild + ': ' + formatFame(check.totalFame) + ' / ' + formatFame(check.minFame))
-      .join(' | ');
     const alertText =
       '🚨 **BOSS BOT Battleboard Alert!** ตรวจพบไฟต์ใหม่ของ **' + targets.join(', ') + '**\n' +
       '🆔 Battle ID: ' + battleId + '\n' +
       '💰 Fame รวมของผู้ที่ติดตาม: ' + formatFame(report.totalFame) + '\n' +
-      (routeSummary ? '🎯 Fame ตามเงื่อนไขแต่ละ Guild: ' + routeSummary + '\n' : '') +
       '⚔️ Kills: ' + Number(report.totalKills || 0).toLocaleString() + '\n' +
       '☠️ Deaths: ' + Number(report.totalDeaths || 0).toLocaleString() + '\n' +
       '➕ Kills + Deaths: ' + (Number(report.totalKills || 0) + Number(report.totalDeaths || 0)).toLocaleString() + '\n' +
-      '🔗 Battle Link: <' + report.battleUrl + '>';
+      '🔗 Battle Link: ' + formatBattleboardLink(battleId) + '\n' +
+      formatDiscordBattleDelay(event, detail, new Date());
 
     const sendPart = async (partNumber, payload) => {
       const partIndex = partNumber - 1;
@@ -1416,5 +1429,5 @@ function createBattleboardIntegration(deps = {}) {
 }
 module.exports = {
   createBattleboardIntegration,
-  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce, snapshotFingerprint, hasTrackedSnapshotChanged, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup, timestampMs, formatThaiDuration, formatThaiTimestamp, formatPreciseDuration, elapsedMsBetween, getBattleDelayMetrics, formatBattleDelayLines },
+  __test: { normalizeName, validDiscordServerId, buildTrackedItems, getBattleGuilds, targetGuildMatches, evaluateAutoBattleRoutes, deliveryKey, deliveryNonce, snapshotFingerprint, hasTrackedSnapshotChanged, isSnapshotSyncDue, retryDelayMs, needsEmptySnapshotCleanup, timestampMs, formatThaiDuration, formatThaiTimestamp, formatPreciseDuration, elapsedMsBetween, getBattleDelayMetrics, formatBattleDelayLines, formatBattleboardLink, formatDiscordBattleDelay },
 };
