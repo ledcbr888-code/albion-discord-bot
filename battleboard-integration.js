@@ -510,7 +510,6 @@ function createBattleboardIntegration(deps = {}) {
     );
     const alertText =
       '🚨 **BOSS BOT Battleboard Alert!** ตรวจพบไฟต์ใหม่ของ **' + targets.join(', ') + '**\n' +
-      '🆔 Battle ID: ' + battleId + '\n' +
       '⚔️ Kills: ' + Number(report.totalKills || 0).toLocaleString() + '\n' +
       '☠️ Deaths: ' + Number(report.totalDeaths || 0).toLocaleString() + '\n' +
       '➕ Kills + Deaths: ' + (Number(report.totalKills || 0) + Number(report.totalDeaths || 0)).toLocaleString() + '\n' +

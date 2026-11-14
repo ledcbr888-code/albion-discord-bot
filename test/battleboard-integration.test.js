@@ -326,7 +326,7 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
     assert.equal(sent.length, 2, 'the later ready Battle should send both report parts during the first poll');
     assert.equal(sent[0].nonce, deliveryNonce('1002', channelId, 1));
     assert.equal(sent[0].enforceNonce, true);
-    assert.match(sent[0].content, /Battle ID: 1002/);
+    assert.doesNotMatch(sent[0].content, /🆔 Battle ID:/);
     assert.match(sent[0].content, /🔗 Battle Link: \[1002\]\(https:\/\/albion-battleboard-clone-1\.vercel\.app\/b\/1002\)/);
     assert.match(sent[0].content, /⏱️ Delay \(Battle จบ → ส่งรายงาน\): \d+ นาที/);
     assert.doesNotMatch(sent[0].content, /Fame ตามเงื่อนไขแต่ละ Guild|albionbb\.com\/battles/);
@@ -342,7 +342,8 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
     await integration.tick();
     assert.equal(sent.length, 4, 'the earlier Battle should send both parts after its detail becomes ready');
     assert.equal(sent[2].nonce, deliveryNonce('1001', channelId, 1));
-    assert.match(sent[2].content, /Battle ID: 1001/);
+    assert.doesNotMatch(sent[2].content, /🆔 Battle ID:/);
+    assert.match(sent[2].content, /🔗 Battle Link: \[1001\]\(https:\/\/albion-battleboard-clone-1\.vercel\.app\/b\/1001\)/);
     assert.equal(sent[3].nonce, deliveryNonce('1001', channelId, 2));
     assert.equal(sent[3].content, undefined);
     assert.equal(sent[3].files.length, 1);
