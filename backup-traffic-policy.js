@@ -6,6 +6,7 @@ const TRANSIENT_FIELD_NAMES = new Set([
   'lastEventsPollSuccessLogAt', 'lastSnapshotSyncAt', 'lastApiLatency',
   'lastLatencyMs', 'lastHeartbeatAt', 'heartbeat', 'runtimeCounters',
   'processId', 'schedulerTick', 'lastLogAt', 'lastDebugAt',
+  'lastEventKey', 'lastMessageId', 'banditConfirmations', 'banditNotOccurred',
 ]);
 const GUILD_RUNTIME_FIELDS = new Set([
   'battleboardState', 'processedBattles', 'avaProcessedMessages',
@@ -38,19 +39,19 @@ function configFingerprint(input) {
 }
 function createGitHubMirrorPolicy({ now = Date.now, dailyIntervalMs = 24 * 60 * 60 * 1000 } = {}) {
   let lastQueuedHash = null;
-  let lastQueuedAt = 0;
+  let lastQueuedAt = null;
   return {
     shouldMirror(snapshot, { force = false } = {}) {
       const fingerprint = configFingerprint(snapshot);
       return force || fingerprint !== lastQueuedHash ||
-        lastQueuedAt === 0 || now() - lastQueuedAt >= dailyIntervalMs;
+        lastQueuedAt === null || now() - lastQueuedAt >= dailyIntervalMs;
     },
     markQueued(snapshot) {
       lastQueuedHash = configFingerprint(snapshot);
       lastQueuedAt = now();
     },
-    dueDaily() { return lastQueuedAt === 0 || now() - lastQueuedAt >= dailyIntervalMs; },
-    getStatus() { return { lastQueuedAt: lastQueuedAt || null, lastQueuedHash }; },
+    dueDaily() { return lastQueuedAt === null || now() - lastQueuedAt >= dailyIntervalMs; },
+    getStatus() { return { lastQueuedAt, lastQueuedHash }; },
   };
 }
 function createTrafficMeter({ log = console.log, now = Date.now, intervalMs = 15 * 60 * 1000 } = {}) {
