@@ -676,6 +676,8 @@ async function pullGitHubTrackingData() {
             }
             return false;
         }
+        backupTrafficMeter.record('github', 'startup-restore-get', 0,
+            Buffer.byteLength(JSON.stringify(response.data || {}), 'utf8'));
         const remote = response.data;
         if (!remote || remote.type !== 'file' || !remote.content) throw new Error('GitHub tracking path is not a readable file');
         const content = Buffer.from(String(remote.content).replace(/\n/g, ''), 'base64').toString('utf8');
@@ -713,6 +715,8 @@ async function pullSupabaseTrackingData() {
     if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) return false;
     try {
         const response = await axios.get(SUPABASE_API, { timeout: 20000, headers: supabaseHeaders(), params: { id: 'eq.' + SUPABASE_ROW_ID, select: 'id,payload,updated_at' } });
+        backupTrafficMeter.record('supabase', 'startup-restore-get', 0,
+            Buffer.byteLength(JSON.stringify(response.data || {}), 'utf8'));
         const row = Array.isArray(response.data) ? response.data[0] : null;
         if (row?.payload && typeof row.payload === 'object') {
             const content = JSON.stringify(row.payload, null, 2);
