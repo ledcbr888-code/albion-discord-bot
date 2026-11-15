@@ -32,6 +32,11 @@ test('heartbeat, event cursor and delivered history do not trigger GitHub mirror
   updated.guilds[serverId].avaProcessedMessages.push('2');
   assert.equal(configFingerprint(original), configFingerprint(updated));
 });
+test('field order does not cause a false GitHub configuration change', () => {
+  const first = fixture(), reordered = fixture();
+  reordered.guilds[serverId] = Object.fromEntries(Object.entries(reordered.guilds[serverId]).reverse());
+  assert.equal(configFingerprint(first), configFingerprint(reordered));
+});
 test('config changes require a new emergency mirror', () => {
   let current = 0;
   const policy = createGitHubMirrorPolicy({ now: () => current, dailyIntervalMs: 24 * 60 * 60 * 1000 });
