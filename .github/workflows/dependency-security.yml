@@ -57,5 +57,10 @@ jobs:
           if (result.error) {
             console.error('npm audit could not run:', JSON.stringify(result.error));
             process.exitCode = 1;
+          } else if ((result.metadata?.vulnerabilities?.total || 0) > 0) {
+            console.error('SECURITY_AUDIT_GATE_FAILED: vulnerabilities remain in the resolved dependency tree');
+            process.exitCode = 1;
+          } else {
+            console.log('SECURITY_AUDIT_GATE_PASSED: zero known advisories in the resolved dependency tree');
           }
           NODE
