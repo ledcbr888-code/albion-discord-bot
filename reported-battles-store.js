@@ -59,8 +59,9 @@ function createReportedBattlesStore({ axios, baseUrl, headers, meter, pageSize =
     if (!validId(serverId)) throw new TypeError('Invalid Discord server ID');
     const result = [];
     const batchSize = Math.min(1000, Math.max(1, Math.floor(pageSize)));
-    while (result.length < limit) {
-      const size = Math.min(batchSize, limit - result.length);
+    let offset = 0;
+    while (offset < limit) {
+      const size = Math.min(batchSize, limit - offset);
       const response = await axios.get(endpoint, {
         timeout: 20000,
         headers: authHeaders(),
@@ -70,7 +71,7 @@ function createReportedBattlesStore({ axios, baseUrl, headers, meter, pageSize =
           report_type: 'eq.auto-battle',
           order: 'updated_at.desc',
           limit: size,
-          offset: result.length,
+          offset,
         },
       });
       if (!Array.isArray(response.data)) throw new Error('Unexpected reported-battles response');
@@ -79,6 +80,7 @@ function createReportedBattlesStore({ axios, baseUrl, headers, meter, pageSize =
           result.push(item.record);
         }
       }
+      offset += response.data.length;
       if (response.data.length < size) break;
     }
     return result;
