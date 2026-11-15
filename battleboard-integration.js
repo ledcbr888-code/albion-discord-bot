@@ -342,8 +342,8 @@ function createBattleboardIntegration(deps = {}) {
     }
     return data;
   }
-  function persist() {
-    try { if (typeof saveData === 'function') saveData(); }
+  function persist(options = {}) {
+    try { if (typeof saveData === 'function') saveData(options); }
     catch (error) { console.error('❌ [Battleboard] Could not persist state:', error.message); }
   }
   function getState(config) {
@@ -437,7 +437,9 @@ function createBattleboardIntegration(deps = {}) {
     state.snapshotInitialized = true;
     state.snapshotFingerprint = snapshotFingerprint(items);
     state.lastSnapshotSyncAt = new Date().toISOString();
-    persist();
+    // The server already knows its tracked snapshot. Persist its refresh time locally,
+    // not as a full Supabase/GitHub backup every five minutes.
+    persist({ transientOnly: true });
     if (trackedSnapshotChanged) {
       console.log('🔁 [Battleboard] Tracking snapshot changed | Discord=' + serverId +
         ' | Guilds=' + Number(result.counts && result.counts.guilds || 0) +
@@ -1155,7 +1157,7 @@ function createBattleboardIntegration(deps = {}) {
           ' | Cursor=' + String(cursor.after || 'ไม่ทราบ') + '/' + String(cursor.afterBattleId || '0') +
           ' | ตรวจเมื่อ=' + formatThaiTimestamp(botReceivedAt));
         state.lastEventsPollSuccessLogAt = botReceivedAt;
-        persist();
+        persist({ transientOnly: true });
       }
     }
     let deferRemaining = false;
