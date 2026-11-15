@@ -75,6 +75,7 @@ function createReportedBattlesStore({ axios, baseUrl, headers, meter, pageSize =
         },
       });
       if (!Array.isArray(response.data)) throw new Error('Unexpected reported-battles response');
+      meter?.record?.('supabase', 'delivery-rows-get', 0, Buffer.byteLength(JSON.stringify(response.data)));
       for (const item of response.data) {
         if (item?.record?.key && item?.record?.battleId && item?.record?.channelId) {
           result.push(item.record);
