@@ -32,6 +32,7 @@ const { selectAutoBattleGuildSummaryRows, summarizeEntireBattleForGuildPages, WE
 const { createOfficialEventsShadow } = require('./official-events-shadow');
 const battleboardPrimaryServerIds = new Set();
 const { createTrackingBackupScheduler, createThrottledSuccessLogger } = require('./tracking-backup-scheduler');
+const { createGitHubMirrorPolicy, createTrafficMeter } = require('./backup-traffic-policy');
 let Fuse; try { Fuse = require('fuse.js'); } catch(e) { console.warn('fuse.js not installed, using fallback'); }
 
 const BANDIT_SERIF_FONT = '/usr/share/fonts/truetype/noto/NotoSerifDisplay-Black.ttf';
@@ -121,6 +122,8 @@ let githubPersistenceReady = false;
 const TRACKING_BACKUP_DEBOUNCE_MS = 2000;
 const TRACKING_BACKUP_MIN_INTERVAL_MS = 30 * 1000;
 const TRACKING_BACKUP_SUCCESS_LOG_INTERVAL_MS = 15 * 60 * 1000;
+const githubMirrorPolicy = createGitHubMirrorPolicy();
+const backupTrafficMeter = createTrafficMeter();
 const logSupabaseBackupSuccess = createThrottledSuccessLogger('Supabase', {
     intervalMs: TRACKING_BACKUP_SUCCESS_LOG_INTERVAL_MS
 });
@@ -135,15 +138,19 @@ const supabaseTrackingBackupScheduler = createTrackingBackupScheduler({
     retryMaxMs: 5 * 60 * 1000,
     write: async content => {
         const payload = JSON.parse(String(content));
-        await axios.post(SUPABASE_API, {
-            id: SUPABASE_ROW_ID,
-            payload,
-            updated_at: new Date().toISOString()
-        }, {
-            timeout: 20000,
-            headers: { ...supabaseHeaders(), Prefer: 'resolution=merge-duplicates,return=minimal' },
-            params: { on_conflict: 'id' }
-        });
+        const body = { id: SUPABASE_ROW_ID, payload, updated_at: new Date().toISOString() };
+        const outboundBytes = Buffer.byteLength(JSON.stringify(body), 'utf8');
+        try {
+            await axios.post(SUPABASE_API, body, {
+                timeout: 20000,
+                headers: { ...supabaseHeaders(), Prefer: 'resolution=merge-duplicates,return=minimal' },
+                params: { on_conflict: 'id' }
+            });
+            backupTrafficMeter.record('supabase', 'full-snapshot-post', outboundBytes);
+        } catch (error) {
+            backupTrafficMeter.record('supabase', 'full-snapshot-post', outboundBytes, 0, false);
+            throw error;
+        }
     },
     onSuccess: logSupabaseBackupSuccess,
     onError: (error, attempts, retryMs) => console.error(
@@ -167,6 +174,7 @@ const githubTrackingBackupScheduler = createTrackingBackupScheduler({
                 params: { ref: GITHUB_DATA_BRANCH },
                 validateStatus: status => status === 200 || status === 404
             });
+            backupTrafficMeter.record('github', 'mirror-get', 0, Buffer.byteLength(JSON.stringify(get.data || {}), 'utf8'));
             const currentSha = get.status === 200 ? get.data.sha : undefined;
             const body = {
                 message: 'Update Albion bot tracking backup',
@@ -175,10 +183,18 @@ const githubTrackingBackupScheduler = createTrackingBackupScheduler({
             };
             if (currentSha) body.sha = currentSha;
             try {
-                const put = await axios.put(GITHUB_DATA_API, body, {
-                    timeout: 20000,
-                    headers: githubRequestHeaders()
-                });
+                const outgoingBytes = Buffer.byteLength(JSON.stringify(body), 'utf8');
+                let put;
+                try {
+                    put = await axios.put(GITHUB_DATA_API, body, {
+                        timeout: 20000,
+                        headers: githubRequestHeaders()
+                    });
+                    backupTrafficMeter.record('github', 'mirror-put', outgoingBytes);
+                } catch (error) {
+                    backupTrafficMeter.record('github', 'mirror-put', outgoingBytes, 0, false);
+                    throw error;
+                }
                 githubDataSha = put.data?.content?.sha || currentSha || null;
                 return;
             } catch (error) {
@@ -512,7 +528,10 @@ function loadData() {
         guildConfigs = {}; banditGlobalVotes = {}; botUsageStats = {}; botUsageTrackingStartedAt = Date.now(); legacyMigration = null;
     }
 }
-function saveData() {
+function saveData(options = {}) {
+    const transientOnly = options && options.transientOnly === true;
+    const skipSupabase = options && options.skipSupabase === true;
+    const forceGitHubSnapshot = options && options.forceGitHubSnapshot === true;
     try {
         if (!ensureDataDirectory()) return false;
         guildConfigs = Object.fromEntries(Object.entries(guildConfigs).map(([id, cfg]) => [id, normalizeGuildConfig(cfg)]));
@@ -530,8 +549,17 @@ function saveData() {
         botUsageDirty = false;
         if (botUsageSaveTimer) clearTimeout(botUsageSaveTimer);
         botUsageSaveTimer = null;
-        if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY && supabasePersistenceReady) queueSupabaseTrackingSave(payload);
-        if (GITHUB_DATA_TOKEN && GITHUB_DATA_REPO && githubPersistenceReady) queueGitHubTrackingSave(payload);
+        // Keep local crash diagnostics fresh, but don't upload a full 0.5–1 MB snapshot
+        // for heartbeat, an unchanged polling snapshot or its log timestamp.
+        if (!transientOnly && !skipSupabase && SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY && supabasePersistenceReady) {
+            queueSupabaseTrackingSave(payload);
+        }
+        if (!transientOnly && GITHUB_DATA_TOKEN && GITHUB_DATA_REPO && githubPersistenceReady &&
+            githubMirrorPolicy.shouldMirror(payload, { force: forceGitHubSnapshot })) {
+            // The existing scheduler retains and retries the newest failed snapshot.
+            githubMirrorPolicy.markQueued(payload);
+            queueGitHubTrackingSave(payload);
+        }
         return true;
     } catch (err) {
         try { if (fs.existsSync(`${DATA_FILE}.tmp`)) fs.unlinkSync(`${DATA_FILE}.tmp`); } catch (_) {}
@@ -587,6 +615,7 @@ async function pullGitHubTrackingData() {
         loadData();
         githubPersistenceReady = true;
         githubTrackingBackupScheduler.markSaved(content);
+        githubMirrorPolicy.markQueued(content);
         console.log('💾 GitHub tracking data loaded from private repo ' + GITHUB_DATA_REPO + '/' + GITHUB_DATA_PATH);
         return true;
     } catch (err) {
@@ -7618,6 +7647,14 @@ process.on('unhandledRejection', err => console.error('❌ Unhandled rejection:'
 process.on('uncaughtException', err => console.error('❌ Uncaught exception:', err));
 
 console.log('🛡️ AUTO-BATTLE FIX V3 LOADED: Battle reports enabled');
+// Emergency GitHub snapshot is bounded to once per day unless configuration changes.
+// This timer does not modify Battleboard (30s) or Official Auto-Battle (60s) cadence.
+const dailyMirrorTimer = setInterval(() => {
+    if (githubPersistenceReady && githubMirrorPolicy.dueDaily()) {
+        saveData({ skipSupabase: true, forceGitHubSnapshot: true });
+    }
+}, 60 * 60 * 1000);
+dailyMirrorTimer.unref?.();
 
 // One bounded, unauthenticated discovery request plus one short WebSocket handshake test.
 // No bot token is sent to either diagnostic endpoint. This runs once per process start;
