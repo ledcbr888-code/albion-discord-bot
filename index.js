@@ -126,12 +126,16 @@ const TRACKING_BACKUP_SUCCESS_LOG_INTERVAL_MS = 15 * 60 * 1000;
 const githubMirrorPolicy = createGitHubMirrorPolicy();
 const backupTrafficMeter = createTrafficMeter();
 const BOT_ROW_STORAGE_ENABLED = String(process.env.BOT_ROW_STORAGE_ENABLED || '').toLowerCase() === 'true';
+const BOT_COMPACT_SNAPSHOT_ENABLED = String(process.env.BOT_COMPACT_SNAPSHOT_ENABLED || '').toLowerCase() === 'true';
 let reportedBattlesStoreReady = false;
+let lastRowFailureMirrorAt = 0;
 const reportedBattlesStore = BOT_ROW_STORAGE_ENABLED && SUPABASE_API
     ? createReportedBattlesStore({ axios, baseUrl: SUPABASE_URL, headers: supabaseHeaders, meter: backupTrafficMeter })
     : null;
 function compactSupabaseState(payload) {
-    if (!reportedBattlesStoreReady) return payload;
+    // Keep the legacy full Supabase snapshot during staged row-storage rollout.
+    // Compact mode is enabled separately only after row hydration + recovery tests.
+    if (!reportedBattlesStoreReady || !BOT_COMPACT_SNAPSHOT_ENABLED) return payload;
     const copy = JSON.parse(payload);
     for (const config of Object.values(copy.guilds || {})) {
         if (config && config.battleboardState) config.battleboardState.delivered = [];
@@ -158,7 +162,7 @@ async function restoreReportedBattleRows() {
     }
     reportedBattlesStoreReady = true;
     console.log('💾 [Delivery Rows] Supabase restored and verified ' + count +
-        ' delivered/below-threshold records; compact full snapshots enabled');
+        ' delivered/below-threshold records | compactFullSnapshots=' + BOT_COMPACT_SNAPSHOT_ENABLED);
 }
 async function persistReportedBattleRow(serverId, record) {
     if (!reportedBattlesStoreReady) return;
@@ -167,8 +171,12 @@ async function persistReportedBattleRow(serverId, record) {
     } catch (error) {
         console.error('❌ [Delivery Rows] Row update failed; preserving legacy full snapshot | Battle=' +
             String(record?.battleId || 'unknown') + ' | Reason=' + String(error.message).slice(0, 180));
-        // Do not silently discard the only successful-send evidence.
-        saveData({ legacyFull: true, forceGitHubSnapshot: true });
+        // Do not silently discard the only successful-send evidence. Rate-limit
+        // emergency GitHub mirrors on repeated row-storage failures.
+        const now = Date.now();
+        const emergencyMirrorDue = !lastRowFailureMirrorAt || now - lastRowFailureMirrorAt >= 60 * 60 * 1000;
+        if (emergencyMirrorDue) lastRowFailureMirrorAt = now;
+        saveData({ legacyFull: true, forceGitHubSnapshot: emergencyMirrorDue });
     }
 }
 const logSupabaseBackupSuccess = createThrottledSuccessLogger('Supabase', {
