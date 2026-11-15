@@ -16,7 +16,6 @@ const {
     PermissionsBitField
 } = require('discord.js');
 
-const cloudscraper = require('cloudscraper');
 const axios = require('axios');
 // Global safety net: every Axios request has a finite timeout unless a call sets a stricter one.
 axios.defaults.timeout = 20000;
@@ -857,49 +856,7 @@ async function fetchAlbionBBWeaponMap(matchId) {
     };
 
     for (const url of urls) {
-        // 1) ลอง cloudscraper ก่อน - บายพาส Cloudflare
-        try {
-            const raw = await cloudscraper.get({
-                uri: url,
-                timeout: 18000,
-                headers: browserHeaders,
-                json: true
-            });
-            const data = typeof raw === 'string' ? JSON.parse(raw) : raw;
-            const events = Array.isArray(data) ? data :
-                Array.isArray(data?.events) ? data.events :
-                Array.isArray(data?.kills) ? data.kills : [];
-            if (events.length) {
-                const map = new Map();
-                const addEntity = (entity) => {
-                    if (!entity || typeof entity !== 'object') return;
-                    const name = String(entity.Name ?? entity.name ?? '').trim();
-                    if (!name) return;
-                    const info = extractMainHandInfo(entity);
-                    if (info) map.set(name.toLowerCase(), info);
-                };
-                for (const event of events) {
-                    addEntity(event.Killer || event.killer);
-                    addEntity(event.Victim || event.victim);
-                    const groups = [
-                        ...(Array.isArray(event.Participants) ? event.Participants : []),
-                        ...(Array.isArray(event.GroupMembers) ? event.GroupMembers : [])
-                    ];
-                    groups.forEach(addEntity);
-                }
-                if (map.size) {
-                    console.log(`✅ AlbionBB weapon fallback HIT via cloudscraper: ${url}`);
-                    return map;
-                }
-            }
-        } catch (err) {
-            const status = err?.statusCode || err?.response?.status;
-            if (status === 403 || status === 401 || status === 503) {
-                console.warn(`⚠️ AlbionBB weapon cloudscraper blocked (HTTP ${status}) for ${url}, trying axios...`);
-            }
-        }
-
-        // 2) Axios fallback
+        // Restricted to the existing AlbionBB URLs; primary Auto-Battle data uses Battleboard.
         try {
             const response = await axios.get(url, {
                 timeout: 15000,
@@ -1141,15 +1098,15 @@ async function fetchAlbionBBPageFallback(matchId) {
     };
     let html = '';
     try {
-        html = String(await cloudscraper.get({ uri: url, timeout: 18000, headers }));
+        const response = await axios.get(url, {
+            timeout: 18000,
+            headers,
+            validateStatus: status => status >= 200 && status < 400
+        });
+        html = String(response.data || '');
     } catch (err) {
-        try {
-            const response = await axios.get(url, { timeout: 18000, headers, validateStatus: status => status >= 200 && status < 400 });
-            html = String(response.data || '');
-        } catch (fallbackErr) {
-            console.warn(`⚠️ AlbionBB battle page fallback failed for ${matchId}: ${fallbackErr.response?.status || fallbackErr.message || err.message}`);
-            return null;
-        }
+        console.warn(`⚠️ AlbionBB battle page fallback failed for ${matchId}: ${err.response?.status || err.message}`);
+        return null;
     }
     if (!html || html.length < 100) return null;
     const $ = cheerio.load(html);
@@ -4788,27 +4745,13 @@ async function fetchAuthoritativeAvaMapIndex() {
     ];
     for (const url of urls) {
         try {
-            let html = '';
-            try {
-                if (url.includes('atlaschill')) {
-                    const res = await cloudscraper.get({ uri: url, timeout: 12000 });
-                    html = typeof res === 'string' ? res : String(res);
-                } else {
-                    const response = await axios.get(url, {
-                        timeout: 10000,
-                        headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'text/html,application/xhtml+xml' },
-                        validateStatus: status => status >= 200 && status < 400
-                    });
-                    html = String(response.data || '');
-                }
-            } catch (inner) {
-                const response = await axios.get(url, {
-                    timeout: 10000,
-                    headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'text/html,application/xhtml+xml' },
-                    validateStatus: status => status >= 200 && status < 400
-                });
-                html = String(response.data || '');
-            }
+            // AVA lookup only; canonical Battle Hub and local map list remain preferred.
+            const response = await axios.get(url, {
+                timeout: url.includes('atlaschill') ? 12000 : 10000,
+                headers: { 'User-Agent': 'Mozilla/5.0', Accept: 'text/html,application/xhtml+xml' },
+                validateStatus: status => status >= 200 && status < 400
+            });
+            const html = String(response.data || '');
             const $ = cheerio.load(html);
             const names = [];
             const bodyHtml = $('body').html() || '';
@@ -5108,18 +5051,6 @@ async function fetchAlbionOnlineBuildsAvaMapData(lookupName) {
 
     let html = '';
     let lastError = null;
-    try {
-        html = String(await cloudscraper.get({
-            uri: url, timeout: 25000,
-            headers: {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36',
-                Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-                Referer: 'https://www.albiononlinebuilds.com/maps/avalon'
-            }
-        }));
-    } catch (err) { lastError = err; }
-
     if (!html) {
         try {
             const response = await axios.get(url, {
@@ -5403,17 +5334,17 @@ async function fetchAlbionRoadsMapData(lookupName) {
     const urls = [queryUrl, ALBION_ROADS_SOURCE];
     for (const url of urls) {
         try {
-            const response = await cloudscraper.get({
-                uri: url,
+            const response = await axios.get(url, {
                 timeout: 15000,
                 headers: {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/154 Safari/537.36',
                     Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
                     'Accept-Language': 'en-US,en;q=0.9',
                     Referer: 'https://albionroads.com/'
-                }
+                },
+                validateStatus: status => status >= 200 && status < 400
             });
-            const html = String(response || '');
+            const html = String(response.data || '');
             const $ = cheerio.load(html);
             const bodyText = $('body').text().replace(/\s+/g, ' ').trim();
             const foundName = bodyText.toLowerCase().includes(queryName.toLowerCase());
