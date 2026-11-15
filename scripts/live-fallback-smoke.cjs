@@ -113,6 +113,36 @@ async function main() {
   } catch (error) {
     console.log('LIVE_ALBIONBB_DATA_SHAPE '+JSON.stringify({error:error.message}));
   }
+  // Run the exact manual-only AlbionBB weapon fallback parser on real returned
+  // event JSON to verify the changed Axios transport still produces player icons.
+  try {
+    const fs = require('node:fs');
+    const vm = require('node:vm');
+    const source = fs.readFileSync('index.js','utf8');
+    const begin = source.indexOf('function normalizeAlbionItemId(');
+    const end = source.indexOf('function getApiUrls(',begin);
+    const hand = source.indexOf('function extractMainHandInfo(');
+    const weapon = source.indexOf('async function fetchAlbionBBWeaponMap(');
+    const weaponEnd = source.indexOf('async function fetchOfficialBattleWeaponMap(',weapon);
+    if ([begin,end,hand,weapon,weaponEnd].some(v=>v<0)) throw Error('Weapon source boundaries missing');
+    const json = responses.get('AlbionBB weapon fallback (changed; manual only)');
+    if (!json) throw Error('Live AlbionBB kill events unavailable');
+    const runWeaponParser = vm.runInNewContext(
+      source.slice(begin,end) + '\n' +
+      source.slice(hand,weapon) + '\n' +
+      source.slice(weapon,weaponEnd) + '\nfetchAlbionBBWeaponMap',
+      {axios:{get: async () => ({data: JSON.parse(json)})}, console, encodeURIComponent,
+       decodeURIComponent, Map, Math, setTimeout}
+    );
+    const playerWeapons = await runWeaponParser(battle);
+    console.log('LIVE_ALBIONBB_WEAPONS_PARSED '+JSON.stringify({
+      ok:playerWeapons.size>0, playerWeapons:playerWeapons.size,
+      enchantedWeapons:[...playerWeapons.values()].filter(v=>/@[1-4]$/.test(v?.id||'')).length
+    }));
+  } catch (error) {
+    console.log('LIVE_ALBIONBB_WEAPONS_PARSED '+JSON.stringify({ok:false,error:error.message}));
+  }
+
   const roadsBody = responses.get('AVA Albion Roads (changed)');
   if (roadsBody) {
     const text = cheerio.load(roadsBody)('body').text().toLowerCase().replace(/\s+/g,' ');
