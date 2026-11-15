@@ -1,6 +1,6 @@
 # Dependencies
+# Keep package-lock.json tracked for reproducible, audited deployments.
 node_modules/
-package-lock.json
 # Sensitive - ห้ามขึ้น GitHub เด็ดขาด
 .env
 .env.local
