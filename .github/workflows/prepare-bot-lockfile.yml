@@ -1,0 +1,48 @@
+name: Prepare audited npm lockfile (no bot deploy)
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/prepare-bot-lockfile.yml'
+
+permissions:
+  contents: write
+
+jobs:
+  prepare-lockfile:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'chore/bot-security-followup-20261115'
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: chore/bot-security-followup-20261115
+          persist-credentials: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.1'
+      - name: Resolve clean dependency lockfile
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - name: Refuse a known-vulnerable lockfile
+        shell: bash
+        run: |
+          npm audit --json > /tmp/bossbot-locked-audit.json || true
+          node <<'NODE'
+          const fs=require('node:fs');
+          const r=JSON.parse(fs.readFileSync('/tmp/bossbot-locked-audit.json','utf8'));
+          console.log('FOLLOWUP_LOCK_AUDIT',JSON.stringify(r.metadata?.vulnerabilities||r.error||{}));
+          if (r.error || !r.metadata || r.metadata.vulnerabilities.total>0) process.exit(1);
+          NODE
+      - name: Commit only audited package-lock.json to isolated PR branch
+        shell: bash
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add package-lock.json
+          if git diff --cached --quiet; then
+            echo 'FOLLOWUP_LOCKFILE_UNCHANGED'
+          else
+            git commit -m 'Lock tested npm dependency versions for the Discord bot'
+            git push origin HEAD:chore/bot-security-followup-20261115
+            echo 'FOLLOWUP_LOCKFILE_COMMITTED'
+          fi
