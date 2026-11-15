@@ -144,25 +144,41 @@ function compactSupabaseState(payload) {
 }
 async function restoreReportedBattleRows() {
     if (!BOT_ROW_STORAGE_ENABLED) return;
-    if (!reportedBattlesStore || !supabasePersistenceReady) {
-        throw new Error('Row storage is enabled but Supabase persistence is unavailable; refusing unsafe Auto-Battle startup');
+    try {
+        if (!reportedBattlesStore || !supabasePersistenceReady) {
+            throw new Error('Row storage is enabled but Supabase persistence is unavailable');
+        }
+        const verified = new Map();
+        let count = 0;
+        for (const [serverId, config] of Object.entries(guildConfigs)) {
+            const stored = await reportedBattlesStore.loadServer(serverId, 2000);
+            const legacy = Array.isArray(config?.battleboardState?.delivered) ? config.battleboardState.delivered : [];
+            const known = new Set(stored.map(x => x.key));
+            const missing = legacy.filter(x => x?.key && !known.has(x.key));
+            if (missing.length) throw new Error('Delivery-row backfill incomplete for Discord server ' + serverId +
+                ': missing ' + missing.length + ' legacy records');
+            verified.set(serverId, mergeDeliveredRecords(legacy, stored));
+            count += verified.get(serverId).length;
+        }
+        // Commit the hydration only after every server has passed completeness checks.
+        for (const [serverId, delivered] of verified) {
+            const config = guildConfigs[serverId];
+            if (!config.battleboardState) config.battleboardState = {};
+            config.battleboardState.delivered = delivered;
+        }
+        reportedBattlesStoreReady = true;
+        console.log('💾 [Delivery Rows] Supabase restored and verified ' + count +
+            ' delivered/below-threshold records | compactFullSnapshots=' + BOT_COMPACT_SNAPSHOT_ENABLED);
+    } catch (error) {
+        if (BOT_COMPACT_SNAPSHOT_ENABLED) {
+            // The legacy JSON no longer has all rows; refusing startup is safer than a duplicate send.
+            throw new Error('Compact row storage unavailable; refusing unsafe Auto-Battle startup: ' + error.message);
+        }
+        // In staged rollout legacy full bot_state is still complete; keep Bot online using it.
+        reportedBattlesStoreReady = false;
+        console.warn('⚠️ [Delivery Rows] Row storage unavailable; keeping complete legacy JSON as primary: ' +
+            String(error.message).slice(0, 180));
     }
-    let count = 0;
-    for (const [serverId, config] of Object.entries(guildConfigs)) {
-        const stored = await reportedBattlesStore.loadServer(serverId, 2000);
-        const legacy = Array.isArray(config?.battleboardState?.delivered) ? config.battleboardState.delivered : [];
-        // Never drop dedupe evidence from the old JSON until the backfill is verified.
-        const known = new Set(stored.map(x => x.key));
-        const missing = legacy.filter(x => x?.key && !known.has(x.key));
-        if (missing.length) throw new Error('Delivery-row backfill incomplete for Discord server ' + serverId +
-            ': missing ' + missing.length + ' legacy records; refusing startup');
-        if (!config.battleboardState) config.battleboardState = {};
-        config.battleboardState.delivered = mergeDeliveredRecords(legacy, stored);
-        count += config.battleboardState.delivered.length;
-    }
-    reportedBattlesStoreReady = true;
-    console.log('💾 [Delivery Rows] Supabase restored and verified ' + count +
-        ' delivered/below-threshold records | compactFullSnapshots=' + BOT_COMPACT_SNAPSHOT_ENABLED);
 }
 async function persistReportedBattleRow(serverId, record) {
     if (!reportedBattlesStoreReady) return;
