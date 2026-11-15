@@ -8,6 +8,7 @@ on:
       - '.github/workflows/dependency-security.yml'
       - 'index.js'
       - 'test/**'
+      - 'scripts/live-fallback-smoke.cjs'
   workflow_dispatch:
 
 permissions:
@@ -64,3 +65,16 @@ jobs:
             console.log('SECURITY_AUDIT_GATE_PASSED: zero known advisories in the resolved dependency tree');
           }
           NODE
+
+  live-fallback-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 6
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Install runtime HTTP clients without lifecycle scripts
+        run: npm install --ignore-scripts --no-audit --no-fund --no-package-lock
+      - name: Read-only live AVA and AlbionBB HTTP probes (non-blocking availability findings)
+        run: node scripts/live-fallback-smoke.cjs
