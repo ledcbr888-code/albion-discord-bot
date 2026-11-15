@@ -361,6 +361,11 @@ function createBattleboardIntegration(deps = {}) {
     if (state.delivered.length > MAX_DELIVERIES) state.delivered.splice(0, state.delivered.length - MAX_DELIVERIES);
     persist();
   }
+  async function persistDeliveryRow(serverId, record) {
+    if (typeof deps.onDeliveryRecord !== 'function') return;
+    // Always snapshot the payload before the next part mutates the same record.
+    await deps.onDeliveryRecord(serverId, JSON.parse(JSON.stringify(record)));
+  }
   // Delivery Acks are evidence of a successful Discord send, not commands to
   // send Discord messages. Keep these independently persisted from discovery
   // observations and the existing report dedupe records.
@@ -502,6 +507,7 @@ function createBattleboardIntegration(deps = {}) {
     record.auditVersion = 2;
     record.lastAttemptAt = new Date(reportAttemptStartedAtMs).toISOString();
     saveDelivery(state, record);
+    await persistDeliveryRow(serverId, record);
     console.log(
       '📤 [Auto-Battle] เริ่มส่งรายงาน' +
       ' | เซิร์ฟเวอร์=' + serverId +
@@ -535,6 +541,7 @@ function createBattleboardIntegration(deps = {}) {
       };
       record.lastAttemptAt = partStartedAt;
       saveDelivery(state, record);
+      await persistDeliveryRow(serverId, record);
       console.log(
         '📤 [Auto-Battle] กำลังส่งรายงานส่วนที่ ' + partNumber + '/' + partsTotal +
         ' | ' + partLabel + partNumber + '/' + partsTotal +
@@ -567,6 +574,7 @@ function createBattleboardIntegration(deps = {}) {
           record.messageIds[partNumber - 1] = String(sentMessage.id);
         }
         saveDelivery(state, record);
+        await persistDeliveryRow(serverId, record);
         queueDeliveryAck(state, serverId, battleId, channelId, partNumber, partsTotal, sentMessage, sentAt);
         console.log(
           '✅ [Auto-Battle] ส่งรายงานส่วนที่ ' + partNumber + '/' + partsTotal + ' เข้า Discord สำเร็จ' +
@@ -596,6 +604,7 @@ function createBattleboardIntegration(deps = {}) {
         };
         record.lastError = reason;
         saveDelivery(state, record);
+        await persistDeliveryRow(serverId, record);
         console.error(
           '❌ [Auto-Battle] ส่งรายงานส่วนที่ ' + partNumber + '/' + partsTotal + ' ไม่สำเร็จ' +
           ' | ' + partLabel + partNumber + '/' + partsTotal +
@@ -653,6 +662,7 @@ function createBattleboardIntegration(deps = {}) {
     const totalSendDurationMs = Math.max(0, Date.parse(record.sentAt) - Date.parse(record.firstAttemptAt || record.sentAt));
     record.totalSendDurationMs = totalSendDurationMs;
     saveDelivery(state, record);
+    await persistDeliveryRow(serverId, record);
     await flushDeliveryAcks(state);
     console.log(
       '✅ [Auto-Battle] ส่งรายงานครบทุกส่วนเข้า Discord สำเร็จ' +
@@ -881,13 +891,15 @@ function createBattleboardIntegration(deps = {}) {
         const routeSummary = checks
           .map(check => check.targetGuild + '=' + formatFame(check.totalFame) + '/' + formatFame(check.minFame))
           .join(' | ');
-        saveDelivery(state, {
+        const skippedRecord = {
           key, battleId, channelId, status: 'below-threshold',
           totalFame: Number(report.totalFame || 0),
           routeChecks: checks.map(({ targetGuild, totalFame, minFame }) =>
             ({ targetGuild, totalFame, minFame })),
           checkedAt: new Date().toISOString(),
-        });
+        };
+        saveDelivery(state, skippedRecord);
+        await persistDeliveryRow(serverId, skippedRecord);
         console.log('ℹ️ [Auto-Battle] ไม่ส่งรายงาน เนื่องจาก Fame รวมต่ำกว่าเกณฑ์ทุก Route | Battle ID=' + battleId +
           ' | ' + routeSummary +
           ' | สร้างรายงาน=' + formatPreciseDuration(reportBuildMs) +
