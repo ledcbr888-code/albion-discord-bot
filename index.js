@@ -33,6 +33,7 @@ const { createOfficialEventsShadow } = require('./official-events-shadow');
 const battleboardPrimaryServerIds = new Set();
 const { createTrackingBackupScheduler, createThrottledSuccessLogger } = require('./tracking-backup-scheduler');
 const { createGitHubMirrorPolicy, createTrafficMeter } = require('./backup-traffic-policy');
+const { createReportedBattlesStore, mergeDeliveredRecords } = require('./reported-battles-store');
 let Fuse; try { Fuse = require('fuse.js'); } catch(e) { console.warn('fuse.js not installed, using fallback'); }
 
 const BANDIT_SERIF_FONT = '/usr/share/fonts/truetype/noto/NotoSerifDisplay-Black.ttf';
@@ -124,6 +125,52 @@ const TRACKING_BACKUP_MIN_INTERVAL_MS = 30 * 1000;
 const TRACKING_BACKUP_SUCCESS_LOG_INTERVAL_MS = 15 * 60 * 1000;
 const githubMirrorPolicy = createGitHubMirrorPolicy();
 const backupTrafficMeter = createTrafficMeter();
+const BOT_ROW_STORAGE_ENABLED = String(process.env.BOT_ROW_STORAGE_ENABLED || '').toLowerCase() === 'true';
+let reportedBattlesStoreReady = false;
+const reportedBattlesStore = BOT_ROW_STORAGE_ENABLED && SUPABASE_API
+    ? createReportedBattlesStore({ axios, baseUrl: SUPABASE_URL, headers: supabaseHeaders, meter: backupTrafficMeter })
+    : null;
+function compactSupabaseState(payload) {
+    if (!reportedBattlesStoreReady) return payload;
+    const copy = JSON.parse(payload);
+    for (const config of Object.values(copy.guilds || {})) {
+        if (config && config.battleboardState) config.battleboardState.delivered = [];
+    }
+    return JSON.stringify(copy, null, 2);
+}
+async function restoreReportedBattleRows() {
+    if (!BOT_ROW_STORAGE_ENABLED) return;
+    if (!reportedBattlesStore || !supabasePersistenceReady) {
+        throw new Error('Row storage is enabled but Supabase persistence is unavailable; refusing unsafe Auto-Battle startup');
+    }
+    let count = 0;
+    for (const [serverId, config] of Object.entries(guildConfigs)) {
+        const stored = await reportedBattlesStore.loadServer(serverId, 2000);
+        const legacy = Array.isArray(config?.battleboardState?.delivered) ? config.battleboardState.delivered : [];
+        // Never drop dedupe evidence from the old JSON until the backfill is verified.
+        const known = new Set(stored.map(x => x.key));
+        const missing = legacy.filter(x => x?.key && !known.has(x.key));
+        if (missing.length) throw new Error('Delivery-row backfill incomplete for Discord server ' + serverId +
+            ': missing ' + missing.length + ' legacy records; refusing startup');
+        if (!config.battleboardState) config.battleboardState = {};
+        config.battleboardState.delivered = mergeDeliveredRecords(legacy, stored);
+        count += config.battleboardState.delivered.length;
+    }
+    reportedBattlesStoreReady = true;
+    console.log('💾 [Delivery Rows] Supabase restored and verified ' + count +
+        ' delivered/below-threshold records; compact full snapshots enabled');
+}
+async function persistReportedBattleRow(serverId, record) {
+    if (!reportedBattlesStoreReady) return;
+    try {
+        await reportedBattlesStore.save(serverId, record);
+    } catch (error) {
+        console.error('❌ [Delivery Rows] Row update failed; preserving legacy full snapshot | Battle=' +
+            String(record?.battleId || 'unknown') + ' | Reason=' + String(error.message).slice(0, 180));
+        // Do not silently discard the only successful-send evidence.
+        saveData({ legacyFull: true, forceGitHubSnapshot: true });
+    }
+}
 const logSupabaseBackupSuccess = createThrottledSuccessLogger('Supabase', {
     intervalMs: TRACKING_BACKUP_SUCCESS_LOG_INTERVAL_MS
 });
@@ -532,6 +579,7 @@ function saveData(options = {}) {
     const transientOnly = options && options.transientOnly === true;
     const skipSupabase = options && options.skipSupabase === true;
     const forceGitHubSnapshot = options && options.forceGitHubSnapshot === true;
+    const legacyFull = options && options.legacyFull === true;
     try {
         if (!ensureDataDirectory()) return false;
         guildConfigs = Object.fromEntries(Object.entries(guildConfigs).map(([id, cfg]) => [id, normalizeGuildConfig(cfg)]));
@@ -552,7 +600,7 @@ function saveData(options = {}) {
         // Keep local crash diagnostics fresh, but don't upload a full 0.5–1 MB snapshot
         // for heartbeat, an unchanged polling snapshot or its log timestamp.
         if (!transientOnly && !skipSupabase && SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY && supabasePersistenceReady) {
-            queueSupabaseTrackingSave(payload);
+            queueSupabaseTrackingSave(legacyFull ? payload : compactSupabaseState(payload));
         }
         if (!transientOnly && GITHUB_DATA_TOKEN && GITHUB_DATA_REPO && githubPersistenceReady &&
             githubMirrorPolicy.shouldMirror(payload, { force: forceGitHubSnapshot })) {
@@ -6669,6 +6717,7 @@ client.once('clientReady', async () => {
         getAllGuildConfigs,
         getGuildConfig,
         saveData,
+        onDeliveryRecord: persistReportedBattleRow,
         buildBattleReportPayload,
         formatFame,
         onServerAvailabilityChange: (serverId, active, details = {}) => {
@@ -7665,6 +7714,7 @@ initializeTrackingPersistence()
         throw err;
     })
     .then(async () => {
+        await restoreReportedBattleRows();
         if (!BOT_TOKEN) {
             throw new Error('BOT_TOKEN is missing or empty. Set Render Environment variable BOT_TOKEN (Bot Token from Discord Developer Portal).');
         }
