@@ -120,3 +120,12 @@ test('Supabase failure does not accidentally mark a row as stored', async () => 
   await assert.rejects(store.save(serverId,{key:'3:'+channelId,battleId:'3',channelId,status:'sent'}),/503/);
   assert.equal(calls,1);
 });
+
+test('compact migration cannot overwrite emergency dedupe before rows are rehydrated', () => {
+  const fs = require('node:fs');
+  const path = require('node:path');
+  const source = fs.readFileSync(path.join(__dirname, '..', 'index.js'), 'utf8');
+  assert.match(source, /if \(!BOT_ROW_STORAGE_ENABLED\) saveData\(\);/);
+  assert.match(source, /await restoreReportedBattleRows\(\);\s*if \(BOT_ROW_STORAGE_ENABLED && reportedBattlesStoreReady\) saveData\(\);/);
+  assert.match(source, /if \(!reportedBattlesStoreReady \|\| !BOT_COMPACT_SNAPSHOT_ENABLED\) return payload;/);
+});
