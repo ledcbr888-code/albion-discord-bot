@@ -19,6 +19,7 @@ const targets = [
 async function main() {
   let ok = 0;
   const results = [];
+  const responses = new Map();
   for (const t of targets) {
     const started = Date.now();
     try {
@@ -44,6 +45,7 @@ async function main() {
         : (/json/.test(contentType) && body.trim().startsWith('{') || body.trim().startsWith('['));
       const accessible = response.status >= 200 && response.status < 300 && validContentType && !challenge;
       if (accessible) ok++;
+      if (response.status >= 200 && response.status < 300) responses.set(t.name, body);
       const result = {
         name: t.name, status: response.status, accessible,
         durationMs: Date.now()-started, bytes: Buffer.byteLength(body),
@@ -58,6 +60,67 @@ async function main() {
       console.log('LIVE_FALLBACK_PROBE ' + JSON.stringify(result));
     }
   }
+
+  // Execute the real, unchanged AVA parsing function on the live HTML captured
+  // above, rather than accepting an HTTP 200 alone as proof of valid map data.
+  try {
+    const fs = require('node:fs');
+    const vm = require('node:vm');
+    const src = fs.readFileSync('index.js', 'utf8');
+    const helperStart = src.indexOf('const AVA_MAP_SOURCE = ');
+    const helperEnd = src.indexOf('function formatAvaConnection(', helperStart);
+    const parserStart = src.indexOf('async function fetchAvaMapData(');
+    const parserEnd = src.indexOf('\\nfunction avaCountLine(', parserStart);
+    if ([helperStart, helperEnd, parserStart, parserEnd].some(v=>v<0)) throw Error('AVA source parsing boundaries missing');
+    const runAvaParser = vm.runInNewContext(
+      src.slice(helperStart, helperEnd) + '\\n' +
+      src.slice(parserStart, parserEnd) + '\\nfetchAvaMapData',
+      {
+        axios: {get: async (url) => {
+          const key = url.includes('/th/avalon-maps/') ? 'AVA primary TH (unchanged)' : 'AVA primary EN (unchanged)';
+          const body = responses.get(key);
+          if (!body) throw Error('Live ' + key + ' body unavailable');
+          return {data: body};
+        }},
+        cheerio, URL, decodeURIComponent
+      }
+    );
+    const data = await runAvaParser('Ponitos-Aiayrom');
+    const totalPOIs = data.totalChests+data.totalResources+data.totalDungeons;
+    console.log('LIVE_AVA_PARSED ' + JSON.stringify({
+      ok: Boolean(data.tier && data.tier!=='ไม่พบข้อมูล' && totalPOIs>0),
+      name: data.name?.slice(0,90), tier:data.tier, layout:data.layout,
+      totalChests:data.totalChests, totalResources:data.totalResources,
+      totalDungeons:data.totalDungeons, totalPOIs, hasMapImage:Boolean(data.mapImage),
+      sourceUrl:data.sourceUrl
+    }));
+  } catch (error) {
+    console.log('LIVE_AVA_PARSED '+JSON.stringify({ok:false,error:error.message}));
+  }
+  try {
+    const response = responses.get('AlbionBB weapon fallback (changed; manual only)');
+    if (response) {
+      const value = JSON.parse(response);
+      const events = Array.isArray(value) ? value :
+        Array.isArray(value?.events) ? value.events :
+        Array.isArray(value?.kills) ? value.kills : [];
+      console.log('LIVE_ALBIONBB_DATA_SHAPE '+JSON.stringify({
+        rootType:Array.isArray(value)?'array':typeof value,
+        rootKeys:Array.isArray(value)?[]:Object.keys(value).slice(0,12),
+        recognizedEvents:events.length, compatibleWithWeaponFallback:events.length>0
+      }));
+    }
+  } catch (error) {
+    console.log('LIVE_ALBIONBB_DATA_SHAPE '+JSON.stringify({error:error.message}));
+  }
+  const roadsBody = responses.get('AVA Albion Roads (changed)');
+  if (roadsBody) {
+    const text = cheerio.load(roadsBody)('body').text().toLowerCase().replace(/\\s+/g,' ');
+    console.log('LIVE_AVA_ROADS_CONTENT '+JSON.stringify({
+      mentionsRequestedMap:text.includes(map), bytes:Buffer.byteLength(roadsBody)
+    }));
+  }
+
   const primaryOk = results.filter(x=>x.name.startsWith('AVA primary')&&x.accessible).length;
   const fallbackOk = results.filter(x=>x.name.includes('(changed')&&x.accessible).length;
   console.log('LIVE_FALLBACK_SUMMARY ' + JSON.stringify({
