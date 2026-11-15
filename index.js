@@ -768,7 +768,9 @@ async function initializeTrackingPersistence() {
             if (GITHUB_DATA_TOKEN && GITHUB_DATA_REPO) {
                 githubPersistenceReady = true;
                 console.log('💾 GitHub tracking backup enabled as a mirror for Supabase data.');
-                saveData();
+                // Wait for row hydration before mirroring: a compact bot_state
+                // has delivered=[] until the separate table is loaded.
+                if (!BOT_ROW_STORAGE_ENABLED) saveData();
             } else {
                 console.warn('💾 GitHub tracking mirror is not configured. Set GITHUB_DATA_TOKEN and GITHUB_DATA_REPO in Render Environment.');
             }
@@ -7743,6 +7745,7 @@ initializeTrackingPersistence()
     })
     .then(async () => {
         await restoreReportedBattleRows();
+        if (BOT_ROW_STORAGE_ENABLED && reportedBattlesStoreReady) saveData();
         if (!BOT_TOKEN) {
             throw new Error('BOT_TOKEN is missing or empty. Set Render Environment variable BOT_TOKEN (Bot Token from Discord Developer Portal).');
         }
