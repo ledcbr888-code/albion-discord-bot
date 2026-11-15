@@ -70,11 +70,11 @@ async function main() {
     const helperStart = src.indexOf('const AVA_MAP_SOURCE = ');
     const helperEnd = src.indexOf('function formatAvaConnection(', helperStart);
     const parserStart = src.indexOf('async function fetchAvaMapData(');
-    const parserEnd = src.indexOf('\\nfunction avaCountLine(', parserStart);
+    const parserEnd = src.indexOf('\nfunction avaCountLine(', parserStart);
     if ([helperStart, helperEnd, parserStart, parserEnd].some(v=>v<0)) throw Error('AVA source parsing boundaries missing');
     const runAvaParser = vm.runInNewContext(
-      src.slice(helperStart, helperEnd) + '\\n' +
-      src.slice(parserStart, parserEnd) + '\\nfetchAvaMapData',
+      src.slice(helperStart, helperEnd) + '\n' +
+      src.slice(parserStart, parserEnd) + '\nfetchAvaMapData',
       {
         axios: {get: async (url) => {
           const key = url.includes('/th/avalon-maps/') ? 'AVA primary TH (unchanged)' : 'AVA primary EN (unchanged)';
@@ -115,7 +115,7 @@ async function main() {
   }
   const roadsBody = responses.get('AVA Albion Roads (changed)');
   if (roadsBody) {
-    const text = cheerio.load(roadsBody)('body').text().toLowerCase().replace(/\\s+/g,' ');
+    const text = cheerio.load(roadsBody)('body').text().toLowerCase().replace(/\s+/g,' ');
     console.log('LIVE_AVA_ROADS_CONTENT '+JSON.stringify({
       mentionsRequestedMap:text.includes(map), bytes:Buffer.byteLength(roadsBody)
     }));
