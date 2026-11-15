@@ -1133,6 +1133,7 @@ test('Discord delivery Ack stays in independent outbox after 503 and is retried 
  process.env.BOT_API_KEY='test-key-'.padEnd(40,'x');
  process.env.BATTLEBOARD_DELIVERY_ACK_ENABLED='true';
  let postedAcks=0,sends=0,eventCalls=0,ackReady=false;
+ const persistedDeliveryRows=[];
  global.fetch=async (urlValue,init)=>{
    const url=new URL(String(urlValue));let body={};
    if(url.pathname==='/api/bot-tracked-entities'&&url.searchParams.get('mode')==='delivery-ack'){
@@ -1153,6 +1154,7 @@ test('Discord delivery Ack stays in independent outbox after 503 and is retried 
  const integration=createBattleboardIntegration({
   client:{channels:{fetch:async()=>({send:async()=>{sends++;return{id:'1570899488606781440'}}})}},
   getAllGuildConfigs:()=>[{guildId:serverId,config}],getGuildConfig:()=>config,saveData:()=>{},
+  onDeliveryRecord:async (_id, record)=>persistedDeliveryRows.push(record),
   buildBattleReportPayload:async()=>({totalFame:500000,totalKills:2,totalDeaths:0,
     battleUrl:'https://example.invalid/battle/'+battleId,payload:{files:[Buffer.from('image')],content:'report'}})
  });
@@ -1168,6 +1170,22 @@ test('Discord delivery Ack stays in independent outbox after 503 and is retried 
   assert.equal(postedAcks,2);
   assert.equal(config.battleboardState.deliveryAckOutbox.length,0);
   assert.equal(sends,1,'ack retry must never resend Discord report');
+  // Simulate compact bot_state on restart: hydrate delivery from Supabase rows.
+  const durableRow=persistedDeliveryRows.findLast(record=>record.status==='sent');
+  assert.ok(durableRow && durableRow.messageIds?.[0]==='1570899488606781440');
+  config.battleboardState.delivered=[JSON.parse(JSON.stringify(durableRow))];
+  config.battleboardState.eventCursor={after:new Date(now-30000).toISOString(),afterBattleId:'0'};
+  eventCalls=0;
+  const restarted=createBattleboardIntegration({
+    client:{channels:{fetch:async()=>({send:async()=>{sends++;return{id:'would-be-duplicate'}}})}},
+    getAllGuildConfigs:()=>[{guildId:serverId,config}],getGuildConfig:()=>config,saveData:()=>{},
+    buildBattleReportPayload:async()=>({totalFame:500000,totalKills:2,totalDeaths:0,
+      payload:{files:[Buffer.from('image')]}})
+  });
+  try {
+    await restarted.tick();
+    assert.equal(sends,1,'restored per-channel sent row must suppress duplicate after restart');
+  } finally { restarted.stop(); }
  }finally{
   integration.stop();global.fetch=oldFetch;
   for(const [k,v] of Object.entries(env)){if(v===undefined)delete process.env[k];else process.env[k]=v;}
