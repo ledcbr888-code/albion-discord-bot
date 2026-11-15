@@ -1,0 +1,32 @@
+[Unit]
+Description=BOSS BOT — Albion Online Asia Discord Gateway
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=bossbot
+Group=bossbot
+WorkingDirectory=/opt/bossbot
+EnvironmentFile=/etc/bossbot/bossbot.env
+Environment=NODE_ENV=production
+Environment=DATA_DIR=/var/lib/bossbot
+Environment=HOME=/var/lib/bossbot
+Environment=PORT=10000
+ExecStartPre=/usr/local/bin/bossbot-preflight
+ExecStart=/usr/bin/node /opt/bossbot/index.js
+Restart=always
+RestartSec=20
+TimeoutStartSec=90
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/bossbot
+UMask=0077
+LimitNOFILE=65535
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
