@@ -1,0 +1,65 @@
+name: Bot dependency cache reproduction (no deploy)
+
+on:
+  pull_request:
+    paths:
+      - 'package.json'
+      - '.github/workflows/dependency-followup.yml'
+      - '.gitignore'
+      - 'package-lock.json'
+
+permissions:
+  contents: read
+
+jobs:
+  compare-npm-resolution:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.22.1'
+      - name: Reproduce previous package install followed by PR45 npm install
+        shell: bash
+        run: |
+          set -e
+          echo "FOLLOWUP_NPM_VERSION $(npm --version)"
+          cp package.json /tmp/bossbot-new-package.json
+          git show 49f3169e6c11e437988da2252037bc764b51aa92:package.json > package.json
+          npm install --ignore-scripts --no-audit --no-fund --silent
+          mv package-lock.json /tmp/bossbot-old-lock.json
+          cp /tmp/bossbot-old-lock.json package-lock.json
+          cp /tmp/bossbot-new-package.json package.json
+          npm install --ignore-scripts --no-audit --no-fund --silent
+          npm audit --json > /tmp/bossbot-reused-audit.json || true
+          cp package-lock.json /tmp/bossbot-reused-lock.json
+          node <<'NODE'
+          const fs = require('node:fs');
+          const audit = JSON.parse(fs.readFileSync('/tmp/bossbot-reused-audit.json','utf8'));
+          const lock = JSON.parse(fs.readFileSync('/tmp/bossbot-reused-lock.json','utf8'));
+          console.log('FOLLOWUP_REUSED_COUNTS',JSON.stringify(audit.metadata?.vulnerabilities||audit.error||{}));
+          for (const [name,v] of Object.entries(audit.vulnerabilities||{})) {
+            const versions = Object.entries(lock.packages||{}).filter(([p])=>p.endsWith('/node_modules/'+name)||p==='node_modules/'+name).map(([p,a])=>({path:p,version:a.version}));
+            console.log('FOLLOWUP_REUSED_VULN',JSON.stringify({
+              name,severity:v.severity,range:v.range,isDirect:v.isDirect,versions,
+              via:(v.via||[]).map(x=>typeof x==='string'?x:{title:x.title,severity:x.severity,range:x.range,url:x.url}),fixAvailable:v.fixAvailable
+            }));
+          }
+          NODE
+      - name: Independently resolve clean package lock and audit
+        shell: bash
+        run: |
+          rm -rf node_modules package-lock.json
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund --silent
+          npm audit --json > /tmp/bossbot-clean-audit.json || true
+          node <<'NODE'
+          const fs=require('node:fs');
+          const a=JSON.parse(fs.readFileSync('/tmp/bossbot-clean-audit.json','utf8'));
+          console.log('FOLLOWUP_CLEAN_COUNTS',JSON.stringify(a.metadata?.vulnerabilities||a.error||{}));
+          for(const [name,v] of Object.entries(a.vulnerabilities||{})) {
+            console.log('FOLLOWUP_CLEAN_VULN',JSON.stringify({name,severity:v.severity,range:v.range,via:v.via}));
+          }
+          NODE
