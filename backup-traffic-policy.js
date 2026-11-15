@@ -22,6 +22,14 @@ function removeTransientFields(input) {
   }
   return output;
 }
+function canonicalize(value) {
+  if (Array.isArray(value)) return value.map(canonicalize);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value).sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, item]) => [key, canonicalize(item)])
+  );
+}
 function configFingerprint(input) {
   const data = typeof input === 'string' ? JSON.parse(input) : input;
   if (!data || typeof data !== 'object' || Array.isArray(data)) throw new TypeError('Backup must be a JSON object');
@@ -35,7 +43,7 @@ function configFingerprint(input) {
   }
   // Only meaningful configuration changes should create an urgent GitHub mirror.
   const stable = { version: data.version, guilds };
-  return createHash('sha256').update(JSON.stringify(stable)).digest('hex');
+  return createHash('sha256').update(JSON.stringify(canonicalize(stable))).digest('hex');
 }
 function createGitHubMirrorPolicy({ now = Date.now, dailyIntervalMs = 24 * 60 * 60 * 1000 } = {}) {
   let lastQueuedHash = null;
