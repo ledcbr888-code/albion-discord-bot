@@ -1,0 +1,61 @@
+name: BOSS BOT dependency security audit
+
+on:
+  pull_request:
+    paths:
+      - 'package.json'
+      - 'package-lock.json'
+      - '.github/workflows/dependency-security.yml'
+      - 'index.js'
+      - 'test/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  dependency-audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Resolve dependency lockfile without installing runtime packages
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - name: Report installed-version candidates and audited advisories (read-only)
+        shell: bash
+        run: |
+          npm audit --json > /tmp/bossbot-npm-audit.json || true
+          node <<'NODE'
+          const fs = require('node:fs');
+          const lock = JSON.parse(fs.readFileSync('package-lock.json', 'utf8'));
+          const result = JSON.parse(fs.readFileSync('/tmp/bossbot-npm-audit.json', 'utf8'));
+          console.log('SECURITY_AUDIT_COUNTS', JSON.stringify(result.metadata?.vulnerabilities || result.error || {}));
+          for (const [name, v] of Object.entries(result.vulnerabilities || {}).sort(([a],[b]) => a.localeCompare(b))) {
+            const via = (v.via || []).map(item => typeof item === 'string' ? {dependency: item} : {
+              title: item.title, url: item.url, severity: item.severity,
+              range: item.range, source: item.source
+            });
+            console.log('SECURITY_AUDIT_VULN', JSON.stringify({
+              name, severity: v.severity, isDirect: v.isDirect,
+              range: v.range, fixAvailable: v.fixAvailable,
+              via, effects: v.effects
+            }));
+          }
+          for (const name of ['cloudscraper', 'request', 'request-promise', 'request-promise-core', 'form-data',
+            'tough-cookie', 'qs', 'axios', 'express', 'discord.js', 'cheerio', 'follow-redirects']) {
+            const matches = Object.entries(lock.packages || {})
+              .filter(([path]) => path === 'node_modules/' + name || path.endsWith('/node_modules/' + name))
+              .map(([path, item]) => ({
+                path, version: item.version, deps: item.dependencies ?
+                Object.fromEntries(Object.entries(item.dependencies).filter(([dep]) =>
+                  ['cloudscraper','request','request-promise','request-promise-core','form-data','tough-cookie','qs'].includes(dep))) : {}
+              }));
+            console.log('SECURITY_AUDIT_VERSION', JSON.stringify({name, matches}));
+          }
+          if (result.error) {
+            console.error('npm audit could not run:', JSON.stringify(result.error));
+            process.exitCode = 1;
+          }
+          NODE
