@@ -32,6 +32,8 @@ const { selectAutoBattleGuildSummaryRows, summarizeEntireBattleForGuildPages, WE
 const { createOfficialEventsShadow } = require('./official-events-shadow');
 const battleboardPrimaryServerIds = new Set();
 const { createTrackingBackupScheduler, createThrottledSuccessLogger } = require('./tracking-backup-scheduler');
+const { createGitHubMirrorPolicy, createTrafficMeter } = require('./backup-traffic-policy');
+const { createReportedBattlesStore, mergeDeliveredRecords } = require('./reported-battles-store');
 let Fuse; try { Fuse = require('fuse.js'); } catch(e) { console.warn('fuse.js not installed, using fallback'); }
 
 const BANDIT_SERIF_FONT = '/usr/share/fonts/truetype/noto/NotoSerifDisplay-Black.ttf';
@@ -121,6 +123,78 @@ let githubPersistenceReady = false;
 const TRACKING_BACKUP_DEBOUNCE_MS = 2000;
 const TRACKING_BACKUP_MIN_INTERVAL_MS = 30 * 1000;
 const TRACKING_BACKUP_SUCCESS_LOG_INTERVAL_MS = 15 * 60 * 1000;
+const githubMirrorPolicy = createGitHubMirrorPolicy();
+const backupTrafficMeter = createTrafficMeter();
+const BOT_ROW_STORAGE_ENABLED = String(process.env.BOT_ROW_STORAGE_ENABLED || '').toLowerCase() === 'true';
+const BOT_COMPACT_SNAPSHOT_ENABLED = String(process.env.BOT_COMPACT_SNAPSHOT_ENABLED || '').toLowerCase() === 'true';
+let reportedBattlesStoreReady = false;
+let lastRowFailureMirrorAt = 0;
+const reportedBattlesStore = BOT_ROW_STORAGE_ENABLED && SUPABASE_API
+    ? createReportedBattlesStore({ axios, baseUrl: SUPABASE_URL, headers: supabaseHeaders, meter: backupTrafficMeter })
+    : null;
+function compactSupabaseState(payload) {
+    // Keep the legacy full Supabase snapshot during staged row-storage rollout.
+    // Compact mode is enabled separately only after row hydration + recovery tests.
+    if (!reportedBattlesStoreReady || !BOT_COMPACT_SNAPSHOT_ENABLED) return payload;
+    const copy = JSON.parse(payload);
+    for (const config of Object.values(copy.guilds || {})) {
+        if (config && config.battleboardState) config.battleboardState.delivered = [];
+    }
+    return JSON.stringify(copy, null, 2);
+}
+async function restoreReportedBattleRows() {
+    if (!BOT_ROW_STORAGE_ENABLED) return;
+    try {
+        if (!reportedBattlesStore || !supabasePersistenceReady) {
+            throw new Error('Row storage is enabled but Supabase persistence is unavailable');
+        }
+        const verified = new Map();
+        let count = 0;
+        for (const [serverId, config] of Object.entries(guildConfigs)) {
+            const stored = await reportedBattlesStore.loadServer(serverId, 2000);
+            const legacy = Array.isArray(config?.battleboardState?.delivered) ? config.battleboardState.delivered : [];
+            const known = new Set(stored.map(x => x.key));
+            const missing = legacy.filter(x => x?.key && !known.has(x.key));
+            if (missing.length) throw new Error('Delivery-row backfill incomplete for Discord server ' + serverId +
+                ': missing ' + missing.length + ' legacy records');
+            verified.set(serverId, mergeDeliveredRecords(legacy, stored));
+            count += verified.get(serverId).length;
+        }
+        // Commit the hydration only after every server has passed completeness checks.
+        for (const [serverId, delivered] of verified) {
+            const config = guildConfigs[serverId];
+            if (!config.battleboardState) config.battleboardState = {};
+            config.battleboardState.delivered = delivered;
+        }
+        reportedBattlesStoreReady = true;
+        console.log('💾 [Delivery Rows] Supabase restored and verified ' + count +
+            ' delivered/below-threshold records | compactFullSnapshots=' + BOT_COMPACT_SNAPSHOT_ENABLED);
+    } catch (error) {
+        if (BOT_COMPACT_SNAPSHOT_ENABLED) {
+            // The legacy JSON no longer has all rows; refusing startup is safer than a duplicate send.
+            throw new Error('Compact row storage unavailable; refusing unsafe Auto-Battle startup: ' + error.message);
+        }
+        // In staged rollout legacy full bot_state is still complete; keep Bot online using it.
+        reportedBattlesStoreReady = false;
+        console.warn('⚠️ [Delivery Rows] Row storage unavailable; keeping complete legacy JSON as primary: ' +
+            String(error.message).slice(0, 180));
+    }
+}
+async function persistReportedBattleRow(serverId, record) {
+    if (!reportedBattlesStoreReady) return;
+    try {
+        await reportedBattlesStore.save(serverId, record);
+    } catch (error) {
+        console.error('❌ [Delivery Rows] Row update failed; preserving legacy full snapshot | Battle=' +
+            String(record?.battleId || 'unknown') + ' | Reason=' + String(error.message).slice(0, 180));
+        // Do not silently discard the only successful-send evidence. Rate-limit
+        // emergency GitHub mirrors on repeated row-storage failures.
+        const now = Date.now();
+        const emergencyMirrorDue = !lastRowFailureMirrorAt || now - lastRowFailureMirrorAt >= 60 * 60 * 1000;
+        if (emergencyMirrorDue) lastRowFailureMirrorAt = now;
+        saveData({ legacyFull: true, forceGitHubSnapshot: emergencyMirrorDue });
+    }
+}
 const logSupabaseBackupSuccess = createThrottledSuccessLogger('Supabase', {
     intervalMs: TRACKING_BACKUP_SUCCESS_LOG_INTERVAL_MS
 });
@@ -135,15 +209,19 @@ const supabaseTrackingBackupScheduler = createTrackingBackupScheduler({
     retryMaxMs: 5 * 60 * 1000,
     write: async content => {
         const payload = JSON.parse(String(content));
-        await axios.post(SUPABASE_API, {
-            id: SUPABASE_ROW_ID,
-            payload,
-            updated_at: new Date().toISOString()
-        }, {
-            timeout: 20000,
-            headers: { ...supabaseHeaders(), Prefer: 'resolution=merge-duplicates,return=minimal' },
-            params: { on_conflict: 'id' }
-        });
+        const body = { id: SUPABASE_ROW_ID, payload, updated_at: new Date().toISOString() };
+        const outboundBytes = Buffer.byteLength(JSON.stringify(body), 'utf8');
+        try {
+            await axios.post(SUPABASE_API, body, {
+                timeout: 20000,
+                headers: { ...supabaseHeaders(), Prefer: 'resolution=merge-duplicates,return=minimal' },
+                params: { on_conflict: 'id' }
+            });
+            backupTrafficMeter.record('supabase', 'full-snapshot-post', outboundBytes);
+        } catch (error) {
+            backupTrafficMeter.record('supabase', 'full-snapshot-post', outboundBytes, 0, false);
+            throw error;
+        }
     },
     onSuccess: logSupabaseBackupSuccess,
     onError: (error, attempts, retryMs) => console.error(
@@ -167,6 +245,7 @@ const githubTrackingBackupScheduler = createTrackingBackupScheduler({
                 params: { ref: GITHUB_DATA_BRANCH },
                 validateStatus: status => status === 200 || status === 404
             });
+            backupTrafficMeter.record('github', 'mirror-get', 0, Buffer.byteLength(JSON.stringify(get.data || {}), 'utf8'));
             const currentSha = get.status === 200 ? get.data.sha : undefined;
             const body = {
                 message: 'Update Albion bot tracking backup',
@@ -175,10 +254,18 @@ const githubTrackingBackupScheduler = createTrackingBackupScheduler({
             };
             if (currentSha) body.sha = currentSha;
             try {
-                const put = await axios.put(GITHUB_DATA_API, body, {
-                    timeout: 20000,
-                    headers: githubRequestHeaders()
-                });
+                const outgoingBytes = Buffer.byteLength(JSON.stringify(body), 'utf8');
+                let put;
+                try {
+                    put = await axios.put(GITHUB_DATA_API, body, {
+                        timeout: 20000,
+                        headers: githubRequestHeaders()
+                    });
+                    backupTrafficMeter.record('github', 'mirror-put', outgoingBytes);
+                } catch (error) {
+                    backupTrafficMeter.record('github', 'mirror-put', outgoingBytes, 0, false);
+                    throw error;
+                }
                 githubDataSha = put.data?.content?.sha || currentSha || null;
                 return;
             } catch (error) {
@@ -512,7 +599,11 @@ function loadData() {
         guildConfigs = {}; banditGlobalVotes = {}; botUsageStats = {}; botUsageTrackingStartedAt = Date.now(); legacyMigration = null;
     }
 }
-function saveData() {
+function saveData(options = {}) {
+    const transientOnly = options && options.transientOnly === true;
+    const skipSupabase = options && options.skipSupabase === true;
+    const forceGitHubSnapshot = options && options.forceGitHubSnapshot === true;
+    const legacyFull = options && options.legacyFull === true;
     try {
         if (!ensureDataDirectory()) return false;
         guildConfigs = Object.fromEntries(Object.entries(guildConfigs).map(([id, cfg]) => [id, normalizeGuildConfig(cfg)]));
@@ -530,8 +621,17 @@ function saveData() {
         botUsageDirty = false;
         if (botUsageSaveTimer) clearTimeout(botUsageSaveTimer);
         botUsageSaveTimer = null;
-        if (SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY && supabasePersistenceReady) queueSupabaseTrackingSave(payload);
-        if (GITHUB_DATA_TOKEN && GITHUB_DATA_REPO && githubPersistenceReady) queueGitHubTrackingSave(payload);
+        // Keep local crash diagnostics fresh, but don't upload a full 0.5–1 MB snapshot
+        // for heartbeat, an unchanged polling snapshot or its log timestamp.
+        if (!transientOnly && !skipSupabase && SUPABASE_URL && SUPABASE_SERVICE_ROLE_KEY && supabasePersistenceReady) {
+            queueSupabaseTrackingSave(legacyFull ? payload : compactSupabaseState(payload));
+        }
+        if (!transientOnly && GITHUB_DATA_TOKEN && GITHUB_DATA_REPO && githubPersistenceReady &&
+            githubMirrorPolicy.shouldMirror(payload, { force: forceGitHubSnapshot })) {
+            // The existing scheduler retains and retries the newest failed snapshot.
+            githubMirrorPolicy.markQueued(payload);
+            queueGitHubTrackingSave(payload);
+        }
         return true;
     } catch (err) {
         try { if (fs.existsSync(`${DATA_FILE}.tmp`)) fs.unlinkSync(`${DATA_FILE}.tmp`); } catch (_) {}
@@ -576,6 +676,8 @@ async function pullGitHubTrackingData() {
             }
             return false;
         }
+        backupTrafficMeter.record('github', 'startup-restore-get', 0,
+            Buffer.byteLength(JSON.stringify(response.data || {}), 'utf8'));
         const remote = response.data;
         if (!remote || remote.type !== 'file' || !remote.content) throw new Error('GitHub tracking path is not a readable file');
         const content = Buffer.from(String(remote.content).replace(/\n/g, ''), 'base64').toString('utf8');
@@ -587,6 +689,7 @@ async function pullGitHubTrackingData() {
         loadData();
         githubPersistenceReady = true;
         githubTrackingBackupScheduler.markSaved(content);
+        githubMirrorPolicy.markQueued(content);
         console.log('💾 GitHub tracking data loaded from private repo ' + GITHUB_DATA_REPO + '/' + GITHUB_DATA_PATH);
         return true;
     } catch (err) {
@@ -612,6 +715,8 @@ async function pullSupabaseTrackingData() {
     if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) return false;
     try {
         const response = await axios.get(SUPABASE_API, { timeout: 20000, headers: supabaseHeaders(), params: { id: 'eq.' + SUPABASE_ROW_ID, select: 'id,payload,updated_at' } });
+        backupTrafficMeter.record('supabase', 'startup-restore-get', 0,
+            Buffer.byteLength(JSON.stringify(response.data || {}), 'utf8'));
         const row = Array.isArray(response.data) ? response.data[0] : null;
         if (row?.payload && typeof row.payload === 'object') {
             const content = JSON.stringify(row.payload, null, 2);
@@ -663,7 +768,9 @@ async function initializeTrackingPersistence() {
             if (GITHUB_DATA_TOKEN && GITHUB_DATA_REPO) {
                 githubPersistenceReady = true;
                 console.log('💾 GitHub tracking backup enabled as a mirror for Supabase data.');
-                saveData();
+                // Wait for row hydration before mirroring: a compact bot_state
+                // has delivered=[] until the separate table is loaded.
+                if (!BOT_ROW_STORAGE_ENABLED) saveData();
             } else {
                 console.warn('💾 GitHub tracking mirror is not configured. Set GITHUB_DATA_TOKEN and GITHUB_DATA_REPO in Render Environment.');
             }
@@ -6640,6 +6747,7 @@ client.once('clientReady', async () => {
         getAllGuildConfigs,
         getGuildConfig,
         saveData,
+        onDeliveryRecord: persistReportedBattleRow,
         buildBattleReportPayload,
         formatFame,
         onServerAvailabilityChange: (serverId, active, details = {}) => {
@@ -7618,6 +7726,14 @@ process.on('unhandledRejection', err => console.error('❌ Unhandled rejection:'
 process.on('uncaughtException', err => console.error('❌ Uncaught exception:', err));
 
 console.log('🛡️ AUTO-BATTLE FIX V3 LOADED: Battle reports enabled');
+// Emergency GitHub snapshot is bounded to once per day unless configuration changes.
+// This timer does not modify Battleboard (30s) or Official Auto-Battle (60s) cadence.
+const dailyMirrorTimer = setInterval(() => {
+    if (githubPersistenceReady && githubMirrorPolicy.dueDaily()) {
+        saveData({ skipSupabase: true, forceGitHubSnapshot: true });
+    }
+}, 60 * 60 * 1000);
+dailyMirrorTimer.unref?.();
 
 // One bounded, unauthenticated discovery request plus one short WebSocket handshake test.
 // No bot token is sent to either diagnostic endpoint. This runs once per process start;
@@ -7628,6 +7744,8 @@ initializeTrackingPersistence()
         throw err;
     })
     .then(async () => {
+        await restoreReportedBattleRows();
+        if (BOT_ROW_STORAGE_ENABLED && reportedBattlesStoreReady) saveData();
         if (!BOT_TOKEN) {
             throw new Error('BOT_TOKEN is missing or empty. Set Render Environment variable BOT_TOKEN (Bot Token from Discord Developer Portal).');
         }

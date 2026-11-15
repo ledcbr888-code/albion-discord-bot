@@ -6,6 +6,9 @@ on:
       - 'index.js'
       - 'cta.js'
       - 'battleboard-integration.js'
+      - 'backup-traffic-policy.js'
+      - 'reported-battles-store.js'
+      - 'migrations/**'
       - 'test/**'
       - 'package.json'
       - 'package-lock.json'
@@ -17,6 +20,9 @@ on:
       - 'index.js'
       - 'cta.js'
       - 'battleboard-integration.js'
+      - 'backup-traffic-policy.js'
+      - 'reported-battles-store.js'
+      - 'migrations/**'
       - 'test/**'
       - 'package.json'
       - 'package-lock.json'
@@ -36,6 +42,9 @@ jobs:
         run: |
           node --check index.js
           node --check battleboard-integration.js
+          node --check backup-traffic-policy.js
+          node --check reported-battles-store.js
+          node --check test/backup-bandwidth.test.js
           node --check cta.js
           node --check test/battleboard-integration.test.js
           node --check test/cta.test.js
