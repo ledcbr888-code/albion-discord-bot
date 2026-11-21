@@ -1,0 +1,58 @@
+name: One-time AlbionZvZ Asia small-fight verification
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/zvz-small-fight-verification.yml'
+permissions:
+  contents: read
+jobs:
+  verify-small-fight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check one public Asia list and one recent small battle with no retries
+        run: |
+          node <<'NODE'
+          'use strict';
+          const {parseDetail}=require('./albionzvz-source');
+          const battleId='531162052', asia='asia';
+          async function oneRequest(label,url){
+            const r=await fetch(url,{redirect:'manual',signal:AbortSignal.timeout(7000),
+              headers:{Accept:'application/json','User-Agent':'BossBot-LowVolumeVerification/1.0'}});
+            console.log(label, 'HTTP='+r.status,'type='+r.headers.get('content-type'));
+            if([401,403,429].includes(r.status))throw Error(label+' access denied; do not retry');
+            if(r.status===404)return null;
+            if(!r.ok||!r.headers.get('content-type')?.includes('application/json'))
+              throw Error(label+' invalid response; do not retry');
+            return await r.json();
+          }
+          (async()=>{
+            const now=Date.now(),from=new Date(now-86400000).toISOString().slice(0,10),
+              to=new Date(now).toISOString().slice(0,10);
+            const listUrl=new URL('https://www.albionzvz.com/api/battles');
+            for(const [key,value] of Object.entries({server:asia,from,to,minMass:1,massMode:'total',offset:0,limit:2}))
+              listUrl.searchParams.set(key,String(value));
+            const list=await oneRequest('ZVZ_MINMASS_ONE_LIST',listUrl);
+            console.log('list valid',Array.isArray(list?.rows),'size',list?.rows?.length);
+            if(!Array.isArray(list?.rows))throw Error('Malformed source list');
+            const direct=new URL('https://www.albionzvz.com/api/dev/battle-board/battle');
+            direct.searchParams.set('battleId',battleId);direct.searchParams.set('server',asia);
+            const zvz=await oneRequest('ZVZ_DIRECT_SMALL_DETAIL',direct);
+            const official=await oneRequest('OFFICIAL_ASIA_SMALL_DETAIL',
+              'https://gameinfo-sgp.albiononline.com/api/gameinfo/battles/'+battleId);
+            console.log('official found',Boolean(official),'official players',
+              Object.keys(official?.players||{}).length,'official total fame',official?.totalFame);
+            if(!official||String(official.id)!==battleId)throw Error('Official detail unavailable');
+            if(zvz?.battle){
+              const b=zvz.battle;
+              const g=Object.values(b.players||{}).find(p=>p.guildId && p.guildName);
+              const parsed=g?parseDetail(zvz,battleId,null,g.guildName,Date.now(),g.guildId):null;
+              console.log('ZVZ_SMALL_PRESENT players',Object.keys(b.players||{}).length,
+                'normalized',Boolean(parsed),'fame',b.totalFame,'kills',b.totalKills);
+              if(!parsed)throw Error('Primary parser could not validate the provider small fight');
+            }else{
+              console.log('ZVZ_SMALL_NOT_INDEXED: expected Official fallback; no repeat requests');
+            }
+          })().catch(e=>{console.error('SMOKE_ERROR',e.message);process.exitCode=1;});
+          NODE
