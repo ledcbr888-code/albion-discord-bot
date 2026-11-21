@@ -20,6 +20,15 @@ const axios = require('axios');
 const { createAlbionZvZSource, formatEndDelay, battleLink: alternateBattleLink, SOURCE: zvzSourceName } = require('./albionzvz-source');
 const zvzSource = createAlbionZvZSource({ http: axios });
 const { backupTrackingFile } = require('./temporary-source-backup');
+function safeAutoBattleLink(matchId) {
+    // AlbionZvZ intentionally filters small fights; don't display a dead
+    // third-party link for IDs we have not confirmed in its Asia list.
+    const id = String(matchId || '').trim();
+    if (!/^\d{1,20}$/.test(id)) return id;
+    return zvzSource.enabled() && zvzSource.hasKnownBattle(id)
+        ? alternateBattleLink(id)
+        : '[' + id + '](https://albiononline.com/en/killboard/battles/' + id + ')';
+}
 // Only used by the existing fallback scanner, never by the primary Battleboard integration.
 async function fetchAutoBattlePreferredDetail(matchId, options) {
     try {
@@ -4038,7 +4047,7 @@ async function checkAutoBattlesForGuild() {
                         `⚔️ Kills: ${Number(result.totalKills).toLocaleString()}\n` +
                         `☠️ Deaths: ${Number(result.totalDeaths).toLocaleString()}\n` +
                         `➕ Kills + Deaths: ${(Number(result.totalKills) + Number(result.totalDeaths)).toLocaleString()}\n` +
-                        `🔗 Battle Link: ${alternateBattleLink(latestMatchId)}\n` +
+                        `🔗 Battle Link: ${safeAutoBattleLink(latestMatchId)}\n` +
                         formatEndDelay(officialBattle, Date.now());
                     const reportFiles = Array.isArray(result.payload.files) ? result.payload.files : [];
                     const totalDeliveryParts = Math.max(1, reportFiles.length);
