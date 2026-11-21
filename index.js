@@ -4134,7 +4134,10 @@ async function checkAutoBattlesForGuild() {
                         ' | detailFetch=' + (battleDetailFetchMs === null ? 'unknown' : battleDetailFetchMs + 'ms') +
                         ' | ส่งครบ=' + sentDeliveryParts + '/' + totalDeliveryParts +
                         ' | ข้อมูลรายงาน=' + detailSource +
-                        ' | ' + formatEndDelay(officialBattle, reportSentAtMs) + delayText + '.');
+                        ' | ' + formatEndDelay(officialBattle, reportSentAtMs) +
+                        (zvzSource.enabled()
+                            ? ' | AlbionZvZ HTTP Stats=' + JSON.stringify(zvzSource.getRequestMetrics())
+                            : '') + delayText + '.');
                 } else {
                     const decisionAt = Date.now();
                     const ageAtDecisionSec = Number.isFinite(battleTimeMs) && battleTimeMs > 0
