@@ -22,8 +22,13 @@ const zvzSource = createAlbionZvZSource({ http: axios });
 const { backupTrackingFile } = require('./temporary-source-backup');
 // Only used by the existing fallback scanner, never by the primary Battleboard integration.
 async function fetchAutoBattlePreferredDetail(matchId, options) {
-    const preferred = await zvzSource.getDetail(matchId, options.targetGuild, options.targetGuildId);
-    return preferred || await fetchOfficialBattle(matchId, options);
+    try {
+        const preferred = await zvzSource.getDetail(matchId, options.targetGuild, options.targetGuildId);
+        if (preferred) return preferred;
+    } catch (_) {
+        console.warn('⚠️ [AlbionZvZ] Detail ไม่พร้อม | Battle=' + String(matchId) + ' | ใช้ Official API สำรอง');
+    }
+    return await fetchOfficialBattle(matchId, options);
 }
 // Global safety net: every Axios request has a finite timeout unless a call sets a stricter one.
 axios.defaults.timeout = 20000;
@@ -3335,6 +3340,9 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
     // The original Battleboard primary still preempts this scanner on recovery.
     const preferredDiscovery = await zvzSource.discover(targetGuild, queueScopeKey, {
         processed: processedBattles, baselineOnly, guildId: targetGuildId
+    }).catch(() => {
+        console.warn('⚠️ [AlbionZvZ] Battle List ไม่พร้อม | ใช้ Official API สำรอง');
+        return { ids: [], useOfficial: true };
     });
     if (!preferredDiscovery.useOfficial && preferredDiscovery.ids.length) {
         console.log('✅ [Auto-Battle Source] AlbionZvZ Asia | พบ ' + preferredDiscovery.ids.length + ' Battle IDs');
