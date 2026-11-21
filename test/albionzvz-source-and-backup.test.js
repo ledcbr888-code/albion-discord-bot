@@ -261,6 +261,7 @@ test('429 Retry-After has priority over backoff and 403 makes all subsequent HTT
     await f.source.discover('Guild One','scope',{guildId});
     assert.equal(f.calls.length,1);
     assert.equal(f.source.getRequestMetrics().throttled,1);
+    assert.equal(f.source.getRequestMetrics().throttledRatePct,100);
     f.advance(15*60_000+1);
     await f.source.discover('Guild One','scope',{guildId});
     assert.equal(f.calls.length,2);
@@ -271,4 +272,5 @@ test('429 Retry-After has priority over backoff and 403 makes all subsequent HTT
     assert.equal(blocked.calls.length,1);
     assert.equal(blocked.source.getRequestMetrics().circuit,'denied');
     assert.equal(blocked.source.getRequestMetrics().forbidden,1);
+    assert.equal(blocked.source.getRequestMetrics().forbiddenRatePct,100);
 });
