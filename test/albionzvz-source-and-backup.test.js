@@ -442,4 +442,11 @@ test('PR50: detailed source logs exist for successful, skipped, and Event-only p
     assert.match(belowThreshold,/ข้อมูลรายงาน=/);
     assert.match(belowThreshold,/ผู้เล่นใน Battle Detail=/);
     assert.match(index,/result\.totalFame >= checkValue/);
+    const sourceLogPath = index.slice(index.indexOf('async function fetchAutoBattlePreferredDetail'),
+        index.indexOf('// Global safety net'));
+    assert.match(sourceLogPath,/getDetailPlayerCountForSourceLog\(preferred\)/);
+    assert.match(sourceLogPath,/getDetailPlayerCountForSourceLog\(fallback\)/);
+    assert.doesNotMatch(sourceLogPath,/getApiPlayers\(/,
+        'diagnostics must not invoke the full player/equipment converter');
+    assert.match(index,/officialBattle \? getDetailPlayerCountForSourceLog\(officialBattle\)/);
 });
