@@ -14,4 +14,6 @@ npm-debug.log*
 logs/
 # Build
 dist/
-build/ 
+build/
+# Private pre-switch tracking snapshot (never commit to public GitHub)
+.bossbot-backups/
