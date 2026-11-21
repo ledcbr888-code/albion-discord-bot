@@ -1,0 +1,130 @@
+'use strict';
+const test=require('node:test');
+const assert=require('node:assert/strict');
+const {createAlbionZvZSource,parseList,parseDetail,formatEndDelay,battleLink}=require('../albionzvz-source');
+const {backupTrackingFile,validateTracking}=require('../temporary-source-backup');
+
+const now=Date.parse('2026-11-21T07:00:00Z');
+const start=new Date(now-20*60_000).toISOString(),end=new Date(now-8*60_000-24_000).toISOString();
+const guildId='ABCDEFGHIJKLMNOPQRSTUV',otherId='QRSTUVWXYZABCDEFGHIJKL',id='531020000';
+function fixture(battleId=id){
+    const row={id:Number(battleId),startTime:start,endTime:end,guildNames:['Guild One','Guild Two'],
+        guildMasses:[{guildId,name:'Guild One'},{guildId:otherId,name:'Guild Two'}],
+        totalParticipants:10,mass:10,totalKills:2,totalFame:300000};
+    const players=Array.from({length:10},(_,i)=>({name:'Player '+i,
+        guildName:i<5?'Guild One':'Guild Two',guildId:i<5?guildId:otherId,
+        kills:i===0||i===5?1:0,deaths:i===1||i===6?1:0,killFame:i===0?200000:i===5?100000:0}));
+    const battle={id:Number(battleId),startTime:start,endTime:end,players,
+        guilds:{[guildId]:{id:guildId,name:'Guild One',kills:1,deaths:1,killFame:200000},
+            [otherId]:{id:otherId,name:'Guild Two',kills:1,deaths:1,killFame:100000}},alliances:{}};
+    return {row,body:{server:'asia',battle}};
+}
+function sourceFixture(handler,enabled=true){
+    let at=now,calls=[];
+    const source=createAlbionZvZSource({env:{ALBIONZVZ_PRIMARY_ENABLED:String(enabled)},now:()=>at,log:()=>{},
+        http:{get:async(url,options)=>{calls.push({url,options});return handler(url,options);}}});
+    return {source,calls,advance:ms=>{at+=ms;}};
+}
+test('disabled source and original startup baseline make no AlbionZvZ requests',async()=>{
+    const {source,calls}=sourceFixture(()=>{throw Error('Unexpected HTTP');},false);
+    assert.deepEqual(await source.discover('Guild One','server:guild'),{ids:[],useOfficial:true});
+    assert.equal(await source.getDetail(id,'Guild One',guildId),null);
+    const on=sourceFixture(()=>{throw Error('Unexpected HTTP');});
+    assert.deepEqual(await on.source.discover('Guild One','server:guild',{baselineOnly:true}),{ids:[],useOfficial:true});
+    assert.equal(calls.length,0);assert.equal(on.calls.length,0);
+});
+test('list and detail accept coherent Asia data, reject other regions, incomplete rows and conflicting guild IDs',()=>{
+    const {row,body}=fixture();
+    assert.equal(parseList({server:'asia',rows:[row]},now)[0].id,id);
+    assert.equal(parseList({server:'europe',rows:[row]},now),null);
+    assert.equal(parseList({rows:[{...row,guildNames:undefined}]},now),null);
+    const parsed=parseDetail(body,id,row,'Guild One',now,guildId);
+    assert.equal(parsed.players.length,10);
+    assert.equal(parsed.guilds[guildId].killFame,200000);
+    assert.equal(parseDetail(body,id,row,'Guild One',now,otherId),null);
+    assert.equal(parseDetail({...body,server:'americas'},id,row,'Guild One',now,guildId),null);
+    assert.equal(parseDetail(body,'999',row,'Guild One',now,guildId),null);
+    assert.equal(parseDetail({...body,battle:{...body.battle,players:body.battle.players.slice(1)}},id,row,'Guild One',now,guildId),null);
+    assert.equal(parseDetail(body,id,{...row,totalFame:1},'Guild One',now,guildId),null);
+    assert.equal(parseDetail({...body,battle:{...body.battle,endTime:start}},id,row,'Guild One',now,guildId),null);
+});
+test('global list shared between trackers, exact guild IDs, fallback on no match, periodic Official reconciliation',async()=>{
+    const {row}=fixture();const f=sourceFixture(()=>({data:{server:'asia',rows:[row]}}));
+    const opts={guildId,processed:new Set()};
+    assert.deepEqual(await f.source.discover('Guild One','first',opts),{ids:[id],useOfficial:true});
+    f.source.noteOfficial('first');
+    assert.deepEqual(await f.source.discover('Guild One','first',opts),{ids:[id],useOfficial:false});
+    assert.deepEqual(await f.source.discover('Guild One','wrong',{guildId:otherId}),{ids:[],useOfficial:true});
+    assert.deepEqual(await f.source.discover('Guild One','first',{guildId,processed:new Set([id])}),{ids:[id],useOfficial:true});
+    assert.equal(f.calls.length,1);
+    assert.equal(f.calls[0].options.params.server,'asia');
+    assert.equal(f.calls[0].options.params.limit,25);
+    f.advance(300001);
+    assert.equal((await f.source.discover('Guild One','first',opts)).useOfficial,true);
+});
+test('primary detail cache preserves identity; 3 uncached details per minute, missing data returns null',async()=>{
+    const ids=[id,'531020001','531020002','531020003'];
+    const fixtures=ids.map(fixture);
+    const f=sourceFixture((url,options)=>({data:url.endsWith('/api/battles')?{rows:fixtures.map(x=>x.row)}
+        :fixtures.find(x=>String(x.row.id)===options.params.battleId).body}));
+    await f.source.discover('Guild One','s',{guildId});
+    const data=await f.source.getDetail(id,'Guild One',guildId);
+    assert.ok(f.source.isPrimaryData(data));assert.ok(f.source.isPrimaryData(await f.source.getDetail(id,'Guild One',guildId)));
+    assert.equal(f.calls.length,2);
+    assert.equal(await f.source.getDetail(id,'Guild One',otherId),null);
+    await f.source.getDetail(ids[1],'Guild One',guildId);await f.source.getDetail(ids[2],'Guild One',guildId);
+    assert.equal(await f.source.getDetail(ids[3],'Guild One',guildId),null);
+    assert.equal(f.calls.length,4);
+});
+test('403 stops future AlbionZvZ calls for this process; 429 respects Retry-After and falls back',async()=>{
+    for(const status of [403,429]){
+        const f=sourceFixture(()=>{throw {response:{status,headers:{'retry-after':'900'}}};});
+        assert.equal((await f.source.discover('Guild One','s',{guildId})).useOfficial,true);
+        f.advance(600000);await f.source.discover('Guild One','s',{guildId});assert.equal(f.calls.length,1);
+        f.advance(300001);await f.source.discover('Guild One','s',{guildId});assert.equal(f.calls.length,status===403?1:2);
+    }
+});
+test('invalid third-party detail is rejected, not treated as a valid zero-fame report',async()=>{
+    const {row,body}=fixture();
+    const f=sourceFixture(url=>({data:url.endsWith('/api/battles')?{rows:[row]}:{...body,battle:{...body.battle,players:[]}}}));
+    await f.source.discover('Guild One','s',{guildId});
+    assert.equal(await f.source.getDetail(id,'Guild One',guildId),null);
+});
+test('end-to-send delay uses actual end time, never substitutes start or future time',()=>{
+    assert.equal(formatEndDelay({startTime:start,endTime:end},now),'⏱️ Delay (Battle จบ → ส่งรายงาน): 8 นาที 24 วินาที');
+    assert.match(formatEndDelay({startTime:start},now),/ไม่มีข้อมูลเวลาจบ/);
+    assert.match(formatEndDelay({startTime:end,endTime:start},now),/ไม่มีข้อมูลเวลาจบ/);
+    assert.match(formatEndDelay({endTime:now+1000},now),/ไม่มีข้อมูลเวลาจบ/);
+    assert.match(battleLink(id),/\?server=asia\)$/);
+});
+function fakeIO(){
+    const files=new Map([['/data/tracking.json',JSON.stringify({version:3,guilds:{one:{processedBattles:['123']}}})]]);
+    const io={readFileSync:p=>{if(!files.has(p))throw Error('missing');return files.get(p);},
+        mkdirSync:()=>{},lstatSync:()=>({isFile:()=>true}),existsSync:p=>files.has(p),
+        writeFileSync:(p,data,opts)=>{assert.equal(opts.mode,0o600);assert.equal(opts.flag,'wx');if(files.has(p))throw Error('exists');files.set(p,data);},
+        linkSync:(src,dst)=>{if(files.has(dst))throw Object.assign(Error('exists'),{code:'EEXIST'});files.set(dst,files.get(src));},
+        unlinkSync:p=>files.delete(p)};
+    const paths={dirname:p=>p.slice(0,p.lastIndexOf('/')),join:(...parts)=>parts.join('/')};
+    return {files,io,paths};
+}
+test('pre-switch backup is private, once-only, never overwrites or modifies live tracking',()=>{
+    const f=fakeIO(),opts={io:f.io,paths:f.paths,uuid:()=>'test'};
+    const first=backupTrackingFile('/data/tracking.json',opts);
+    assert.equal(first.created,true);
+    const old=f.files.get(first.path);
+    f.files.set('/data/tracking.json',JSON.stringify({version:3,guilds:{one:{processedBattles:['123','456']}}}));
+    assert.equal(backupTrackingFile('/data/tracking.json',opts).created,false);
+    assert.equal(f.files.get(first.path),old);
+    assert.deepEqual(validateTracking(f.files.get('/data/tracking.json')).guilds.one.processedBattles,['123','456']);
+    assert.equal([...f.files.keys()].filter(p=>p.endsWith('.tmp')).length,0);
+});
+test('invalid source or corrupt prior backup fails safely without replacing data',()=>{
+    const f=fakeIO(),opts={io:f.io,paths:f.paths,uuid:()=>'test'};
+    const first=backupTrackingFile('/data/tracking.json',opts);
+    f.files.set(first.path,'broken');
+    assert.throws(()=>backupTrackingFile('/data/tracking.json',opts));
+    assert.equal(f.files.get(first.path),'broken');
+    f.files.set('/data/tracking.json','{"version":2}');
+    assert.throws(()=>backupTrackingFile('/data/tracking.json',opts));
+    assert.equal(f.files.get('/data/tracking.json'),'{"version":2}');
+});
