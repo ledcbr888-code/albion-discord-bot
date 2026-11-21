@@ -257,7 +257,12 @@ function createAlbionZvZSource({
                 if(rows===null)throw Error('List schema incomplete');
                 markHealthy();
                 list=rows;listExpires=now()+60_000;
-                for(const row of rows)knownRows.set(row.id,row);
+                for(const row of rows){
+                    // Refresh insertion order so the bounded cache holds the most
+                    // recently observed IDs, not just the first 100 ever observed.
+                    knownRows.delete(row.id);
+                    knownRows.set(row.id,row);
+                }
                 while(knownRows.size>100)knownRows.delete(knownRows.keys().next().value);
                 return rows;
             }catch(e){block(e);list=null;return null;}
@@ -268,7 +273,17 @@ function createAlbionZvZSource({
     async function discover(guild,scope,{processed=new Set(),baselineOnly=false,guildId=''}={}){
         if(!enabled()||baselineOnly)return {ids:[],useOfficial:true};
         const rows=await getList();
-        const ids=rows===null?[]:rows.filter(r=>r.guildNames.some(g=>norm(g)===norm(guild)) &&
+        // Reuse the already-fetched recent List rows for a moving coverage
+        // window (max 100 IDs). No extra pages, requests, or shorter polling.
+        // Do not report from stale list cache when the current List is unavailable.
+        const recentRows=rows===null?[]:[...knownRows.values()].reverse().filter(r=>{
+            const end=timeMs(r.endTime);
+            return end!==null && now()-end<=30*60_000;
+        });
+        // Keep every current page row eligible, even if the fight ended over
+        // 30 minutes ago; the existing scanner still applies its age policy.
+        const candidates=rows===null?[]:[...new Map([...recentRows,...rows].map(r=>[r.id,r])).values()];
+        const ids=candidates.filter(r=>r.guildNames.some(g=>norm(g)===norm(guild)) &&
             (!guildId || (Array.isArray(r.guildMasses)&&r.guildMasses.some(g=>String(g?.guildId||'')===String(guildId)&&norm(g?.name)===norm(guild))))).map(r=>r.id);
         // Public board is capped at 25/10-player fights. Preserve periodic
         // reconciliation even with a healthy source and fallback on no new match.
@@ -342,7 +357,15 @@ function createAlbionZvZSource({
         const pending=await task;
         return parseResult(pending.body,'PRIMARY_HTTP_200',pending.body?'INVALID_DETAIL':pending.reason);
     }
-    return {enabled,discover,noteOfficial,getDetail,getRequestMetrics:statusInfo,
-        hasKnownBattle:id=>knownRows.has(String(id)),isPrimaryData:b=>Boolean(b&&sourceObjects.has(b))};
+    function isPrimaryData(b){return Boolean(b&&sourceObjects.has(b));}
+    function reportLink(id,detail){
+        id=String(id||'').trim();
+        if(!validId(id))return id;
+        return isPrimaryData(detail)&&idOf(detail)===id
+            ? battleLink(id)
+            : '['+id+'](https://albiononline.com/en/killboard/battles/'+id+')';
+    }
+    return {enabled,discover,noteOfficial,getDetail,getRequestMetrics:statusInfo,reportLink,
+        hasKnownBattle:id=>knownRows.has(String(id)),isPrimaryData};
 }
 module.exports={createAlbionZvZSource,parseList,parseDetail,formatEndDelay,battleLink,SOURCE};
