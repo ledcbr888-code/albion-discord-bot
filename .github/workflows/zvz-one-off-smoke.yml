@@ -74,6 +74,28 @@ jobs:
             if (String(official.id) !== id) throw Error('Official returned a different ID');
             const g = row.guildMasses?.find(x => x?.guildId && x?.name);
             if (!g) throw Error('List lacks a verifiable guild identity');
+            const sums = records => ({
+              kills:records.reduce((total,p)=>total+Number(p.kills??0),0),
+              fame:records.reduce((total,p)=>total+Number(p.killFame??0),0),
+              deaths:records.reduce((total,p)=>total+Number(p.deaths??0),0)
+            });
+            const allGuildMasses = row.guildMasses||[];
+            const membershipCounts = allGuildMasses.map(g=>{
+              const matching = players.filter(p=>String(p.guildId??'')===String(g.guildId??''));
+              const stats=sums(matching);
+              return {size:matching.length,mass:g.mass,kills:g.kills,deaths:g.deaths,
+                fame:stats.fame,matchesName:matching.every(p=>p.guildName===g.name)};
+            });
+            const officialMap = new Map(oplayers.map(p=>[String(p.name).toLowerCase(),p]));
+            const mismatchPlayers = players.filter(p=>{
+              const o=officialMap.get(String(p.name).toLowerCase());
+              return !o||String(o.guildId)!==String(p.guildId)||Number(o.kills??0)!==Number(p.kills??0)||
+                Number(o.deaths??0)!==Number(p.deaths??0)||Number(o.killFame??0)!==Number(p.killFame??0);
+            }).length;
+            console.log('AUDIT_SUMMARY playerStatsZvZ',JSON.stringify(sums(players)),
+              'playerStatsOfficial',JSON.stringify(sums(oplayers)),
+              'playerDifferentFromOfficial',mismatchPlayers,
+              'guildMassValidation',JSON.stringify(membershipCounts));
             const normalized = parseDetail(detail,id,row,g.name,Date.now(),g.guildId);
             console.log('PRIMARY_ADAPTER_VALIDATED',Boolean(normalized),
               'Recognized guild:',g.name,'Guilds in adapter:',normalized?Object.keys(normalized.guilds).length:0,
