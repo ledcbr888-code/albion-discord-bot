@@ -140,13 +140,18 @@ function createAlbionZvZSource({
     let requestLane=Promise.resolve(),lastRequestAt=null,failStreak=0;
     const metrics={requests:0,listRequests:0,detailRequests:0,
         listCacheHits:0,detailCacheHits:0,waitMs:0,
-        forbidden:0,throttled:0,transientErrors:0,lastHttpStatus:null};
+        forbidden:0,throttled:0,transientErrors:0,challengePages:0,lastHttpStatus:null};
     const statusInfo=()=>({ ...metrics,
         forbiddenRatePct:metrics.requests?Number((100*metrics.forbidden/metrics.requests).toFixed(2)):0,
         throttledRatePct:metrics.requests?Number((100*metrics.throttled/metrics.requests).toFixed(2)):0,
         accessDenied,backoffUntil:blockedUntil,
         circuit:accessDenied?'denied':now()<blockedUntil?'cooldown':'ready' });
     function markHealthy(){failStreak=0;metrics.lastHttpStatus=200;}
+    function isUnexpectedHtmlResponse(response){
+        const type=String(response?.headers?.['content-type']||'').toLowerCase();
+        return type.includes('text/html')||type.includes('application/xhtml')||
+            (typeof response?.data==='string' && /^\\s*(?:<!doctype\\s+html|<html[\\s>])/i.test(response.data));
+    }
     async function guardedGet(url,params,kind){
         const previous=requestLane;
         let release;
@@ -162,9 +167,19 @@ function createAlbionZvZSource({
             lastRequestAt=now();
             metrics.requests++;
             if(kind==='list')metrics.listRequests++;else metrics.detailRequests++;
-            return await http.get(url,{timeout:5000,maxRedirects:0,
+            const response=await http.get(url,{timeout:5000,maxRedirects:0,
                 headers:{Accept:'application/json','User-Agent':'BossBot-AlbionZvZ/1.0'},
                 params});
+            if(isUnexpectedHtmlResponse(response)){
+                // JSON endpoints must not silently become browser challenge
+                // pages. Do not retry a challenge or attempt to solve it.
+                accessDenied=true;
+                metrics.challengePages=(metrics.challengePages||0)+1;
+                metrics.lastHttpStatus=Number(response?.status)||200;
+                log('🛑 [AlbionZvZ] API ตอบ HTML แทน JSON อาจเป็นหน้า Challenge | หยุดเรียกเว็บไซต์และใช้ Official API');
+                return null;
+            }
+            return response;
         }finally{release();}
     }
     function block(error){
