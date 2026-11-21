@@ -77,8 +77,16 @@ function parseDetail(body,id,listRow,targetGuild,now=Date.now(),targetGuildId=''
         if(Boolean(norm(rawGuild))!==Boolean(guildId))return null;
         names.add(norm(name));normalizedPlayers.push({...p,name,guildName:rawGuild,guildId,...st});
     }
-    if(normalizedPlayers.reduce((s,p)=>s+p.kills,0)!==expectedKills||
-       normalizedPlayers.reduce((s,p)=>s+p.killFame,0)!==expectedFame)return null;
+    // Albion GameInfo can expose a tiny source-level totalFame vs
+    // per-player killFame discrepancy (observed +8 on both AlbionZvZ
+    // and Official for the *same* Asia fight). Preserve each player's
+    // exact Fame; never manufacture or redistribute the difference.
+    // Strictly reject material inconsistencies instead of assuming a
+    // missing player's Fame is zero.
+    const playerKills=normalizedPlayers.reduce((s,p)=>s+p.kills,0);
+    const playerFame=normalizedPlayers.reduce((s,p)=>s+p.killFame,0);
+    const fameVarianceCap=Math.max(10,Math.min(100,Math.floor(expectedFame*0.00005)));
+    if(playerKills!==expectedKills||Math.abs(playerFame-expectedFame)>fameVarianceCap)return null;
     const normalizedGuilds=Object.create(null),normalizedAlliances=Object.create(null);
     const seenGuildNames=new Set();
     let targetVerified=false;
