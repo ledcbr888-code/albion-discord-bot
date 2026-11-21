@@ -103,6 +103,8 @@ function parseDetail(body,id,listRow,targetGuild,now=Date.now(),targetGuildId=''
         const deaths=members.reduce((s,p)=>s+p.deaths,0);
         const killFame=members.reduce((s,p)=>s+p.killFame,0);
         if(kills!==expectedGuildKills)return null;
+        const expectedGuildDeaths=record.deaths===null||record.deaths===undefined?null:integer(record.deaths);
+        if(expectedGuildDeaths!==null&&expectedGuildDeaths!==deaths)return null;
         const allianceId=String(record.allianceId??'').trim();
         const allianceName=String(record.allianceName??'').trim();
         if(allianceName&&!allianceId)return null;
