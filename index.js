@@ -31,13 +31,34 @@ function safeAutoBattleLink(matchId) {
 }
 // Only used by the existing fallback scanner, never by the primary Battleboard integration.
 async function fetchAutoBattlePreferredDetail(matchId, options) {
+    // Observe the actual Detail decision once per attempted Battle, including
+    // prefetch and Fame-below-threshold cases. Do not change fallback semantics.
+    const diagnostic = { reason: 'UNKNOWN' };
+    const label = ' | Battle=' + String(matchId) +
+        ' | Guild=' + String(options.targetGuild || options.targetGuildId || 'unknown').replace(/[\r\n|]/g, ' ').slice(0,80);
     try {
-        const preferred = await zvzSource.getDetail(matchId, options.targetGuild, options.targetGuildId);
-        if (preferred) return preferred;
+        const preferred = await zvzSource.getDetail(matchId, options.targetGuild, options.targetGuildId, diagnostic);
+        if (preferred) {
+            console.log('ℹ️ [Auto-Battle Detail Source]' + label +
+                ' | Source=AlbionZvZ Asia | PrimaryReason=' + diagnostic.reason +
+                ' | Players=' + getApiPlayers(preferred).length + ' | Result=PRIMARY_OK');
+            return preferred;
+        }
     } catch (_) {
+        diagnostic.reason = 'PRIMARY_EXCEPTION';
         console.warn('⚠️ [AlbionZvZ] Detail ไม่พร้อม | Battle=' + String(matchId) + ' | ใช้ Official API สำรอง');
     }
-    return await fetchOfficialBattle(matchId, options);
+    let fallback;
+    try {
+        fallback = await fetchOfficialBattle(matchId, options);
+        return fallback;
+    } finally {
+        console.log('ℹ️ [Auto-Battle Detail Source]' + label +
+            ' | Source=' + (fallback ? 'Official Albion API Asia' : 'NONE') +
+            ' | PrimaryReason=' + diagnostic.reason +
+            ' | Players=' + (fallback ? getApiPlayers(fallback).length : 'unknown') +
+            ' | Result=' + (fallback ? 'FALLBACK_OK' : 'FALLBACK_UNAVAILABLE'));
+    }
 }
 // Global safety net: every Axios request has a finite timeout unless a call sets a stricter one.
 axios.defaults.timeout = 20000;
@@ -3939,6 +3960,11 @@ async function checkAutoBattlesForGuild() {
                         const eventCandidateStartedAt = Date.now();
                         // Events-only IDs may still have a valid canonical Battle Detail. Try that first.
                         officialBattle = await fetchOfficialBattle(detailKey, { autoBattle: true, targetGuild: config.targetGuild, eventOnly: true });
+                        console.log('ℹ️ [Auto-Battle Detail Source] Battle=' + detailKey +
+                            ' | Source=' + (officialBattle ? 'Official Albion API Asia' : 'NONE') +
+                            ' | PrimaryReason=EVENT_ONLY_OFFICIAL_PROBE' +
+                            ' | Players=' + (officialBattle ? getApiPlayers(officialBattle).length : 'unknown') +
+                            ' | Result=' + (officialBattle ? 'FALLBACK_OK' : 'FALLBACK_UNAVAILABLE'));
                         if (officialBattle) {
                             detectionSource += ' + Official Battle Detail from Events hint';
                         }
@@ -4148,7 +4174,8 @@ async function checkAutoBattlesForGuild() {
                         ' | ผลลัพธ์=เฟมต่ำกว่าเกณฑ์' +
                         ' | Fame=' + formatFame(result.totalFame) +
                         ' | เกณฑ์=' + formatFame(checkValue) +
-                        ' | ผู้เล่นใน Official Detail=' + officialPlayerCountForLog +
+                        ' | ข้อมูลรายงาน=' + detailSource +
+                        ' | ผู้เล่นใน Battle Detail=' + officialPlayerCountForLog +
                         ' | ผู้เล่นที่ติดตาม=' + autoTrackedPlayers.length +
                         ' | กิลด์ที่ติดตาม=' + autoTrackedGuilds.length +
                         ' | แถวตรงเงื่อนไข=' + (Array.isArray(result.playerReportData) ? result.playerReportData.length : 0) +
