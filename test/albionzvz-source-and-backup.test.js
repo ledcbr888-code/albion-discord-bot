@@ -69,6 +69,8 @@ test('primary detail cache preserves identity; 3 uncached details per minute, mi
     const f=sourceFixture((url,options)=>({data:url.endsWith('/api/battles')?{rows:fixtures.map(x=>x.row)}
         :fixtures.find(x=>String(x.row.id)===options.params.battleId).body}));
     await f.source.discover('Guild One','s',{guildId});
+    assert.equal(f.source.hasKnownBattle(id),true);
+    assert.equal(f.source.hasKnownBattle('999999999'),false);
     const data=await f.source.getDetail(id,'Guild One',guildId);
     assert.ok(f.source.isPrimaryData(data));assert.ok(f.source.isPrimaryData(await f.source.getDetail(id,'Guild One',guildId)));
     assert.equal(f.calls.length,2);
