@@ -48,18 +48,20 @@ function parseList(body,now=Date.now()){
     }
     return result;
 }
-function parseDetail(body,id,listRow,targetGuild,now=Date.now()){
+function parseDetail(body,id,listRow,targetGuild,now=Date.now(),targetGuildId=''){
     // Require an actual Asia envelope and a complete, self-consistent roster.
     // Never turn absent statistics into zero or infer faction/guild membership.
     if(!body||body.server!=='asia'||!body.battle||idOf(body.battle)!==String(id))return null;
     const b=body.battle;
     const start=timeMs(b.startTime ?? b.StartTime),end=timeMs(b.endTime ?? b.EndTime);
-    if(start===null||end===null||end<start||end>now)return null;
+    if(start===null||end===null||end<start||end>now||now-end>24*60*60_000)return null;
+    if(timeMs(listRow?.endTime)!==end)return null;
     const expected=integer(field(listRow,['totalParticipants','mass']));
     const expectedKills=integer(field(listRow,['totalKills']));
     const expectedFame=integer(field(listRow,['totalFame']));
     if(expected===null||expected<10||expectedKills===null||expectedFame===null)return null;
     const players=values(b.players),guilds=values(b.guilds);
+    const guildEntries=Array.isArray(b.guilds)?b.guilds.map((g,i)=>[String(i),g]):Object.entries(b.guilds||{});
     if(players.length!==expected||!guilds.length)return null;
     const names=new Set(),normalizedPlayers=[];
     for(const p of players){
@@ -72,19 +74,23 @@ function parseDetail(body,id,listRow,targetGuild,now=Date.now()){
         names.add(norm(name));normalizedPlayers.push({...p,name,guildName:rawGuild,...st});
     }
     const guildNames=new Set();
-    const normalizedGuilds={};
-    for(const [i,g] of guilds.entries()){
+    const normalizedGuilds=Object.create(null);
+    let targetIdVerified=!targetGuildId;
+    for(const [key,g] of guildEntries){
         const name=field(g,['name','Name','guildName','GuildName']),st=stats(g);
         if(!norm(name)||guildNames.has(norm(name))||!st)return null;
-        guildNames.add(norm(name));normalizedGuilds[String(g.id??g.Id??i)]={...g,name,...st};
+        const gid=String(g.id??g.Id??g.guildId??key);
+        if(Object.hasOwn(normalizedGuilds,gid))return null;
+        if(norm(name)===norm(targetGuild)&&gid===String(targetGuildId))targetIdVerified=true;
+        guildNames.add(norm(name));normalizedGuilds[gid]={...g,id:gid,name,...st};
     }
-    if(!guildNames.has(norm(targetGuild))||normalizedPlayers.some(p=>norm(p.guildName)&&!guildNames.has(norm(p.guildName))))return null;
+    if(!targetIdVerified||!guildNames.has(norm(targetGuild))||normalizedPlayers.some(p=>norm(p.guildName)&&!guildNames.has(norm(p.guildName))))return null;
     if(normalizedPlayers.reduce((s,p)=>s+p.kills,0)!==expectedKills||
        normalizedPlayers.reduce((s,p)=>s+p.killFame,0)!==expectedFame)return null;
     for(const g of Object.values(normalizedGuilds)){
         const members=normalizedPlayers.filter(p=>norm(p.guildName)===norm(g.name));
         if(!members.length||['kills','deaths','killFame'].some(k=>members.reduce((s,p)=>s+p[k],0)!==g[k]))return null;
-        if(g.allianceId&&!b.alliances)return null;
+        if(g.allianceId&&!values(b.alliances).some(a=>String(a?.id??a?.Id??'')===String(g.allianceId))&&!b.alliances?.[g.allianceId])return null;
     }
     return {...b,id:String(id),startTime:new Date(start).toISOString(),endTime:new Date(end).toISOString(),
         players:normalizedPlayers,guilds:normalizedGuilds,totalKills:expectedKills,totalFame:expectedFame};
@@ -92,7 +98,7 @@ function parseDetail(body,id,listRow,targetGuild,now=Date.now()){
 
 function createAlbionZvZSource({http,env=process.env,now=Date.now,log=console.warn}={}){
     const enabled=()=>String(env.ALBIONZVZ_PRIMARY_ENABLED||'').toLowerCase()==='true';
-    let blockedUntil=0, listExpires=0,list=null,listFlight=null,detailWindow=0,detailCount=0;
+    let blockedUntil=0, accessDenied=false, listExpires=0,list=null,listFlight=null,detailWindow=0,detailCount=0;
     const details=new Map(),detailFlights=new Map(),knownRows=new Map(),lastOfficial=new Map();
     const sourceObjects=new WeakSet();
     function block(error){
@@ -101,12 +107,13 @@ function createAlbionZvZSource({http,env=process.env,now=Date.now,log=console.wa
         const retrySeconds=raw!=null&&/^\d+$/.test(String(raw))?Number(raw):null;
         const retryDate=retrySeconds===null?timeMs(raw):null;
         const retryMs=retrySeconds!==null?retrySeconds*1000:retryDate!==null?Math.max(0,retryDate-now()):0;
-        const delay=status===403||status===401?30*60_000:status===429?10*60_000:60_000;
+        if(status===403||status===401)accessDenied=true;
+        const delay=status===429?10*60_000:60_000;
         blockedUntil=Math.max(blockedUntil,now()+Math.max(delay,retryMs));
-        log('⚠️ [AlbionZvZ] ใช้ Official API สำรอง | HTTP='+ (status||'unavailable')+' | พักจน '+new Date(blockedUntil).toISOString());
+        log('⚠️ [AlbionZvZ] ใช้ Official API สำรอง | HTTP='+ (status||'unavailable')+(accessDenied?' | หยุดเรียก AlbionZvZ จนกว่าผู้ดูแลตรวจสอบสิทธิ์':' | พักจน '+new Date(blockedUntil).toISOString()));
     }
     async function getList(){
-        if(!enabled()||now()<blockedUntil)return null;
+        if(!enabled()||accessDenied||now()<blockedUntil)return null;
         if(listExpires>now())return list;
         if(listFlight)return listFlight;
         listFlight=(async()=>{
@@ -127,26 +134,27 @@ function createAlbionZvZSource({http,env=process.env,now=Date.now,log=console.wa
         })();
         return listFlight;
     }
-    async function discover(guild,scope,{processed=new Set(),baselineOnly=false}={}){
+    async function discover(guild,scope,{processed=new Set(),baselineOnly=false,guildId=''}={}){
         if(!enabled()||baselineOnly)return {ids:[],useOfficial:true};
         const rows=await getList();
-        const ids=rows===null?[]:rows.filter(r=>r.guildNames.some(g=>norm(g)===norm(guild))).map(r=>r.id);
+        const ids=rows===null?[]:rows.filter(r=>r.guildNames.some(g=>norm(g)===norm(guild)) &&
+            (!guildId || (Array.isArray(r.guildMasses)&&r.guildMasses.some(g=>String(g?.guildId||'')===String(guildId)&&norm(g?.name)===norm(guild))))).map(r=>r.id);
         // Public board is capped at 25/10-player fights. Preserve periodic
         // reconciliation even with a healthy source and fallback on no new match.
         const due=now()-(lastOfficial.get(scope)??-Infinity)>=5*60_000;
         return {ids:[...new Set(ids)],useOfficial:rows===null||!ids.some(id=>!processed.has(id))||due};
     }
     function noteOfficial(scope){lastOfficial.set(scope,now());while(lastOfficial.size>512)lastOfficial.delete(lastOfficial.keys().next().value);}
-    async function getDetail(id,guild){
+    async function getDetail(id,guild,guildId=''){
         id=String(id);
-        if(!enabled()||now()<blockedUntil||!validId(id)||!knownRows.has(id))return null;
+        if(!enabled()||accessDenied||now()<blockedUntil||!validId(id)||!knownRows.has(id))return null;
         const row=knownRows.get(id);
         const hit=details.get(id);
         if(hit&&hit.expiresAt>now()){
-            const data=parseDetail(hit.body,id,row,guild,now());if(data)sourceObjects.add(data);return data;
+            const data=parseDetail(hit.body,id,row,guild,now(),guildId);if(data)sourceObjects.add(data);return data;
         }
         if(detailFlights.has(id))return detailFlights.get(id).then(body=>{
-            const data=parseDetail(body,id,row,guild,now());if(data)sourceObjects.add(data);return data;
+            const data=parseDetail(body,id,row,guild,now(),guildId);if(data)sourceObjects.add(data);return data;
         });
         if(now()-detailWindow>=60_000){detailWindow=now();detailCount=0;}
         if(detailCount>=3)return null;
@@ -162,7 +170,7 @@ function createAlbionZvZSource({http,env=process.env,now=Date.now,log=console.wa
             }catch(e){block(e);return null;}finally{detailFlights.delete(id);}
         })();
         detailFlights.set(id,task);
-        const data=parseDetail(await task,id,row,guild,now());
+        const data=parseDetail(await task,id,row,guild,now(),guildId);
         if(data)sourceObjects.add(data);
         return data;
     }
