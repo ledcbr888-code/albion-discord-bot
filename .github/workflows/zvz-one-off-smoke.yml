@@ -11,10 +11,12 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 2
     steps:
+      - uses: actions/checkout@v4
       - name: Probe one Asia list, one matching detail, one Official detail
         run: |
           node <<'NODE'
           'use strict';
+          const {parseDetail} = require('./albionzvz-source');
           const now = Date.now();
           const to = new Date(now).toISOString().slice(0, 10);
           const from = new Date(now - 86400000).toISOString().slice(0, 10);
@@ -67,7 +69,18 @@ jobs:
               'Start:',battle.startTime,'Official:',official.startTime,
               'End:',battle.endTime,'Official:',official.endTime);
             console.log('Sample player keys:',players.length?Object.keys(players[0]).sort().join(','):'none',
-              'Sample guild keys:',guilds.length?Object.keys(guilds[0]).sort().join(','):'none');
+              'Sample guild keys:',guilds.length?Object.keys(guilds[0]).sort().join(','):'none',
+              'Sample guildMass fields:',row.guildMasses?.[0]?Object.keys(row.guildMasses[0]).sort().join(','):'none');
             if (String(official.id) !== id) throw Error('Official returned a different ID');
+            const g = row.guildMasses?.find(x => x?.guildId && x?.name);
+            if (!g) throw Error('List lacks a verifiable guild identity');
+            const normalized = parseDetail(detail,id,row,g.name,Date.now(),g.guildId);
+            console.log('PRIMARY_ADAPTER_VALIDATED',Boolean(normalized),
+              'Recognized guild:',g.name,'Guilds in adapter:',normalized?Object.keys(normalized.guilds).length:0,
+              'Guilds in Official:',oguilds.length,
+              'Sum player fame:',players.reduce((s,p)=>s+Number(p.killFame??0),0),
+              'Sum player kills:',players.reduce((s,p)=>s+Number(p.kills??0),0),
+              'Mass count:',row.guildMasses?.reduce((s,g)=>s+Number(g.mass??0),0));
+            if (!normalized) throw Error('Adapter rejects actual AlbionZvZ battle detail - do NOT deploy');
           })().catch(err => { console.error('ONE_TIME_SMOKE_RESULT:',err.message);process.exitCode=1;});
           NODE
