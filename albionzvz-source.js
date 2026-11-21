@@ -204,6 +204,6 @@ function createAlbionZvZSource({http,env=process.env,now=Date.now,log=console.wa
         if(data)sourceObjects.add(data);
         return data;
     }
-    return {enabled,discover,noteOfficial,getDetail,isPrimaryData:b=>Boolean(b&&sourceObjects.has(b))};
+    return {enabled,discover,noteOfficial,getDetail,hasKnownBattle:id=>knownRows.has(String(id)),isPrimaryData:b=>Boolean(b&&sourceObjects.has(b))};
 }
 module.exports={createAlbionZvZSource,parseList,parseDetail,formatEndDelay,battleLink,SOURCE};
