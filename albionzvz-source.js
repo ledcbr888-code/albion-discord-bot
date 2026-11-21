@@ -48,23 +48,49 @@ function parseList(body,now=Date.now()){
     }
     return result;
 }
+
+/**
+ * Some provider Battle Details contain player rows but no guild summary.
+ * Build guild totals only from explicitly matched player Guild IDs/names.
+ * No synthetic players, no inferred guild membership or Fame.
+ */
+function deriveGuildMassesFromPlayers(players){
+    const groups=new Map();
+    for(const p of players){
+        if(!p.guildId)continue;
+        const allianceId=String(p.allianceId??'').trim();
+        const allianceName=String(p.allianceName??'').trim();
+        if(allianceName&&!allianceId)return null;
+        const key=p.guildId;
+        let g=groups.get(key);
+        if(!g){
+            g={guildId:key,name:p.guildName,mass:0,kills:0,deaths:0,allianceId,allianceName};
+            groups.set(key,g);
+        }else if(norm(g.name)!==norm(p.guildName)||g.allianceId!==allianceId||
+                 norm(g.allianceName)!==norm(allianceName))return null;
+        g.mass++;g.kills+=p.kills;g.deaths+=p.deaths;
+    }
+    return [...groups.values()];
+}
+
 function parseDetail(body,id,listRow,targetGuild,now=Date.now(),targetGuildId=''){
-    // Live AlbionZvZ response (Nov 21) has battle.players but *no*
-    // battle.guilds/alliances. Reconstruct a verified guild summary using
-    // exact guild IDs and names from that same List row, not guesses.
+    // The provider's public List may omit small fights. For Battle IDs
+    // already discovered by Official Battle List, first try AlbionZvZ Detail
+    // even without a list row; validate every returned player and guild ID.
     if(!body||body.server!=='asia'||!body.battle||idOf(body.battle)!==String(id))return null;
     const b=body.battle;
     const start=timeMs(b.startTime ?? b.StartTime),end=timeMs(b.endTime ?? b.EndTime);
     if(start===null||end===null||end<start||end>now||now-end>24*60*60_000)return null;
-    if(timeMs(listRow?.startTime)!==start||timeMs(listRow?.endTime)!==end)return null;
-    const expected=integer(field(listRow,['totalParticipants','mass']));
-    const expectedKills=integer(field(listRow,['totalKills']));
-    const expectedFame=integer(field(listRow,['totalFame']));
-    if(expected===null||expected<10||expectedKills===null||expectedFame===null)return null;
-    if(integer(b.totalKills)!==expectedKills||integer(b.totalFame)!==expectedFame)return null;
+    if(listRow&&(timeMs(listRow.startTime)!==start||timeMs(listRow.endTime)!==end))return null;
     const players=values(b.players);
-    const guildMasses=listRow?.guildMasses;
-    if(players.length!==expected||!Array.isArray(guildMasses)||!guildMasses.length)return null;
+    const expected=listRow
+        ? integer(field(listRow,['totalParticipants','mass']))
+        : integer(field(b,['totalParticipants','TotalParticipants'])??players.length);
+    const expectedKills=listRow?integer(field(listRow,['totalKills'])):integer(b.totalKills);
+    const expectedFame=listRow?integer(field(listRow,['totalFame'])):integer(b.totalFame);
+    if(expected===null||expected<1||expectedKills===null||expectedFame===null)return null;
+    if(integer(b.totalKills)!==expectedKills||integer(b.totalFame)!==expectedFame)return null;
+    if(players.length!==expected||players.length>1000)return null;
     const names=new Set(),normalizedPlayers=[];
     for(const p of players){
         const name=field(p,['name','Name','playerName','PlayerName']);
@@ -87,6 +113,11 @@ function parseDetail(body,id,listRow,targetGuild,now=Date.now(),targetGuildId=''
     const playerFame=normalizedPlayers.reduce((s,p)=>s+p.killFame,0);
     const fameVarianceCap=Math.max(10,Math.min(100,Math.floor(expectedFame*0.00005)));
     if(playerKills!==expectedKills||Math.abs(playerFame-expectedFame)>fameVarianceCap)return null;
+    // Prefer Guild IDs in the provider List; for a fight absent there, use
+    // only explicit guildId/guildName fields from the complete Detail roster.
+    const guildMasses=listRow?.guildMasses?.length
+        ? listRow.guildMasses : deriveGuildMassesFromPlayers(normalizedPlayers);
+    if(!Array.isArray(guildMasses)||!guildMasses.length)return null;
     const normalizedGuilds=Object.create(null),normalizedAlliances=Object.create(null);
     const seenGuildNames=new Set();
     let targetVerified=false;
@@ -132,7 +163,7 @@ function createAlbionZvZSource({
 }={}){
     const enabled=()=>String(env.ALBIONZVZ_PRIMARY_ENABLED||'').toLowerCase()==='true';
     let blockedUntil=0, accessDenied=false, listExpires=0,list=null,listFlight=null,detailWindow=0,detailCount=0;
-    const details=new Map(),detailFlights=new Map(),knownRows=new Map(),lastOfficial=new Map();
+    const details=new Map(),detailFlights=new Map(),knownRows=new Map(),lastOfficial=new Map(),notIndexed=new Map();
     const sourceObjects=new WeakSet();
     // One shared request lane for every tracked guild and both public endpoints.
     // Never rotate identities, send challenge tokens, or circumvent access denial.
@@ -218,7 +249,7 @@ function createAlbionZvZSource({
                 const to=new Date(now()).toISOString().slice(0,10);
                 const from=new Date(now()-86400000).toISOString().slice(0,10);
                 const r=await guardedGet(BASE+'/api/battles',
-                    {server:'asia',from,to,minMass:10,massMode:'total',offset:0,limit:25},'list');
+                    {server:'asia',from,to,minMass:1,massMode:'total',offset:0,limit:25},'list');
                 if(!r)return null;
                 const rows=parseList(r.data,now());
                 if(rows===null)throw Error('List schema incomplete');
@@ -245,8 +276,10 @@ function createAlbionZvZSource({
     function noteOfficial(scope){lastOfficial.set(scope,now());while(lastOfficial.size>512)lastOfficial.delete(lastOfficial.keys().next().value);}
     async function getDetail(id,guild,guildId=''){
         id=String(id);
-        if(!enabled()||accessDenied||now()<blockedUntil||!validId(id)||!knownRows.has(id))return null;
-        const row=knownRows.get(id);
+        if(!enabled()||accessDenied||now()<blockedUntil||!validId(id))return null;
+        if((notIndexed.get(id)||0)>now())return null;
+        notIndexed.delete(id);
+        const row=knownRows.get(id)||null;
         const hit=details.get(id);
         if(hit&&hit.expiresAt>now()){
             metrics.detailCacheHits++;
@@ -263,13 +296,29 @@ function createAlbionZvZSource({
                 const r=await guardedGet(BASE+'/api/dev/battle-board/battle',
                     {battleId:id,server:'asia'},'detail');
                 if(!r)return null;
-                if(!r.data||r.data.server!=='asia'||!r.data.battle||
-                   idOf(r.data.battle)!==id)throw Error('Detail schema invalid');
+                if(!r.data?.battle){
+                    // Not indexed by AlbionZvZ yet: do not punish the entire
+                    // provider, and do not repeatedly request this Battle ID.
+                    notIndexed.set(id,now()+5*60_000);
+                    while(notIndexed.size>150)notIndexed.delete(notIndexed.keys().next().value);
+                    return null;
+                }
+                if(r.data.server!=='asia'||idOf(r.data.battle)!==id)
+                    throw Error('Detail schema invalid');
                 markHealthy();
                 details.set(id,{body:r.data,expiresAt:now()+120_000});
                 while(details.size>100)details.delete(details.keys().next().value);
                 return r.data;
-            }catch(e){block(e);return null;}finally{detailFlights.delete(id);}
+            }catch(e){
+                if(Number(e?.response?.status)===404){
+                    notIndexed.set(id,now()+5*60_000);
+                    while(notIndexed.size>150)notIndexed.delete(notIndexed.keys().next().value);
+                    // A missing Battle ID is expected for provider-side
+                    // coverage gaps; go to Official without global cooldown.
+                    return null;
+                }
+                block(e);return null;
+            }finally{detailFlights.delete(id);}
         })();
         detailFlights.set(id,task);
         const data=parseDetail(await task,id,row,guild,now(),guildId);
