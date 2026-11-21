@@ -374,3 +374,72 @@ test('the ZvZ public list asks for all sizes without changing the Bot Fame polic
     assert.equal(f.calls[0].options.params.server,'asia');
     assert.equal(f.calls[0].options.params.massMode,'total');
 });
+
+
+test('PR50: five-player AlbionZvZ Detail emits a precise primary decision',async()=>{
+    const {body}=smallFightFixture(5);
+    const f=sourceFixture(()=>({data:body}));
+    const diagnostic={};
+    const detail=await f.source.getDetail('531162052','Guild One',guildId,diagnostic);
+    assert.ok(detail);
+    assert.equal(detail.players.length,5);
+    assert.equal(diagnostic.reason,'PRIMARY_HTTP_200');
+    assert.ok(f.source.isPrimaryData(detail));
+    const cached={};
+    assert.ok(await f.source.getDetail('531162052','Guild One',guildId,cached));
+    assert.equal(cached.reason,'PRIMARY_CACHE_OK');
+    assert.equal(f.calls.length,1);
+});
+test('PR50: no indexed small-fight Detail yields HTTP_404 followed by negative cache',async()=>{
+    const f=sourceFixture(()=>{throw {response:{status:404}};});
+    const first={};
+    assert.equal(await f.source.getDetail('531162052','Guild One',guildId,first),null);
+    assert.equal(first.reason,'HTTP_404');
+    const repeated={};
+    assert.equal(await f.source.getDetail('531162052','Guild One',guildId,repeated),null);
+    assert.equal(repeated.reason,'NOT_INDEXED_CACHED');
+    assert.equal(f.calls.length,1);
+});
+test('PR50: 403 is logged once then circuit-denied without another request',async()=>{
+    const f=sourceFixture(()=>{throw {response:{status:403}};});
+    const first={};
+    assert.equal(await f.source.getDetail('531162052','Guild One',guildId,first),null);
+    assert.equal(first.reason,'HTTP_403');
+    const repeated={};
+    assert.equal(await f.source.getDetail('531162053','Guild One',guildId,repeated),null);
+    assert.equal(repeated.reason,'CIRCUIT_DENIED');
+    assert.equal(f.calls.length,1);
+});
+test('PR50: 429 cooldown and 500 are distinguishable diagnostics',async()=>{
+    for(const [status,expected] of [[429,'HTTP_429'],[500,'HTTP_500']]){
+        const f=sourceFixture(()=>{throw {response:{status,headers:{'retry-after':'900'}}};});
+        const first={};
+        assert.equal(await f.source.getDetail('531162052','Guild One',guildId,first),null);
+        assert.equal(first.reason,expected);
+        const duringBackoff={};
+        assert.equal(await f.source.getDetail('531162053','Guild One',guildId,duringBackoff),null);
+        assert.equal(duringBackoff.reason,'CIRCUIT_COOLDOWN');
+        assert.equal(f.calls.length,1);
+    }
+});
+test('PR50: invalid provider schema gives INVALID_DETAIL, not a primary-success log',async()=>{
+    const {body}=smallFightFixture(5);
+    const incomplete={...body,battle:{...body.battle,totalFame:999999}};
+    const f=sourceFixture(()=>({data:incomplete}));
+    const diag={};
+    assert.equal(await f.source.getDetail('531162052','Guild One',guildId,diag),null);
+    assert.equal(diag.reason,'INVALID_DETAIL');
+    assert.equal(f.source.getRequestMetrics().circuit,'ready');
+});
+test('PR50: detailed source logs exist for successful, skipped, and Event-only processed fights',()=>{
+    const fs=require('node:fs'),path=require('node:path');
+    const index=fs.readFileSync(path.join(__dirname,'..','index.js'),'utf8');
+    assert.match(index,/\[Auto-Battle Detail Source\]/);
+    assert.match(index,/PrimaryReason=/);
+    assert.match(index,/Source=AlbionZvZ Asia/);
+    assert.match(index,/EVENT_ONLY_OFFICIAL_PROBE/);
+    const belowThreshold=index.slice(index.indexOf("ผลลัพธ์=เฟมต่ำกว่าเกณฑ์"));
+    assert.match(belowThreshold,/ข้อมูลรายงาน=/);
+    assert.match(belowThreshold,/ผู้เล่นใน Battle Detail=/);
+    assert.match(index,/result\.totalFame >= checkValue/);
+});
