@@ -178,3 +178,17 @@ test('live-style battle detail without guild rows reconstructs trustworthy guild
     assert.equal(parseDetail({...body,battle:{...body.battle,totalFame:999}},id,row,'Guild One',now,guildId),null);
     assert.equal(parseDetail({...body,battle:{...body.battle,players:body.battle.players.map((p,i)=>i===0?{...p,guildId:otherId}:p)}},id,row,'Guild One',now,guildId),null);
 });
+
+test('accept source-consistent tiny Fame differences without altering individual players; reject material drift',()=>{
+    const {row,body}=fixture();
+    const slightRow={...row,totalFame:300008};
+    const slightBody={...body,battle:{...body.battle,totalFame:300008}};
+    const detail=parseDetail(slightBody,id,slightRow,'Guild One',now,guildId);
+    assert.ok(detail);
+    assert.equal(detail.totalFame,300008);
+    assert.equal(detail.players.reduce((s,p)=>s+p.killFame,0),300000);
+    const largeRow={...row,totalFame:302000};
+    const largeBody={...body,battle:{...body.battle,totalFame:302000}};
+    assert.equal(parseDetail(largeBody,id,largeRow,'Guild One',now,guildId),null);
+    assert.equal(parseDetail(body,id,{...row,guildMasses:row.guildMasses.map((g,i)=>i?g:{...g,deaths:50})},'Guild One',now,guildId),null);
+});
