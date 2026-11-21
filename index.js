@@ -17,17 +17,13 @@ const {
 } = require('discord.js');
 
 const axios = require('axios');
-const { createAlbionZvZSource, formatEndDelay, battleLink: alternateBattleLink, SOURCE: zvzSourceName } = require('./albionzvz-source');
+const { createAlbionZvZSource, formatEndDelay, SOURCE: zvzSourceName } = require('./albionzvz-source');
 const zvzSource = createAlbionZvZSource({ http: axios });
 const { backupTrackingFile } = require('./temporary-source-backup');
-function safeAutoBattleLink(matchId) {
-    // AlbionZvZ intentionally filters small fights; don't display a dead
-    // third-party link for IDs we have not confirmed in its Asia list.
-    const id = String(matchId || '').trim();
-    if (!/^\d{1,20}$/.test(id)) return id;
-    return zvzSource.enabled() && zvzSource.hasKnownBattle(id)
-        ? alternateBattleLink(id)
-        : '[' + id + '](https://albiononline.com/en/killboard/battles/' + id + ')';
+function safeAutoBattleLink(matchId, detail) {
+    // Use the validated Detail actually passed to the report builder, not
+    // membership in the rolling List or the source that discovered the ID.
+    return zvzSource.reportLink(matchId, detail);
 }
 // Source logging is observational: count raw rows without converting player
 // equipment or introducing extra work before report delivery.
@@ -36,13 +32,14 @@ function getDetailPlayerCountForSourceLog(detail) {
     if (Array.isArray(players)) return players.length;
     return players && typeof players === 'object' ? Object.keys(players).length : 0;
 }
-// Only used by the existing fallback scanner, never by the primary Battleboard integration.
+// Shared primary-first Detail selection for confirmed/list and provisional Events candidates.
 async function fetchAutoBattlePreferredDetail(matchId, options) {
     // Observe the actual Detail decision once per attempted Battle, including
     // prefetch and Fame-below-threshold cases. Do not change fallback semantics.
     const diagnostic = { reason: 'UNKNOWN' };
     const label = ' | Battle=' + String(matchId) +
-        ' | Guild=' + String(options.targetGuild || options.targetGuildId || 'unknown').replace(/[\r\n|]/g, ' ').slice(0,80);
+        ' | Guild=' + String(options.targetGuild || options.targetGuildId || 'unknown').replace(/[\r\n|]/g, ' ').slice(0,80) +
+        ' | Candidate=' + (options.eventOnly === true ? 'EVENT_ONLY' : 'BATTLE_LIST');
     try {
         const preferred = await zvzSource.getDetail(matchId, options.targetGuild, options.targetGuildId, diagnostic);
         if (preferred) {
@@ -3375,7 +3372,7 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
 
     // Temporary public-source experiment is scoped to the existing fallback.
     // Keep Official startup baselines, small-fight coverage and periodic reconciliation.
-    // The original Battleboard primary still preempts this scanner on recovery.
+    // The existing Battleboard integration is outside this change.
     const preferredDiscovery = await zvzSource.discover(targetGuild, queueScopeKey, {
         processed: processedBattles, baselineOnly, guildId: targetGuildId
     }).catch(() => {
@@ -3618,8 +3615,8 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
     };
 
     // Battle List and Events are checked concurrently on every normal poll.
-    // Events-only IDs are provisional: reporting still requires Official Battle Detail
-    // and the existing exact guild validation below.
+    // Events-only IDs are provisional: reporting still requires validated Battle Detail
+    // (AlbionZvZ first, Official fallback) and the existing exact guild validation below.
     const officialPromise = fetchOfficial({ silentSource: true }).catch(error => {
         console.warn('⚠️ [Official API หลัก] การค้นหา Battle List ล้มเหลว: ' + String(error?.message || error));
         return null;
@@ -3886,8 +3883,8 @@ async function checkAutoBattlesForGuild() {
                     if (index >= prefetchIds.length) return;
                     const matchId = String(prefetchIds[index]);
                     if (candidateMeta.get(matchId)?.eventOnly === true) {
-                        // Event-only candidates are validated through /events/battle; don't spend
-                        // the primary Battle Detail request budget on IDs known to be absent from /battles.
+                        // Keep provisional candidates out of the confirmed-ID prefetch.
+                        // The bounded Events lane below tries AlbionZvZ first, then Official.
                         prefetchedBattleDetails.set(matchId, null);
                         prefetchedBattleFetchMs.set(matchId, 0);
                         continue;
@@ -3965,15 +3962,15 @@ async function checkAutoBattlesForGuild() {
                         }
                         eventBudget.used++;
                         const eventCandidateStartedAt = Date.now();
-                        // Events-only IDs may still have a valid canonical Battle Detail. Try that first.
-                        officialBattle = await fetchOfficialBattle(detailKey, { autoBattle: true, targetGuild: config.targetGuild, eventOnly: true });
-                        console.log('ℹ️ [Auto-Battle Detail Source] Battle=' + detailKey +
-                            ' | Source=' + (officialBattle ? 'Official Albion API Asia' : 'NONE') +
-                            ' | PrimaryReason=EVENT_ONLY_OFFICIAL_PROBE' +
-                            ' | Players=' + (officialBattle ? getDetailPlayerCountForSourceLog(officialBattle) : 'unknown') +
-                            ' | Result=' + (officialBattle ? 'FALLBACK_OK' : 'FALLBACK_UNAVAILABLE'));
+                        // Same validated primary-first path as confirmed IDs. Preserve the
+                        // existing per-scope two-probe budget and Official eventOnly fallback.
+                        officialBattle = await fetchAutoBattlePreferredDetail(detailKey, {
+                            autoBattle: true, targetGuild: config.targetGuild,
+                            targetGuildId: config.targetGuildId, eventOnly: true
+                        });
                         if (officialBattle) {
-                            detectionSource += ' + Official Battle Detail from Events hint';
+                            detectionSource += ' + ' + (zvzSource.isPrimaryData(officialBattle)
+                                ? zvzSourceName : 'Official Battle Detail') + ' from Events hint';
                         }
                         battleDetailFetchMs = Date.now() - eventCandidateStartedAt;
                     }
@@ -4081,7 +4078,7 @@ async function checkAutoBattlesForGuild() {
                         `⚔️ Kills: ${Number(result.totalKills).toLocaleString()}\n` +
                         `☠️ Deaths: ${Number(result.totalDeaths).toLocaleString()}\n` +
                         `➕ Kills + Deaths: ${(Number(result.totalKills) + Number(result.totalDeaths)).toLocaleString()}\n` +
-                        `🔗 Battle Link: ${safeAutoBattleLink(latestMatchId)}\n` +
+                        `🔗 Battle Link: ${safeAutoBattleLink(latestMatchId, officialBattle)}\n` +
                         formatEndDelay(officialBattle, Date.now());
                     const reportFiles = Array.isArray(result.payload.files) ? result.payload.files : [];
                     const totalDeliveryParts = Math.max(1, reportFiles.length);

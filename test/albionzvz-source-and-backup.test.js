@@ -437,7 +437,8 @@ test('PR50: detailed source logs exist for successful, skipped, and Event-only p
     assert.match(index,/\[Auto-Battle Detail Source\]/);
     assert.match(index,/PrimaryReason=/);
     assert.match(index,/Source=AlbionZvZ Asia/);
-    assert.match(index,/EVENT_ONLY_OFFICIAL_PROBE/);
+    assert.match(index,/Candidate=.*EVENT_ONLY/);
+    assert.match(index,/fetchAutoBattlePreferredDetail\(detailKey,\s*\{[\s\S]*?targetGuildId: config\.targetGuildId, eventOnly: true/);
     const belowThreshold=index.slice(index.indexOf("ผลลัพธ์=เฟมต่ำกว่าเกณฑ์"));
     assert.match(belowThreshold,/ข้อมูลรายงาน=/);
     assert.match(belowThreshold,/ผู้เล่นใน Battle Detail=/);
@@ -448,5 +449,66 @@ test('PR50: detailed source logs exist for successful, skipped, and Event-only p
     assert.match(sourceLogPath,/getDetailPlayerCountForSourceLog\(fallback\)/);
     assert.doesNotMatch(sourceLogPath,/getApiPlayers\(/,
         'diagnostics must not invoke the full player/equipment converter');
-    assert.match(index,/officialBattle \? getDetailPlayerCountForSourceLog\(officialBattle\)/);
+    assert.match(index,/safeAutoBattleLink\(latestMatchId, officialBattle\)/);
+});
+
+
+test('primary report link follows validated direct Detail even when ID absent from List',async()=>{
+    const {body}=fixture();
+    const f=sourceFixture(()=>({data:body}));
+    assert.equal(f.source.hasKnownBattle(id),false);
+    const detail=await f.source.getDetail(id,'Guild One',guildId);
+    assert.ok(detail);
+    assert.equal(f.source.reportLink(id,detail),battleLink(id));
+    assert.match(f.source.reportLink('531020001',detail),/albiononline\.com/);
+    assert.equal(f.calls.length,1);
+});
+test('Official stats always link Official, even when the ID was in AlbionZvZ List',async()=>{
+    const {row,body}=fixture();
+    const f=sourceFixture(url=>({data:url.endsWith('/api/battles')?{rows:[row]}:body}));
+    await f.source.discover('Guild One','scope',{guildId});
+    assert.equal(f.source.hasKnownBattle(id),true);
+    assert.match(f.source.reportLink(id,body.battle),/albiononline\.com/);
+    assert.match(f.source.reportLink(id,null),/albiononline\.com/);
+    assert.equal(f.calls.length,1);
+});
+test('rolling discovery retains an earlier page across refresh without extra requests',async()=>{
+    const first=fixture(),second=fixture('531020001');
+    let page=0;
+    const f=sourceFixture(()=>({data:{server:'asia',rows:[page++===0?first.row:second.row]}}));
+    const opts={guildId,processed:new Set()};
+    await f.source.discover('Guild One','scope',opts);
+    f.source.noteOfficial('scope');
+    f.advance(60_001);
+    const result=await f.source.discover('Guild One','scope',opts);
+    assert.deepEqual(new Set(result.ids),new Set([id,'531020001']));
+    assert.equal(result.useOfficial,false);
+    assert.equal(f.calls.length,2);
+    assert.equal(f.calls[1].options.params.limit,25);
+    f.advance(31*60_000);
+    const later=await f.source.discover('Guild One','scope',opts);
+    assert.deepEqual(later.ids,['531020001']);
+    assert.equal(f.calls.length,3);
+});
+test('Event-only primary-first selection preserves exact guild and Official fallback options',async()=>{
+    const fs=require('node:fs'),path=require('node:path'),vm=require('node:vm');
+    const index=fs.readFileSync(path.join(__dirname,'..','index.js'),'utf8');
+    const code=index.slice(index.indexOf('function getDetailPlayerCountForSourceLog'),index.indexOf('// Global safety net'));
+    for(const primaryAvailable of [true,false]){
+        const {body}=fixture();
+        const f=sourceFixture(()=>primaryAvailable?{data:body}:{data:{server:'asia'}});
+        const official={id,players:body.battle.players};
+        const calls=[],logs=[];
+        const context={zvzSource:f.source,console:{log:x=>logs.push(x),warn:x=>logs.push(x)},
+            fetchOfficialBattle:async(matchId,options)=>{calls.push({matchId,options});return official;}};
+        const fn=vm.runInNewContext(code+'\nfetchAutoBattlePreferredDetail',context);
+        const opts={autoBattle:true,targetGuild:'Guild One',targetGuildId:guildId,eventOnly:true};
+        const detail=await fn(id,opts);
+        assert.equal(f.calls.length,1);
+        assert.equal(f.source.isPrimaryData(detail),primaryAvailable);
+        assert.equal(calls.length,primaryAvailable?0:1);
+        if(!primaryAvailable){assert.equal(detail,official);assert.equal(calls[0].options,opts);}
+        assert.ok(logs.some(x=>x.includes('Candidate=EVENT_ONLY')&&x.includes(primaryAvailable?'PRIMARY_OK':'FALLBACK_OK')));
+        assert.ok(logs.some(x=>x.includes(primaryAvailable?'PRIMARY_HTTP_200':'NO_BATTLE_DETAIL')));
+    }
 });
