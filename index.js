@@ -7777,6 +7777,7 @@ initializeTrackingPersistence()
     })
     .then(async () => {
         await restoreReportedBattleRows();
+        if (BOT_ROW_STORAGE_ENABLED && reportedBattlesStoreReady) saveData();
         if (zvzSource.enabled()) {
             try {
                 // Full local v3 snapshot from the current hydrated state, even
@@ -7791,7 +7792,6 @@ initializeTrackingPersistence()
                     String(error?.code || error?.name || 'backup-failed').slice(0,100));
             }
         }
-        if (BOT_ROW_STORAGE_ENABLED && reportedBattlesStoreReady) saveData();
         if (!BOT_TOKEN) {
             throw new Error('BOT_TOKEN is missing or empty. Set Render Environment variable BOT_TOKEN (Bot Token from Discord Developer Portal).');
         }
