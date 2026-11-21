@@ -126,35 +126,86 @@ function parseDetail(body,id,listRow,targetGuild,now=Date.now(),targetGuildId=''
         players:normalizedPlayers,guilds:normalizedGuilds,alliances:normalizedAlliances,
         totalKills:expectedKills,totalFame:expectedFame};
 }
-function createAlbionZvZSource({http,env=process.env,now=Date.now,log=console.warn}={}){
+function createAlbionZvZSource({
+    http,env=process.env,now=Date.now,log=console.warn,
+    sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms)),random=Math.random
+}={}){
     const enabled=()=>String(env.ALBIONZVZ_PRIMARY_ENABLED||'').toLowerCase()==='true';
     let blockedUntil=0, accessDenied=false, listExpires=0,list=null,listFlight=null,detailWindow=0,detailCount=0;
     const details=new Map(),detailFlights=new Map(),knownRows=new Map(),lastOfficial=new Map();
     const sourceObjects=new WeakSet();
+    // One shared request lane for every tracked guild and both public endpoints.
+    // Never rotate identities, send challenge tokens, or circumvent access denial.
+    const MIN_REQUEST_GAP_MS=3500;
+    let requestLane=Promise.resolve(),lastRequestAt=null,failStreak=0;
+    const metrics={requests:0,listRequests:0,detailRequests:0,
+        listCacheHits:0,detailCacheHits:0,waitMs:0,
+        forbidden:0,throttled:0,transientErrors:0,lastHttpStatus:null};
+    const statusInfo=()=>({ ...metrics,
+        accessDenied,backoffUntil:blockedUntil,
+        circuit:accessDenied?'denied':now()<blockedUntil?'cooldown':'ready' });
+    function markHealthy(){failStreak=0;metrics.lastHttpStatus=200;}
+    async function guardedGet(url,params,kind){
+        const previous=requestLane;
+        let release;
+        requestLane=new Promise(resolve=>{release=resolve;});
+        await previous;
+        try{
+            if(!enabled()||accessDenied||now()<blockedUntil)return null;
+            if(lastRequestAt!==null){
+                const pause=Math.max(0,MIN_REQUEST_GAP_MS-(now()-lastRequestAt));
+                if(pause>0){metrics.waitMs+=pause;await sleep(pause);}
+            }
+            if(!enabled()||accessDenied||now()<blockedUntil)return null;
+            lastRequestAt=now();
+            metrics.requests++;
+            if(kind==='list')metrics.listRequests++;else metrics.detailRequests++;
+            return await http.get(url,{timeout:5000,maxRedirects:0,
+                headers:{Accept:'application/json','User-Agent':'BossBot-AlbionZvZ/1.0'},
+                params});
+        }finally{release();}
+    }
     function block(error){
         const status=Number(error?.response?.status)||0;
+        metrics.lastHttpStatus=status||null;
+        if(status===401||status===403){
+            metrics.forbidden++;
+            accessDenied=true;
+            log('🛑 [AlbionZvZ] HTTP '+status+' ปฏิเสธการเข้าถึง | หยุดเรียกใน Process นี้ และใช้ Official API ทันที');
+            return;
+        }
+        failStreak=Math.min(failStreak+1,8);
         const raw=error?.response?.headers?.['retry-after'];
         const retrySeconds=raw!=null&&/^\d+$/.test(String(raw))?Number(raw):null;
         const retryDate=retrySeconds===null?timeMs(raw):null;
         const retryMs=retrySeconds!==null?retrySeconds*1000:retryDate!==null?Math.max(0,retryDate-now()):0;
-        if(status===403||status===401)accessDenied=true;
-        const delay=status===429?10*60_000:60_000;
-        blockedUntil=Math.max(blockedUntil,now()+Math.max(delay,retryMs));
-        log('⚠️ [AlbionZvZ] ใช้ Official API สำรอง | HTTP='+ (status||'unavailable')+(accessDenied?' | หยุดเรียก AlbionZvZ จนกว่าผู้ดูแลตรวจสอบสิทธิ์':' | พักจน '+new Date(blockedUntil).toISOString()));
+        if(status===429)metrics.throttled++;else metrics.transientErrors++;
+        const base=status===429?10*60_000:60_000;
+        const backoff=Math.min(60*60_000,base*2**Math.min(failStreak-1,6));
+        // Bounded jitter reduces synchronized retry waves; never shorten Retry-After.
+        const boundedRandom=Math.max(0,Math.min(1,Number(random())||0));
+        const cooldown=Math.max(retryMs,backoff+Math.floor(backoff*boundedRandom*0.1));
+        blockedUntil=Math.max(blockedUntil,now()+cooldown);
+        log('⏳ [AlbionZvZ] ใช้ Official API สำรอง | HTTP='+
+            (status||'network/schema')+' | ล้มเหลวต่อเนื่อง='+failStreak+
+            ' | งดเรียกถึง='+new Date(blockedUntil).toISOString()+
+            ' | คำขอสะสม='+metrics.requests+' | Cache List='+
+            metrics.listCacheHits+' Detail='+metrics.detailCacheHits);
     }
     async function getList(){
         if(!enabled()||accessDenied||now()<blockedUntil)return null;
-        if(listExpires>now())return list;
+        if(listExpires>now()){metrics.listCacheHits++;return list;}
         if(listFlight)return listFlight;
         listFlight=(async()=>{
             try{
                 const to=new Date(now()).toISOString().slice(0,10);
                 const from=new Date(now()-86400000).toISOString().slice(0,10);
-                const r=await http.get(BASE+'/api/battles',{timeout:5000,maxRedirects:0,
-                    headers:{Accept:'application/json','User-Agent':'BossBot-AlbionZvZ/1.0'},
-                    params:{server:'asia',from,to,minMass:10,massMode:'total',offset:0,limit:25}});
+                const r=await guardedGet(BASE+'/api/battles',
+                    {server:'asia',from,to,minMass:10,massMode:'total',offset:0,limit:25},'list');
+                if(!r)return null;
                 const rows=parseList(r.data,now());
                 if(rows===null)throw Error('List schema incomplete');
+                markHealthy();
                 list=rows;listExpires=now()+60_000;
                 for(const row of rows)knownRows.set(row.id,row);
                 while(knownRows.size>100)knownRows.delete(knownRows.keys().next().value);
@@ -181,6 +232,7 @@ function createAlbionZvZSource({http,env=process.env,now=Date.now,log=console.wa
         const row=knownRows.get(id);
         const hit=details.get(id);
         if(hit&&hit.expiresAt>now()){
+            metrics.detailCacheHits++;
             const data=parseDetail(hit.body,id,row,guild,now(),guildId);if(data)sourceObjects.add(data);return data;
         }
         if(detailFlights.has(id))return detailFlights.get(id).then(body=>{
@@ -191,9 +243,12 @@ function createAlbionZvZSource({http,env=process.env,now=Date.now,log=console.wa
         detailCount++;
         const task=(async()=>{
             try{
-                const r=await http.get(BASE+'/api/dev/battle-board/battle',{timeout:5000,maxRedirects:0,
-                    headers:{Accept:'application/json','User-Agent':'BossBot-AlbionZvZ/1.0'},
-                    params:{battleId:id,server:'asia'}});
+                const r=await guardedGet(BASE+'/api/dev/battle-board/battle',
+                    {battleId:id,server:'asia'},'detail');
+                if(!r)return null;
+                if(!r.data||r.data.server!=='asia'||!r.data.battle||
+                   idOf(r.data.battle)!==id)throw Error('Detail schema invalid');
+                markHealthy();
                 details.set(id,{body:r.data,expiresAt:now()+120_000});
                 while(details.size>100)details.delete(details.keys().next().value);
                 return r.data;
@@ -204,6 +259,7 @@ function createAlbionZvZSource({http,env=process.env,now=Date.now,log=console.wa
         if(data)sourceObjects.add(data);
         return data;
     }
-    return {enabled,discover,noteOfficial,getDetail,hasKnownBattle:id=>knownRows.has(String(id)),isPrimaryData:b=>Boolean(b&&sourceObjects.has(b))};
+    return {enabled,discover,noteOfficial,getDetail,getRequestMetrics:statusInfo,
+        hasKnownBattle:id=>knownRows.has(String(id)),isPrimaryData:b=>Boolean(b&&sourceObjects.has(b))};
 }
 module.exports={createAlbionZvZSource,parseList,parseDetail,formatEndDelay,battleLink,SOURCE};
