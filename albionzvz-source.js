@@ -115,8 +115,10 @@ function parseDetail(body,id,listRow,targetGuild,now=Date.now(),targetGuildId=''
     if(playerKills!==expectedKills||Math.abs(playerFame-expectedFame)>fameVarianceCap)return null;
     // Prefer Guild IDs in the provider List; for a fight absent there, use
     // only explicit guildId/guildName fields from the complete Detail roster.
-    const guildMasses=listRow?.guildMasses?.length
-        ? listRow.guildMasses : deriveGuildMassesFromPlayers(normalizedPlayers);
+    // A list row that advertises no guild summary is incomplete and must
+    // not be silently repaired; derive only when that ID is absent from List.
+    const guildMasses=listRow ? listRow.guildMasses :
+        deriveGuildMassesFromPlayers(normalizedPlayers);
     if(!Array.isArray(guildMasses)||!guildMasses.length)return null;
     const normalizedGuilds=Object.create(null),normalizedAlliances=Object.create(null);
     const seenGuildNames=new Set();
