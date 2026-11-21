@@ -142,6 +142,8 @@ function createAlbionZvZSource({
         listCacheHits:0,detailCacheHits:0,waitMs:0,
         forbidden:0,throttled:0,transientErrors:0,lastHttpStatus:null};
     const statusInfo=()=>({ ...metrics,
+        forbiddenRatePct:metrics.requests?Number((100*metrics.forbidden/metrics.requests).toFixed(2)):0,
+        throttledRatePct:metrics.requests?Number((100*metrics.throttled/metrics.requests).toFixed(2)):0,
         accessDenied,backoffUntil:blockedUntil,
         circuit:accessDenied?'denied':now()<blockedUntil?'cooldown':'ready' });
     function markHealthy(){failStreak=0;metrics.lastHttpStatus=200;}
