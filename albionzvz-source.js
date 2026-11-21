@@ -142,7 +142,9 @@ function createAlbionZvZSource({http,env=process.env,now=Date.now,log=console.wa
         if(!enabled()||now()<blockedUntil||!validId(id)||!knownRows.has(id))return null;
         const row=knownRows.get(id);
         const hit=details.get(id);
-        if(hit&&hit.expiresAt>now())return parseDetail(hit.body,id,row,guild,now());
+        if(hit&&hit.expiresAt>now()){
+            const data=parseDetail(hit.body,id,row,guild,now());if(data)sourceObjects.add(data);return data;
+        }
         if(detailFlights.has(id))return detailFlights.get(id).then(body=>{
             const data=parseDetail(body,id,row,guild,now());if(data)sourceObjects.add(data);return data;
         });
