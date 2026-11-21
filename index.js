@@ -3334,8 +3334,9 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
             ' เกิน 1,000 Match ID; ตัดรายการเก่าที่สุดออก ' + dropped + ' รายการ');
         return [...next.keys()];
     };
-    console.log('🔄 Auto-Battle source: Official Albion GameInfo API ONLY | Server=Asia' +
-        (baselineOnly ? ' | โหมดตั้งต้นประวัติ' : ''));
+    console.log('🔄 Auto-Battle source: ' +
+        (zvzSource.enabled() ? 'AlbionZvZ Asia PRIMARY → Official GameInfo Asia FALLBACK' : 'Official GameInfo Asia ONLY') +
+        ' | Server=Asia' + (baselineOnly ? ' | โหมดตั้งต้นประวัติ' : ''));
 
     if (!targetGuildId) {
         const source = 'Official Albion API unavailable: Guild ID required';

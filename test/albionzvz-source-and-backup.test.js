@@ -291,3 +291,86 @@ test('an HTTP-200 JSON error page is not counted as a successful Asia battle lis
     assert.equal(f.source.getRequestMetrics().transientErrors,1);
     assert.equal(f.source.getRequestMetrics().circuit,'cooldown');
 });
+
+
+function smallFightFixture(count=5,battleId='531162052'){
+    const original=fixture(battleId),players=original.body.battle.players.slice(0,count);
+    const fame=players.reduce((sum,p)=>sum+p.killFame,0);
+    const kills=players.reduce((sum,p)=>sum+p.kills,0);
+    const deaths=players.reduce((sum,p)=>sum+p.deaths,0);
+    const row={...original.row,id:Number(battleId),
+        guildNames:['Guild One'],guildMasses:[{guildId,name:'Guild One',mass:count,kills,deaths,
+            allianceId:null,allianceName:null}],
+        totalParticipants:count,mass:count,totalKills:kills,totalFame:fame};
+    const battle={...original.body.battle,totalKills:kills,totalFame:fame,players};
+    return {row,body:{server:'asia',battle}};
+}
+test('a 5-player tracked fight is valid when ZvZ provides a verified roster',()=>{
+    const {row,body}=smallFightFixture(5);
+    assert.equal(parseList({server:'asia',rows:[row]},now)[0].id,'531162052');
+    const parsed=parseDetail(body,'531162052',row,'Guild One',now,guildId);
+    assert.ok(parsed);
+    assert.equal(parsed.players.length,5);
+    assert.equal(parsed.guilds[guildId].kills,1);
+    assert.equal(parsed.guilds[guildId].deaths,1);
+    assert.equal(parsed.totalFame,200000);
+    assert.equal(parseDetail(body,'531162052',row,'Guild One',now,otherId),null);
+});
+test('even a 1-player tracked fight has no Bot-side minimum mass gate',()=>{
+    const {row,body}=smallFightFixture(1,'531162053');
+    const parsed=parseDetail(body,'531162053',row,'Guild One',now,guildId);
+    assert.ok(parsed);
+    assert.equal(parsed.players.length,1);
+    assert.equal(parsed.guilds[guildId].kills,1);
+});
+test('direct ZvZ detail is tried first for an Official-discovered ID missing from the ZvZ list',async()=>{
+    const {body}=smallFightFixture(5);
+    const f=sourceFixture((url,options)=>{
+        assert.match(url,/\/api\/dev\/battle-board\/battle$/);
+        assert.equal(options.params.battleId,'531162052');
+        return {data:body};
+    });
+    assert.equal(f.source.hasKnownBattle('531162052'),false);
+    const parsed=await f.source.getDetail('531162052','Guild One',guildId);
+    assert.ok(parsed);
+    assert.ok(f.source.isPrimaryData(parsed));
+    assert.equal(f.calls.length,1);
+    assert.equal(f.source.getRequestMetrics().detailRequests,1);
+    // Strict full-roster check still rejects conflicting tracked guild.
+    assert.equal(await f.source.getDetail('531162052','Guild One',otherId),null);
+});
+test('small fights absent from ZvZ use Official fallback without a global circuit break',async()=>{
+    const f=sourceFixture(()=>{throw {response:{status:404}};});
+    assert.equal(await f.source.getDetail('531162052','Guild One',guildId),null);
+    assert.equal(f.source.getRequestMetrics().circuit,'ready');
+    assert.equal(f.calls.length,1);
+    assert.equal(await f.source.getDetail('531162052','Guild One',guildId),null);
+    assert.equal(f.calls.length,1,'negative cache should avoid repeat 404 calls');
+    f.advance(5*60_000+1);
+    assert.equal(await f.source.getDetail('531162052','Guild One',guildId),null);
+    assert.equal(f.calls.length,2);
+});
+test('an unindexed API body uses a short negative cache, not a made-up battle',async()=>{
+    const f=sourceFixture(()=>({data:{server:'asia',battle:null}}));
+    assert.equal(await f.source.getDetail('531162052','Guild One',guildId),null);
+    assert.equal(await f.source.getDetail('531162052','Guild One',guildId),null);
+    assert.equal(f.calls.length,1);
+    assert.equal(f.source.getRequestMetrics().circuit,'ready');
+});
+test('malformed direct details never bypass source validation',()=>{
+    const {body}=smallFightFixture(5);
+    assert.equal(parseDetail({...body,server:'europe'},'531162052',null,'Guild One',now,guildId),null);
+    assert.equal(parseDetail(body,'531162052',null,'Guild One',now,otherId),null);
+    assert.equal(parseDetail({...body,battle:{...body.battle,players:body.battle.players.slice(1)}},
+        '531162052',null,'Guild One',now,guildId),null);
+    assert.equal(parseDetail({...body,battle:{...body.battle,totalFame:999999}},
+        '531162052',null,'Guild One',now,guildId),null);
+});
+test('the ZvZ public list asks for all sizes without changing the Bot Fame policy',async()=>{
+    const {row}=smallFightFixture(5);
+    const f=sourceFixture(()=>({data:{server:'asia',rows:[row]}}));
+    await f.source.discover('Guild One','scope',{guildId});
+    assert.equal(f.calls[0].options.params.minMass,1);
+    assert.equal(f.calls[0].options.params.server,'asia');
+    assert.equal(f.calls[0].options.params.massMode,'total');
+});
