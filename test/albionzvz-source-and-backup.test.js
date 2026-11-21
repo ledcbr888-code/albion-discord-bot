@@ -274,3 +274,20 @@ test('429 Retry-After has priority over backoff and 403 makes all subsequent HTT
     assert.equal(blocked.source.getRequestMetrics().forbidden,1);
     assert.equal(blocked.source.getRequestMetrics().forbiddenRatePct,100);
 });
+
+test('unexpected HTML challenge on JSON API stops requests rather than emulating a browser',async()=>{
+    const f=sourceFixture(()=>({status:200,headers:{'content-type':'text/html; charset=utf-8'},data:'<!DOCTYPE html><html><title>Just a moment</title></html>'}));
+    const first=await f.source.discover('Guild One','scope',{guildId});
+    assert.deepEqual(first,{ids:[],useOfficial:true});
+    assert.equal(f.source.getRequestMetrics().challengePages,1);
+    assert.equal(f.source.getRequestMetrics().circuit,'denied');
+    f.advance(24*60*60*1000);
+    await f.source.discover('Guild One','scope',{guildId});
+    assert.equal(f.calls.length,1);
+});
+test('an HTTP-200 JSON error page is not counted as a successful Asia battle list',async()=>{
+    const f=sourceFixture(()=>({status:200,headers:{'content-type':'application/json'},data:{error:'Access blocked'}}));
+    assert.equal((await f.source.discover('Guild One','scope',{guildId})).useOfficial,true);
+    assert.equal(f.source.getRequestMetrics().transientErrors,1);
+    assert.equal(f.source.getRequestMetrics().circuit,'cooldown');
+});
