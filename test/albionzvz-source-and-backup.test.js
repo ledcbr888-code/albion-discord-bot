@@ -9,14 +9,13 @@ const start=new Date(now-20*60_000).toISOString(),end=new Date(now-8*60_000-24_0
 const guildId='ABCDEFGHIJKLMNOPQRSTUV',otherId='QRSTUVWXYZABCDEFGHIJKL',id='531020000';
 function fixture(battleId=id){
     const row={id:Number(battleId),startTime:start,endTime:end,guildNames:['Guild One','Guild Two'],
-        guildMasses:[{guildId,name:'Guild One'},{guildId:otherId,name:'Guild Two'}],
+        guildMasses:[{guildId,name:'Guild One',mass:5,kills:1,allianceId:null,allianceName:null},
+            {guildId:otherId,name:'Guild Two',mass:5,kills:1,allianceId:null,allianceName:null}],
         totalParticipants:10,mass:10,totalKills:2,totalFame:300000};
     const players=Array.from({length:10},(_,i)=>({name:'Player '+i,
         guildName:i<5?'Guild One':'Guild Two',guildId:i<5?guildId:otherId,
         kills:i===0||i===5?1:0,deaths:i===1||i===6?1:0,killFame:i===0?200000:i===5?100000:0}));
-    const battle={id:Number(battleId),startTime:start,endTime:end,players,
-        guilds:{[guildId]:{id:guildId,name:'Guild One',kills:1,deaths:1,killFame:200000},
-            [otherId]:{id:otherId,name:'Guild Two',kills:1,deaths:1,killFame:100000}},alliances:{}};
+    const battle={id:Number(battleId),startTime:start,endTime:end,totalKills:2,totalFame:300000,players};
     return {row,body:{server:'asia',battle}};
 }
 function sourceFixture(handler,enabled=true){
@@ -41,6 +40,8 @@ test('list and detail accept coherent Asia data, reject other regions, incomplet
     const parsed=parseDetail(body,id,row,'Guild One',now,guildId);
     assert.equal(parsed.players.length,10);
     assert.equal(parsed.guilds[guildId].killFame,200000);
+    assert.equal(parsed.guilds[otherId].kills,1);
+    assert.equal(parsed.players[0].guildId,guildId);
     assert.equal(parseDetail(body,id,row,'Guild One',now,otherId),null);
     assert.equal(parseDetail({...body,server:'americas'},id,row,'Guild One',now,guildId),null);
     assert.equal(parseDetail(body,'999',row,'Guild One',now,guildId),null);
@@ -162,4 +163,18 @@ test('existing hydration and persistence checks finish before optional backup an
     assert.ok(startup.indexOf('await restoreReportedBattleRows();')<startup.indexOf('backupTrackingFile(DATA_FILE)'));
     assert.ok(startup.indexOf('backupTrackingFile(DATA_FILE)')<startup.indexOf('client.login(BOT_TOKEN)'));
     assert.match(startup,/process\.env\.ALBIONZVZ_PRIMARY_ENABLED = 'false'/);
+});
+
+test('live-style battle detail without guild rows reconstructs trustworthy guild stats from list',()=>{
+    const {row,body}=fixture();
+    assert.equal(Object.hasOwn(body.battle,'guilds'),false);
+    assert.equal(Object.hasOwn(body.battle,'alliances'),false);
+    const detail=parseDetail(body,id,row,'Guild One',now,guildId);
+    assert.equal(Object.keys(detail.guilds).length,2);
+    assert.equal(detail.guilds[guildId].deaths,1);
+    assert.equal(detail.totalFame,300000);
+    assert.equal(parseDetail(body,id,{...row,guildMasses:[]},'Guild One',now,guildId),null);
+    assert.equal(parseDetail(body,id,{...row,guildMasses:row.guildMasses.map(x=>({...x,kills:9}))},'Guild One',now,guildId),null);
+    assert.equal(parseDetail({...body,battle:{...body.battle,totalFame:999}},id,row,'Guild One',now,guildId),null);
+    assert.equal(parseDetail({...body,battle:{...body.battle,players:body.battle.players.map((p,i)=>i===0?{...p,guildId:otherId}:p)}},id,row,'Guild One',now,guildId),null);
 });
