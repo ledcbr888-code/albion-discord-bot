@@ -49,53 +49,73 @@ function parseList(body,now=Date.now()){
     return result;
 }
 function parseDetail(body,id,listRow,targetGuild,now=Date.now(),targetGuildId=''){
-    // Require an actual Asia envelope and a complete, self-consistent roster.
-    // Never turn absent statistics into zero or infer faction/guild membership.
+    // Live AlbionZvZ response (Nov 21) has battle.players but *no*
+    // battle.guilds/alliances. Reconstruct a verified guild summary using
+    // exact guild IDs and names from that same List row, not guesses.
     if(!body||body.server!=='asia'||!body.battle||idOf(body.battle)!==String(id))return null;
     const b=body.battle;
     const start=timeMs(b.startTime ?? b.StartTime),end=timeMs(b.endTime ?? b.EndTime);
     if(start===null||end===null||end<start||end>now||now-end>24*60*60_000)return null;
-    if(timeMs(listRow?.endTime)!==end)return null;
+    if(timeMs(listRow?.startTime)!==start||timeMs(listRow?.endTime)!==end)return null;
     const expected=integer(field(listRow,['totalParticipants','mass']));
     const expectedKills=integer(field(listRow,['totalKills']));
     const expectedFame=integer(field(listRow,['totalFame']));
     if(expected===null||expected<10||expectedKills===null||expectedFame===null)return null;
-    const players=values(b.players),guilds=values(b.guilds);
-    const guildEntries=Array.isArray(b.guilds)?b.guilds.map((g,i)=>[String(i),g]):Object.entries(b.guilds||{});
-    if(players.length!==expected||!guilds.length)return null;
+    if(integer(b.totalKills)!==expectedKills||integer(b.totalFame)!==expectedFame)return null;
+    const players=values(b.players);
+    const guildMasses=listRow?.guildMasses;
+    if(players.length!==expected||!Array.isArray(guildMasses)||!guildMasses.length)return null;
     const names=new Set(),normalizedPlayers=[];
     for(const p of players){
         const name=field(p,['name','Name','playerName','PlayerName']);
         const guild=field(p,['guildName','GuildName','guild','Guild']);
-        // Empty guild name is valid only if explicitly present.
+        // Unguilded players are valid; don't manufacture guild membership.
         const rawGuild=guild ?? (['guildName','GuildName','guild','Guild'].some(k=>p?.[k]==='')?'':null);
+        const guildId=String(p?.guildId??p?.GuildId??'').trim();
         const st=stats(p);
         if(!norm(name)||names.has(norm(name))||typeof rawGuild!=='string'||!st)return null;
-        names.add(norm(name));normalizedPlayers.push({...p,name,guildName:rawGuild,...st});
+        if(Boolean(norm(rawGuild))!==Boolean(guildId))return null;
+        names.add(norm(name));normalizedPlayers.push({...p,name,guildName:rawGuild,guildId,...st});
     }
-    const guildNames=new Set();
-    const normalizedGuilds=Object.create(null);
-    let targetIdVerified=!targetGuildId;
-    for(const [key,g] of guildEntries){
-        const name=field(g,['name','Name','guildName','GuildName']),st=stats(g);
-        if(!norm(name)||guildNames.has(norm(name))||!st)return null;
-        const gid=String(g.id??g.Id??g.guildId??key);
-        if(Object.hasOwn(normalizedGuilds,gid))return null;
-        if(norm(name)===norm(targetGuild)&&gid===String(targetGuildId))targetIdVerified=true;
-        guildNames.add(norm(name));normalizedGuilds[gid]={...g,id:gid,name,...st};
-    }
-    if(!targetIdVerified||!guildNames.has(norm(targetGuild))||normalizedPlayers.some(p=>norm(p.guildName)&&!guildNames.has(norm(p.guildName))))return null;
     if(normalizedPlayers.reduce((s,p)=>s+p.kills,0)!==expectedKills||
        normalizedPlayers.reduce((s,p)=>s+p.killFame,0)!==expectedFame)return null;
-    for(const g of Object.values(normalizedGuilds)){
-        const members=normalizedPlayers.filter(p=>norm(p.guildName)===norm(g.name));
-        if(!members.length||['kills','deaths','killFame'].some(k=>members.reduce((s,p)=>s+p[k],0)!==g[k]))return null;
-        if(g.allianceId&&!values(b.alliances).some(a=>String(a?.id??a?.Id??'')===String(g.allianceId))&&!b.alliances?.[g.allianceId])return null;
+    const normalizedGuilds=Object.create(null),normalizedAlliances=Object.create(null);
+    const seenGuildNames=new Set();
+    let targetVerified=false;
+    for(const record of guildMasses){
+        const gid=String(record?.guildId??'').trim(),name=String(record?.name??'').trim();
+        if(!gid||!norm(name)||Object.hasOwn(normalizedGuilds,gid)||seenGuildNames.has(norm(name)))return null;
+        seenGuildNames.add(norm(name));
+        const members=normalizedPlayers.filter(p=>p.guildId===gid);
+        const expectedMass=integer(record.mass);
+        const expectedGuildKills=integer(record.kills);
+        if(!members.length||expectedMass!==members.length||expectedGuildKills===null)return null;
+        if(members.some(p=>norm(p.guildName)!==norm(name)))return null;
+        const kills=members.reduce((s,p)=>s+p.kills,0);
+        const deaths=members.reduce((s,p)=>s+p.deaths,0);
+        const killFame=members.reduce((s,p)=>s+p.killFame,0);
+        if(kills!==expectedGuildKills)return null;
+        const allianceId=String(record.allianceId??'').trim();
+        const allianceName=String(record.allianceName??'').trim();
+        if(allianceName&&!allianceId)return null;
+        if(allianceId){
+            const previous=normalizedAlliances[allianceId];
+            if(previous&&norm(previous.name)!==norm(allianceName))return null;
+            normalizedAlliances[allianceId]={id:allianceId,name:allianceName};
+        }
+        normalizedGuilds[gid]={id:gid,name,kills,deaths,killFame,allianceId};
+        if(norm(name)===norm(targetGuild)&&(!targetGuildId||gid===String(targetGuildId)))targetVerified=true;
+    }
+    if(!targetVerified||normalizedPlayers.some(p=>p.guildId&&!Object.hasOwn(normalizedGuilds,p.guildId)))return null;
+    // A cached Detail that comes from another fight with the same nominal
+    // time or a partial player roster must not be treated as complete.
+    for(const p of normalizedPlayers){
+        if(p.guildId&&norm(normalizedGuilds[p.guildId].name)!==norm(p.guildName))return null;
     }
     return {...b,id:String(id),startTime:new Date(start).toISOString(),endTime:new Date(end).toISOString(),
-        players:normalizedPlayers,guilds:normalizedGuilds,totalKills:expectedKills,totalFame:expectedFame};
+        players:normalizedPlayers,guilds:normalizedGuilds,alliances:normalizedAlliances,
+        totalKills:expectedKills,totalFame:expectedFame};
 }
-
 function createAlbionZvZSource({http,env=process.env,now=Date.now,log=console.warn}={}){
     const enabled=()=>String(env.ALBIONZVZ_PRIMARY_ENABLED||'').toLowerCase()==='true';
     let blockedUntil=0, accessDenied=false, listExpires=0,list=null,listFlight=null,detailWindow=0,detailCount=0;
