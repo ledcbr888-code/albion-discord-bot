@@ -21,6 +21,7 @@ function fixture(battleId=id){
 function sourceFixture(handler,enabled=true){
     let at=now,calls=[];
     const source=createAlbionZvZSource({env:{ALBIONZVZ_PRIMARY_ENABLED:String(enabled)},now:()=>at,log:()=>{},
+        random:()=>0,sleep:async ms=>{at+=ms;},
         http:{get:async(url,options)=>{calls.push({url,options});return handler(url,options);}}});
     return {source,calls,advance:ms=>{at+=ms;}};
 }
@@ -193,4 +194,81 @@ test('accept source-consistent tiny Fame differences without altering individual
     const largeBody={...body,battle:{...body.battle,totalFame:302000}};
     assert.equal(parseDetail(largeBody,id,largeRow,'Guild One',now,guildId),null);
     assert.equal(parseDetail(body,id,{...row,guildMasses:row.guildMasses.map((g,i)=>i?g:{...g,deaths:50})},'Guild One',now,guildId),null);
+});
+
+test('one global request lane spaces list and detail calls; cache avoids duplicate calls',async()=>{
+    const {row,body}=fixture();
+    const called=[],f=sourceFixture(async(url,options)=>{
+        called.push({url,requestAt:fTime()});
+        return {data:url.endsWith('/api/battles')?{server:'asia',rows:[row]}:body};
+    });
+    // sourceFixture time is visible in the deterministic accumulated metrics.
+    function fTime(){return Date.now();}
+    await f.source.discover('Guild One','scope',{guildId});
+    await f.source.getDetail(id,'Guild One',guildId);
+    const info=f.source.getRequestMetrics();
+    assert.equal(info.requests,2);
+    assert.equal(info.listRequests,1);
+    assert.equal(info.detailRequests,1);
+    assert.equal(info.waitMs,3500);
+    assert.equal(info.circuit,'ready');
+    await f.source.discover('Guild One','scope',{guildId});
+    assert.equal(f.source.getRequestMetrics().listCacheHits,1);
+    await f.source.getDetail(id,'Guild One',guildId);
+    assert.equal(f.source.getRequestMetrics().detailCacheHits,1);
+    assert.equal(f.calls.length,2);
+});
+test('multiple simultaneous detail requests never overlap in shared request lane',async()=>{
+    const {row,body}=fixture();
+    const {row:row2,body:body2}=fixture('531020001');
+    let concurrent=0,maxConcurrent=0;
+    const f=sourceFixture(async(url,opts)=>{
+        concurrent++;maxConcurrent=Math.max(maxConcurrent,concurrent);
+        await Promise.resolve();
+        concurrent--;
+        return {data:url.endsWith('/api/battles')?{server:'asia',rows:[row,row2]}:
+            (opts.params.battleId===id?body:body2)};
+    });
+    await f.source.discover('Guild One','scope',{guildId});
+    const [a,b]=await Promise.all([f.source.getDetail(id,'Guild One',guildId),
+        f.source.getDetail('531020001','Guild One',guildId)]);
+    assert.equal(maxConcurrent,1);
+    assert.ok(f.source.isPrimaryData(a));
+    assert.ok(f.source.isPrimaryData(b));
+    assert.equal(f.source.getRequestMetrics().requests,3);
+    assert.equal(f.source.getRequestMetrics().waitMs,7000);
+});
+test('500 outages back off exponentially and use Official path without retry bursts',async()=>{
+    const f=sourceFixture(()=>{throw {response:{status:500}};});
+    assert.equal((await f.source.discover('Guild One','scope',{guildId})).useOfficial,true);
+    assert.equal(f.calls.length,1);
+    assert.equal(f.source.getRequestMetrics().circuit,'cooldown');
+    f.advance(60000);
+    await f.source.discover('Guild One','scope',{guildId});
+    assert.equal(f.calls.length,2);
+    f.advance(60000);
+    await f.source.discover('Guild One','scope',{guildId});
+    assert.equal(f.calls.length,2);
+    f.advance(60001);
+    await f.source.discover('Guild One','scope',{guildId});
+    assert.equal(f.calls.length,3);
+    assert.equal(f.source.getRequestMetrics().transientErrors,3);
+});
+test('429 Retry-After has priority over backoff and 403 makes all subsequent HTTP ineligible',async()=>{
+    const f=sourceFixture(()=>{throw {response:{status:429,headers:{'retry-after':'1800'}}};});
+    await f.source.discover('Guild One','scope',{guildId});
+    f.advance(15*60_000);
+    await f.source.discover('Guild One','scope',{guildId});
+    assert.equal(f.calls.length,1);
+    assert.equal(f.source.getRequestMetrics().throttled,1);
+    f.advance(15*60_000+1);
+    await f.source.discover('Guild One','scope',{guildId});
+    assert.equal(f.calls.length,2);
+    const blocked=sourceFixture(()=>{throw {response:{status:403}};});
+    await blocked.source.discover('Guild One','scope',{guildId});
+    blocked.advance(48*60*60_000);
+    await blocked.source.discover('Guild One','scope',{guildId});
+    assert.equal(blocked.calls.length,1);
+    assert.equal(blocked.source.getRequestMetrics().circuit,'denied');
+    assert.equal(blocked.source.getRequestMetrics().forbidden,1);
 });
