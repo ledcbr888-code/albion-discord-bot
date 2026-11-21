@@ -276,56 +276,71 @@ function createAlbionZvZSource({
         return {ids:[...new Set(ids)],useOfficial:rows===null||!ids.some(id=>!processed.has(id))||due};
     }
     function noteOfficial(scope){lastOfficial.set(scope,now());while(lastOfficial.size>512)lastOfficial.delete(lastOfficial.keys().next().value);}
-    async function getDetail(id,guild,guildId=''){
+    // Diagnostic metadata is output-only. It must never influence provider
+    // selection, retry budgets, report thresholds, or persistent tracking.
+    async function getDetail(id,guild,guildId='',diagnostic=null){
         id=String(id);
-        if(!enabled()||accessDenied||now()<blockedUntil||!validId(id))return null;
-        if((notIndexed.get(id)||0)>now())return null;
+        const note=reason=>{if(diagnostic&&typeof diagnostic==='object')diagnostic.reason=reason;};
+        if(!enabled()){note('PRIMARY_DISABLED');return null;}
+        if(accessDenied){note('CIRCUIT_DENIED');return null;}
+        if(now()<blockedUntil){note('CIRCUIT_COOLDOWN');return null;}
+        if(!validId(id)){note('INVALID_BATTLE_ID');return null;}
+        if((notIndexed.get(id)||0)>now()){note('NOT_INDEXED_CACHED');return null;}
         notIndexed.delete(id);
         const row=knownRows.get(id)||null;
         const hit=details.get(id);
+        const parseResult=(body,successReason,missReason)=>{
+            const data=body?parseDetail(body,id,row,guild,now(),guildId):null;
+            note(data?successReason:missReason);
+            if(data)sourceObjects.add(data);
+            return data;
+        };
         if(hit&&hit.expiresAt>now()){
             metrics.detailCacheHits++;
-            const data=parseDetail(hit.body,id,row,guild,now(),guildId);if(data)sourceObjects.add(data);return data;
+            return parseResult(hit.body,'PRIMARY_CACHE_OK','INVALID_DETAIL');
         }
-        if(detailFlights.has(id))return detailFlights.get(id).then(body=>{
-            const data=parseDetail(body,id,row,guild,now(),guildId);if(data)sourceObjects.add(data);return data;
-        });
+        if(detailFlights.has(id)){
+            const pending=await detailFlights.get(id);
+            return parseResult(pending.body,'PRIMARY_SHARED_OK',pending.body?'INVALID_DETAIL':pending.reason);
+        }
         if(now()-detailWindow>=60_000){detailWindow=now();detailCount=0;}
-        if(detailCount>=3)return null;
+        if(detailCount>=3){note('DETAIL_REQUEST_BUDGET');return null;}
         detailCount++;
         const task=(async()=>{
             try{
                 const r=await guardedGet(BASE+'/api/dev/battle-board/battle',
                     {battleId:id,server:'asia'},'detail');
-                if(!r)return null;
+                if(!r)return {body:null,reason:accessDenied?'CIRCUIT_DENIED':now()<blockedUntil?'CIRCUIT_COOLDOWN':'REQUEST_UNAVAILABLE'};
                 if(!r.data?.battle){
-                    // Not indexed by AlbionZvZ yet: do not punish the entire
-                    // provider, and do not repeatedly request this Battle ID.
+                    // Not indexed by AlbionZvZ yet: no repeated requests for the
+                    // same missing Battle ID, no site-wide circuit breaker.
                     notIndexed.set(id,now()+5*60_000);
                     while(notIndexed.size>150)notIndexed.delete(notIndexed.keys().next().value);
-                    return null;
+                    return {body:null,reason:'NO_BATTLE_DETAIL'};
                 }
                 if(r.data.server!=='asia'||idOf(r.data.battle)!==id)
                     throw Error('Detail schema invalid');
                 markHealthy();
                 details.set(id,{body:r.data,expiresAt:now()+120_000});
                 while(details.size>100)details.delete(details.keys().next().value);
-                return r.data;
+                return {body:r.data,reason:'PRIMARY_HTTP_200'};
             }catch(e){
-                if(Number(e?.response?.status)===404){
+                const status=Number(e?.response?.status)||0;
+                if(status===404){
                     notIndexed.set(id,now()+5*60_000);
                     while(notIndexed.size>150)notIndexed.delete(notIndexed.keys().next().value);
-                    // A missing Battle ID is expected for provider-side
-                    // coverage gaps; go to Official without global cooldown.
-                    return null;
+                    return {body:null,reason:'HTTP_404'};
                 }
-                block(e);return null;
+                block(e);
+                const errorCode=String(e?.code||'').toUpperCase();
+                const reason=status>=400&&status<600?'HTTP_'+status:
+                    ['ECONNABORTED','ETIMEDOUT'].includes(errorCode)?'TIMEOUT':'NETWORK_OR_SCHEMA_ERROR';
+                return {body:null,reason};
             }finally{detailFlights.delete(id);}
         })();
         detailFlights.set(id,task);
-        const data=parseDetail(await task,id,row,guild,now(),guildId);
-        if(data)sourceObjects.add(data);
-        return data;
+        const pending=await task;
+        return parseResult(pending.body,'PRIMARY_HTTP_200',pending.body?'INVALID_DETAIL':pending.reason);
     }
     return {enabled,discover,noteOfficial,getDetail,getRequestMetrics:statusInfo,
         hasKnownBattle:id=>knownRows.has(String(id)),isPrimaryData:b=>Boolean(b&&sourceObjects.has(b))};
