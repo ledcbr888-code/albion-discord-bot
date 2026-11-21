@@ -1,3 +1,4 @@
+# Validation attempt for PR #48 on 2026-11-21; one Asia list, one detail, one Official check.
 name: One-time AlbionZvZ Asia API smoke check (temporary)
 on:
   pull_request:
