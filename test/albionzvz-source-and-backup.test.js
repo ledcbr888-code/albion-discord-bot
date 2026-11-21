@@ -128,3 +128,38 @@ test('invalid source or corrupt prior backup fails safely without replacing data
     assert.throws(()=>backupTrackingFile('/data/tracking.json',opts));
     assert.equal(f.files.get('/data/tracking.json'),'{"version":2}');
 });
+
+test('backup writes and verifies a real, non-overwriting snapshot on disk',()=>{
+    const fs=require('node:fs'),path=require('node:path'),os=require('node:os');
+    const dir=fs.mkdtempSync(path.join(os.tmpdir(),'bossbot-backup-test-'));
+    try {
+        const live=path.join(dir,'tracking.json');
+        const fixture=JSON.stringify({version:3,guilds:{test:{processedBattles:['123'],battleboardState:{cursor:42,delivered:[{key:'123:456',status:'sent'}]}}}});
+        fs.writeFileSync(live,fixture);
+        const result=backupTrackingFile(live);
+        assert.equal(result.created,true);
+        assert.equal(fs.readFileSync(result.path,'utf8'),fixture);
+        if(process.platform!=='win32'){
+            assert.equal(fs.statSync(result.path).mode&0o777,0o600);
+            assert.equal(fs.statSync(path.dirname(result.path)).mode&0o777,0o700);
+        }
+        const updated=JSON.stringify({version:3,guilds:{test:{processedBattles:['123','999']}}});
+        fs.writeFileSync(live,updated);
+        assert.equal(backupTrackingFile(live).created,false);
+        assert.equal(fs.readFileSync(result.path,'utf8'),fixture);
+        assert.equal(fs.readFileSync(live,'utf8'),updated);
+        assert.deepEqual(fs.readdirSync(path.dirname(result.path)),['tracking-before-zvz-v1.json']);
+        fs.writeFileSync(result.path,'broken');
+        assert.throws(()=>backupTrackingFile(live));
+        assert.equal(fs.readFileSync(live,'utf8'),updated);
+    } finally { fs.rmSync(dir,{recursive:true,force:true}); }
+});
+test('existing hydration and persistence checks finish before optional backup and Discord login',()=>{
+    const fs=require('node:fs'),path=require('node:path');
+    const source=fs.readFileSync(path.join(__dirname,'..','index.js'),'utf8');
+    const startup=source.slice(source.lastIndexOf('initializeTrackingPersistence()'));
+    assert.ok(startup.indexOf('await restoreReportedBattleRows();')>=0);
+    assert.ok(startup.indexOf('await restoreReportedBattleRows();')<startup.indexOf('backupTrackingFile(DATA_FILE)'));
+    assert.ok(startup.indexOf('backupTrackingFile(DATA_FILE)')<startup.indexOf('client.login(BOT_TOKEN)'));
+    assert.match(startup,/process\.env\.ALBIONZVZ_PRIMARY_ENABLED = 'false'/);
+});
