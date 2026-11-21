@@ -17,6 +17,13 @@ const {
 } = require('discord.js');
 
 const axios = require('axios');
+const { createAlbionZvZSource, formatEndDelay, battleLink: alternateBattleLink, SOURCE: zvzSourceName } = require('./albionzvz-source');
+const zvzSource = createAlbionZvZSource({ http: axios });
+// Only used by the existing fallback scanner, never by the primary Battleboard integration.
+async function fetchAutoBattlePreferredDetail(matchId, options) {
+    const preferred = await zvzSource.getDetail(matchId, options.targetGuild, options.targetGuildId);
+    return preferred || await fetchOfficialBattle(matchId, options);
+}
 // Global safety net: every Axios request has a finite timeout unless a call sets a stricter one.
 axios.defaults.timeout = 20000;
 const cheerio = require('cheerio');
@@ -2430,7 +2437,8 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
     let rawPlayers = getApiPlayers(apiData);
 
     try {
-        const officialWeaponMap = await fetchOfficialBattleWeaponMap(matchId, { autoBattle: options.autoBattle === true });
+        const officialWeaponMap = options.autoBattle === true && zvzSource.isPrimaryData(apiData) && rawPlayers.every(p => p.weapon)
+            ? new Map() : await fetchOfficialBattleWeaponMap(matchId, { autoBattle: options.autoBattle === true });
         rawPlayers = rawPlayers.map(p => {
             if (p.weapon) return p;
             const info = officialWeaponMap.get(p.name.trim().toLowerCase());
@@ -3321,7 +3329,16 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
         return baselineOnly ? null : queueCandidates([], source);
     }
 
-    // Official GameInfo is the sole source for Auto-Battle Match ID discovery.
+    // Temporary public-source experiment is scoped to the existing fallback.
+    // Keep Official startup baselines, small-fight coverage and periodic reconciliation.
+    // The original Battleboard primary still preempts this scanner on recovery.
+    const preferredDiscovery = await zvzSource.discover(targetGuild, queueScopeKey, {
+        processed: processedBattles, baselineOnly, guildId: targetGuildId
+    });
+    if (!preferredDiscovery.useOfficial && preferredDiscovery.ids.length) {
+        console.log('✅ [Auto-Battle Source] AlbionZvZ Asia | พบ ' + preferredDiscovery.ids.length + ' Battle IDs');
+        return queueCandidates(preferredDiscovery.ids, zvzSourceName);
+    }
     const officialCache = fetchGuildRecentBattles._officialListCache ||
         (fetchGuildRecentBattles._officialListCache = new Map());
     const officialInFlight = fetchGuildRecentBattles._officialListInFlight ||
@@ -3568,6 +3585,7 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
             return { valid: false, ids: [] };
         });
     const [officialIds, eventResult] = await Promise.all([officialPromise, eventPromise]);
+    if (Array.isArray(officialIds) && !baselineOnly && zvzSource.enabled()) zvzSource.noteOfficial(queueScopeKey);
 
     let officialCandidates = null;
     if (Array.isArray(officialIds)) {
@@ -3575,7 +3593,8 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
             ? 'Official GameInfo Battle List'
             : 'Official GameInfo Battle List (ไม่พบไฟต์ที่ตรงกิลด์)';
         // Merge any previous Event firstSeenAt before confirmed IDs leave the hint queue.
-        officialCandidates = queueCandidates(officialIds, officialSource);
+        const combined = [...new Set([...preferredDiscovery.ids, ...officialIds])];
+        officialCandidates = queueCandidates(combined, preferredDiscovery.ids.length ? zvzSourceName + ' + ' + officialSource : officialSource);
     }
 
     if (!baselineOnly && eventResult?.valid && Array.isArray(eventResult.ids)) {
@@ -3594,6 +3613,7 @@ async function fetchGuildRecentBattles(guildOrConfig, options = {}) {
     }
 
     if (Array.isArray(officialIds)) return officialCandidates;
+    if (preferredDiscovery.ids.length && !baselineOnly) return queueCandidates(preferredDiscovery.ids, zvzSourceName);
 
     if (eventResult?.valid && Array.isArray(eventResult.ids) && eventResult.ids.length) {
         const source = 'Official Albion API unavailable; Events-only queue active';
@@ -3838,7 +3858,7 @@ async function checkAutoBattlesForGuild() {
                     }
                     if (needsRequest) prefetchBudget.used++;
                     const detailStartedAt = Date.now();
-                    const detail = await fetchOfficialBattle(matchId, { autoBattle: true, targetGuild: config.targetGuild });
+                    const detail = await fetchAutoBattlePreferredDetail(matchId, { autoBattle: true, targetGuild: config.targetGuild, targetGuildId: config.targetGuildId });
                     prefetchedBattleDetails.set(matchId, detail);
                     prefetchedBattleFetchMs.set(matchId, Date.now() - detailStartedAt);
                 }
@@ -3874,7 +3894,7 @@ async function checkAutoBattlesForGuild() {
                         ? null
                         : (hasPrefetchedDetail
                             ? prefetchedBattleDetails.get(detailKey)
-                            : await fetchOfficialBattle(latestMatchId, { autoBattle: true, targetGuild: config.targetGuild }));
+                            : await fetchAutoBattlePreferredDetail(latestMatchId, { autoBattle: true, targetGuild: config.targetGuild, targetGuildId: config.targetGuildId }));
                     battleDetailFetchMs = isEventOnlyCandidate ? 0 : (hasPrefetchedDetail
                         ? (prefetchedBattleFetchMs.get(detailKey) ?? Date.now() - battleProcessingStartedAt)
                         : Date.now() - battleProcessingStartedAt);
@@ -3979,12 +3999,14 @@ async function checkAutoBattlesForGuild() {
                     continue;
                 }
 
+                const detailSource = zvzSource.isPrimaryData(officialBattle) ? zvzSourceName : 'Official Albion API Asia';
                 const result = await buildBattleReportPayload(
                     latestMatchId,
                     [], // Auto-Battle source guild is not a tracking scope.
                     {
                         autoBattle: true,
                         guildId: config.guildId,
+                        reportGuilds: [config.targetGuild].filter(Boolean),
                         apiData: officialBattle,
                         trackedPlayers: autoTrackedPlayers,
                         trackedGuilds: autoTrackedGuilds
@@ -4003,12 +4025,12 @@ async function checkAutoBattlesForGuild() {
                         continue;
                     }
                     const alertText =
-                        `🚨 **Auto-Battle Alert!** ตรวจพบไฟต์ใหม่ของกิลด์ **${config.targetGuild}**\n` +
-                        `💰 Fame รวมของผู้ที่ติดตาม: \`${formatFame(result.totalFame)}\`\n` +
-                        `⚔️ Kills: \`${Number(result.totalKills).toLocaleString()}\`\n` +
-                        `☠️ Deaths: \`${Number(result.totalDeaths).toLocaleString()}\`\n` +
-                        `➕ Kills + Deaths: \`${(Number(result.totalKills) + Number(result.totalDeaths)).toLocaleString()}\`\n` +
-                        `🔗 Battle Link: <${result.battleUrl}>`;
+                        `🚨 **BOSS BOT Battleboard Alert!** ตรวจพบไฟต์ใหม่ของ **${config.targetGuild}**\n` +
+                        `⚔️ Kills: ${Number(result.totalKills).toLocaleString()}\n` +
+                        `☠️ Deaths: ${Number(result.totalDeaths).toLocaleString()}\n` +
+                        `➕ Kills + Deaths: ${(Number(result.totalKills) + Number(result.totalDeaths)).toLocaleString()}\n` +
+                        `🔗 Battle Link: ${alternateBattleLink(latestMatchId)}\n` +
+                        formatEndDelay(officialBattle, Date.now());
                     const reportFiles = Array.isArray(result.payload.files) ? result.payload.files : [];
                     const totalDeliveryParts = Math.max(1, reportFiles.length);
                     const sendStartedAt = Date.now();
@@ -4093,7 +4115,8 @@ async function checkAutoBattlesForGuild() {
                         ' | เวลาจากพบ Match ID จนส่งรายงาน=' + Math.max(0, reportSentAtMs - battleListFirstSeenAt) + 'ms' +
                         ' | detailFetch=' + (battleDetailFetchMs === null ? 'unknown' : battleDetailFetchMs + 'ms') +
                         ' | ส่งครบ=' + sentDeliveryParts + '/' + totalDeliveryParts +
-                        delayText + '.');
+                        ' | ข้อมูลรายงาน=' + detailSource +
+                        ' | ' + formatEndDelay(officialBattle, reportSentAtMs) + delayText + '.');
                 } else {
                     const decisionAt = Date.now();
                     const ageAtDecisionSec = Number.isFinite(battleTimeMs) && battleTimeMs > 0
