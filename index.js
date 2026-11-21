@@ -19,6 +19,7 @@ const {
 const axios = require('axios');
 const { createAlbionZvZSource, formatEndDelay, battleLink: alternateBattleLink, SOURCE: zvzSourceName } = require('./albionzvz-source');
 const zvzSource = createAlbionZvZSource({ http: axios });
+const { backupTrackingFile } = require('./temporary-source-backup');
 // Only used by the existing fallback scanner, never by the primary Battleboard integration.
 async function fetchAutoBattlePreferredDetail(matchId, options) {
     const preferred = await zvzSource.getDetail(matchId, options.targetGuild, options.targetGuildId);
@@ -7768,6 +7769,20 @@ initializeTrackingPersistence()
     })
     .then(async () => {
         await restoreReportedBattleRows();
+        if (zvzSource.enabled()) {
+            try {
+                // Full local v3 snapshot from the current hydrated state, even
+                // when the regular Supabase snapshot uses compact row storage.
+                if (!saveData({ transientOnly: true })) throw Error('Cannot serialize tracking state');
+                const backup = backupTrackingFile(DATA_FILE);
+                console.log('💾 [AlbionZvZ] ' + (backup.created ? 'สร้าง' : 'ตรวจยืนยัน') +
+                    ' สำรอง Tracking ก่อนสลับแหล่งข้อมูลสำเร็จ | ไม่แก้ไข Supabase หรือทับประวัติรายงาน');
+            } catch (error) {
+                process.env.ALBIONZVZ_PRIMARY_ENABLED = 'false';
+                console.warn('⚠️ [AlbionZvZ] สำรอง Tracking ไม่สำเร็จ จึงคงระบบเดิม | ' +
+                    String(error?.code || error?.name || 'backup-failed').slice(0,100));
+            }
+        }
         if (BOT_ROW_STORAGE_ENABLED && reportedBattlesStoreReady) saveData();
         if (!BOT_TOKEN) {
             throw new Error('BOT_TOKEN is missing or empty. Set Render Environment variable BOT_TOKEN (Bot Token from Discord Developer Portal).');
