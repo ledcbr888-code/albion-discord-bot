@@ -29,6 +29,13 @@ function safeAutoBattleLink(matchId) {
         ? alternateBattleLink(id)
         : '[' + id + '](https://albiononline.com/en/killboard/battles/' + id + ')';
 }
+// Source logging is observational: count raw rows without converting player
+// equipment or introducing extra work before report delivery.
+function getDetailPlayerCountForSourceLog(detail) {
+    const players = detail?.players;
+    if (Array.isArray(players)) return players.length;
+    return players && typeof players === 'object' ? Object.keys(players).length : 0;
+}
 // Only used by the existing fallback scanner, never by the primary Battleboard integration.
 async function fetchAutoBattlePreferredDetail(matchId, options) {
     // Observe the actual Detail decision once per attempted Battle, including
@@ -41,7 +48,7 @@ async function fetchAutoBattlePreferredDetail(matchId, options) {
         if (preferred) {
             console.log('ℹ️ [Auto-Battle Detail Source]' + label +
                 ' | Source=AlbionZvZ Asia | PrimaryReason=' + diagnostic.reason +
-                ' | Players=' + getApiPlayers(preferred).length + ' | Result=PRIMARY_OK');
+                ' | Players=' + getDetailPlayerCountForSourceLog(preferred) + ' | Result=PRIMARY_OK');
             return preferred;
         }
     } catch (_) {
@@ -56,7 +63,7 @@ async function fetchAutoBattlePreferredDetail(matchId, options) {
         console.log('ℹ️ [Auto-Battle Detail Source]' + label +
             ' | Source=' + (fallback ? 'Official Albion API Asia' : 'NONE') +
             ' | PrimaryReason=' + diagnostic.reason +
-            ' | Players=' + (fallback ? getApiPlayers(fallback).length : 'unknown') +
+            ' | Players=' + (fallback ? getDetailPlayerCountForSourceLog(fallback) : 'unknown') +
             ' | Result=' + (fallback ? 'FALLBACK_OK' : 'FALLBACK_UNAVAILABLE'));
     }
 }
@@ -3963,7 +3970,7 @@ async function checkAutoBattlesForGuild() {
                         console.log('ℹ️ [Auto-Battle Detail Source] Battle=' + detailKey +
                             ' | Source=' + (officialBattle ? 'Official Albion API Asia' : 'NONE') +
                             ' | PrimaryReason=EVENT_ONLY_OFFICIAL_PROBE' +
-                            ' | Players=' + (officialBattle ? getApiPlayers(officialBattle).length : 'unknown') +
+                            ' | Players=' + (officialBattle ? getDetailPlayerCountForSourceLog(officialBattle) : 'unknown') +
                             ' | Result=' + (officialBattle ? 'FALLBACK_OK' : 'FALLBACK_UNAVAILABLE'));
                         if (officialBattle) {
                             detectionSource += ' + Official Battle Detail from Events hint';
