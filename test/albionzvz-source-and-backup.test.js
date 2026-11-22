@@ -460,6 +460,8 @@ test('primary report link follows validated direct Detail even when ID absent fr
     const detail=await f.source.getDetail(id,'Guild One',guildId);
     assert.ok(detail);
     assert.equal(f.source.reportLink(id,detail),battleLink(id));
+    const primaryButton = require('../auto-battle-discord-ui').buildAutoBattleLinkComponents(f.source.reportLink(id,detail));
+    assert.equal(primaryButton[0].components[0].url, 'https://www.albionzvz.com/battles/' + id + '?server=asia');
     assert.match(f.source.reportLink('531020001',detail),/albiononline\.com/);
     assert.equal(f.calls.length,1);
 });
@@ -469,6 +471,8 @@ test('Official stats always link Official, even when the ID was in AlbionZvZ Lis
     await f.source.discover('Guild One','scope',{guildId});
     assert.equal(f.source.hasKnownBattle(id),true);
     assert.match(f.source.reportLink(id,body.battle),/albiononline\.com/);
+    const fallbackButton = require('../auto-battle-discord-ui').buildAutoBattleLinkComponents(f.source.reportLink(id,body.battle));
+    assert.equal(fallbackButton[0].components[0].url, 'https://albiononline.com/en/killboard/battles/' + id);
     assert.match(f.source.reportLink(id,null),/albiononline\.com/);
     assert.equal(f.calls.length,1);
 });

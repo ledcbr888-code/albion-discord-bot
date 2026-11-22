@@ -81,13 +81,14 @@ test('All five top summary cards and player-count badge read shared Battle stats
   assert.match(botSource, /String\(sharedStats\?\.playerCount \?\? players\.length\)/);
 });
 
-test('Discord Auto-Battle removes duplicate ID text but keeps working masked Battle Link', () => {
+test('Discord Auto-Battle displays plain Battle ID and keeps statistics/delay without a preview URL', () => {
   const begin = integrationSource.indexOf('const alertText =');
   const end = integrationSource.indexOf('const sendPart =', begin);
   const text = integrationSource.slice(begin,end);
   assert.ok(begin>0 && end>begin);
   assert.doesNotMatch(text,/🆔 Battle ID/);
-  assert.match(text,/🔗 Battle Link: ' \+ formatBattleboardLink\(battleId\)/);
+  assert.match(text,/🔗 Battle ID: ' \+ battleId/);
+  assert.doesNotMatch(text,/https?:|formatBattleboardLink\(battleId\)/);
   assert.match(text,/⚔️ Kills:/);
   assert.match(text,/☠️ Deaths:/);
   assert.match(text,/formatDiscordBattleDelay\(event, detail, new Date\(\)\)/);

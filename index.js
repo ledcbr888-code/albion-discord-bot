@@ -75,6 +75,8 @@ const express = require('express');
 const { AsyncLocalStorage } = require('node:async_hooks');
 const ctaModule = require('./cta');
 const { createBattleboardIntegration } = require('./battleboard-integration');
+const { renderGuildSummary } = require('./guild-summary-theme');
+const { buildAutoBattleLinkComponents } = require('./auto-battle-discord-ui');
 const { selectAutoBattleGuildSummaryRows, summarizeEntireBattleForGuildPages, WEAPON_CARD_TEXT_LAYOUT } = require('./battle-report-layout');
 const { createOfficialEventsShadow } = require('./official-events-shadow');
 const battleboardPrimaryServerIds = new Set();
@@ -1707,97 +1709,10 @@ async function loadFameIcon() {
 
 async function generateGuildSummaryImage(guildsData, options = {}) {
     if (!guildsData || !guildsData.length) return null;
-
-    // Preserve the existing four-guild default. BattleLink can opt into a
-    // complete merged table without changing Auto-Battle or single-fight output.
-    const topGuilds = options.includeAll ? [...guildsData] : [...guildsData].slice(0, 4);
-
-    const includeAlliance = options.includeAlliance === true;
-    const width = includeAlliance ? 1000 : 760;
-    const rowHeight = 56;
-    const headerHeight = 64;
-    const padding = 20;
-    const height = padding * 2 + headerHeight + (topGuilds.length * rowHeight);
-
-    const canvas = createCanvas(width, height);
-    const ctx = canvas.getContext('2d');
-
-    ctx.fillStyle = '#18191c';
-    drawRoundRect(ctx, 0, 0, width, height, 16);
-    ctx.fill();
-
-    ctx.font = 'bold 16px sans-serif';
-    if (includeAlliance) {
-        // Use one fixed column grid for both header labels and row values.
-        // Each label is centered on the exact same column center.
-        const columns = [
-            { key:'alliance', x:30,  w:150, title:'ALLIANCE', color:'#ffffff' },
-            { key:'name',     x:180, w:230, title:'NAME',     color:'#ffffff' },
-            { key:'players',  x:410, w:110, title:'PLAYERS',  color:'#ffffff' },
-            { key:'kills',    x:520, w:110, title:'KILLS',    color:'#ffffff' },
-            { key:'deaths',   x:630, w:120, title:'DEATHS',   color:'#ffffff' },
-            { key:'fame',     x:750, w:220, title:'FAME',     color:'#ffffff' }
-        ];
-        for (const col of columns) {
-            ctx.fillStyle = col.color;
-            ctx.textAlign = 'center';
-            ctx.fillText(col.title, col.x + col.w / 2, padding + 38);
-        }
-        ctx.textAlign = 'left';
-        ctx.strokeStyle='#596273'; ctx.lineWidth=1; ctx.setLineDash([]); ctx.beginPath(); ctx.moveTo(30,padding+49); ctx.lineTo(970,padding+49); ctx.stroke();
-    } else {
-        ctx.fillText('NAME', padding + 10, padding + 38);
-        ctx.fillText('PLAYERS', 340, padding + 38);
-        ctx.fillText('KILLS', 460, padding + 38);
-        ctx.fillText('DEATHS', 560, padding + 38);
-        ctx.fillText('FAME', 660, padding + 38);
-    }
-
-    ctx.strokeStyle = '#2b2d31';
-    ctx.lineWidth = 2;
-    ctx.beginPath();
-    ctx.moveTo(padding, padding + headerHeight);
-    ctx.lineTo(width - padding, padding + headerHeight);
-    ctx.stroke();
-
-    topGuilds.forEach((g, i) => {
-        const y = padding + headerHeight + (i * rowHeight);
-
-        ctx.fillStyle = '#ffffff';
-        ctx.font = 'bold 20px sans-serif';
-        const gName = String(g.name || 'Unknown');
-        if (includeAlliance) {
-            const allianceName = String(g.alliance || '-').trim();
-            const cells=[
-                {text:allianceName.length>16?allianceName.slice(0,14)+'..':allianceName,x:30,w:150,color:'#c084fc',font:'bold 16px sans-serif'},
-                {text:gName.length>24?gName.slice(0,22)+'..':gName,x:180,w:230,color:'#ffffff',font:'bold 20px sans-serif'},
-                {text:String(g.playersCount||0),x:410,w:110,color:'#3399ff',font:'bold 20px sans-serif'},
-                {text:String(g.kills||0),x:520,w:110,color:'#ff5555',font:'bold 20px sans-serif'},
-                {text:String(g.deaths||0),x:630,w:120,color:'#ff66cc',font:'bold 20px sans-serif'},
-                {text:formatFame(g.killFame||0),x:750,w:220,color:'#ffcc00',font:'bold 20px sans-serif'}
-            ];
-            for (const c of cells) {
-                ctx.fillStyle=c.color;
-                ctx.font=c.font;
-                ctx.textAlign='center';
-                ctx.fillText(c.text,c.x+c.w/2,y+36);
-            }
-            ctx.textAlign='left';
-        } else {
-            const legacyName = gName.length > 20 ? gName.slice(0, 18) + '..' : gName;
-            ctx.fillText(legacyName, padding + 10, y + 36);
-            ctx.fillStyle = '#3399ff';
-            ctx.fillText(String(g.playersCount || 0), 340, y + 36);
-            ctx.fillStyle = '#ff5555';
-            ctx.fillText(String(g.kills || 0), 460, y + 36);
-            ctx.fillStyle = '#ff66cc';
-            ctx.fillText(String(g.deaths || 0), 560, y + 36);
-            ctx.fillStyle = '#ffcc00';
-            ctx.fillText(formatFame(g.killFame || 0), 660, y + 36);
-        }
-    });
-
-    return new AttachmentBuilder(canvas.toBuffer('image/png'), { name: 'guild-summary.png' });
+    // Preserve caller selection and the existing manual Top 4 default.
+    // Auto-Battle passes includeAll, so every selected tracked Guild is rendered.
+    const rows = options.includeAll ? [...guildsData] : [...guildsData].slice(0, 4);
+    return new AttachmentBuilder(renderGuildSummary(rows, formatFame), { name: 'guild-summary.png' });
 }
 
 async function generatePlayerWeaponReportImage(players, battleInfo = {}) {
@@ -2799,7 +2714,7 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
     // Keep the ANSI/text report as a fallback only when image generation fails.
     const responseContent = attachments.length > 0
         ? (options.autoBattle
-            ? `🔗 **Battle Link:** [${matchId}](${battleUrl})\n🖼️ **Battle Report:** รายงานแบบรูปภาพด้านล่าง`
+            ? `🔗 **Battle ID:** ${matchId}\n🖼️ **Battle Report:** รายงานแบบรูปภาพด้านล่าง`
             : `🔗 **Battle Link:** <${battleUrl}>\n🖼️ **Battle Report:** รายงานแบบรูปภาพด้านล่าง`)
         : report;
 
@@ -2813,7 +2728,8 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
         battleTime,
         guildSummaryData,
         playerReportData: reportRosterRows,
-        payload: { content: responseContent, files: attachments }
+        payload: { content: responseContent, files: attachments,
+            ...(options.autoBattle ? { components: buildAutoBattleLinkComponents(safeAutoBattleLink(matchId, apiData)), flags: 4 } : {}) }
     };
 }
 
@@ -4078,8 +3994,9 @@ async function checkAutoBattlesForGuild() {
                         `⚔️ Kills: ${Number(result.totalKills).toLocaleString()}\n` +
                         `☠️ Deaths: ${Number(result.totalDeaths).toLocaleString()}\n` +
                         `➕ Kills + Deaths: ${(Number(result.totalKills) + Number(result.totalDeaths)).toLocaleString()}\n` +
-                        `🔗 Battle Link: ${safeAutoBattleLink(latestMatchId, officialBattle)}\n` +
+                        `🔗 Battle ID: ${latestMatchId}\n` +
                         formatEndDelay(officialBattle, Date.now());
+                    const firstPartComponents = buildAutoBattleLinkComponents(safeAutoBattleLink(latestMatchId, officialBattle));
                     const reportFiles = Array.isArray(result.payload.files) ? result.payload.files : [];
                     const totalDeliveryParts = Math.max(1, reportFiles.length);
                     const sendStartedAt = Date.now();
@@ -4130,7 +4047,7 @@ async function checkAutoBattlesForGuild() {
                     if (reportFiles.length > 0) {
                         // Keep the existing delivery order: alert + first image, then remaining images.
                         await sendReportPart(
-                            { content: alertText, files: [reportFiles[0]] },
+                            { content: alertText, files: [reportFiles[0]], components: firstPartComponents, flags: 4 },
                             'ข้อความแจ้งเตือน + รูปที่ 1',
                             1
                         );
@@ -4143,7 +4060,7 @@ async function checkAutoBattlesForGuild() {
                         }
                     } else {
                         await sendReportPart(
-                            { content: alertText + '\n' + (result.payload.content || '') },
+                            { content: alertText + '\n' + (result.payload.content || ''), components: firstPartComponents, flags: 4 },
                             'ข้อความแจ้งเตือน',
                             1
                         );
