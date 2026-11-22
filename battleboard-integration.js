@@ -521,7 +521,7 @@ function createBattleboardIntegration(deps = {}) {
       '⚔️ Kills: ' + Number(report.totalKills || 0).toLocaleString() + '\n' +
       '☠️ Deaths: ' + Number(report.totalDeaths || 0).toLocaleString() + '\n' +
       '➕ Kills + Deaths: ' + (Number(report.totalKills || 0) + Number(report.totalDeaths || 0)).toLocaleString() + '\n' +
-      '🔗 Battle Link: ' + formatBattleboardLink(battleId) + '\n' +
+      '🔗 Battle ID: ' + battleId + '\n' +
       formatDiscordBattleDelay(event, detail, new Date());
 
     const sendPart = async (partNumber, payload) => {
@@ -623,7 +623,8 @@ function createBattleboardIntegration(deps = {}) {
 
     if (files.length) {
       if ((Number(record.partsSent) || 0) < 1) {
-        await sendPart(1, { content: alertText, files: [files[0]] });
+        await sendPart(1, { content: alertText, files: [files[0]],
+          components: report.payload.components || [], flags: 4 });
       } else {
         console.log(
           '⏭️ [Auto-Battle] ข้ามไฟล์แนบ 1/' + partsTotal + ' เพราะมีบันทึกว่าส่งสำเร็จแล้ว' +
@@ -647,6 +648,7 @@ function createBattleboardIntegration(deps = {}) {
     } else if ((Number(record.partsSent) || 0) < 1) {
       await sendPart(1, {
         content: alertText + '\n' + String(report.payload && report.payload.content || ''),
+        components: report.payload.components || [], flags: 4,
       });
     } else {
       console.log(

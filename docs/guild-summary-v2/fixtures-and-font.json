@@ -1,0 +1,155 @@
+{
+  "synthetic": true,
+  "beforeRef": "c8ac856373876d851af2e5ee91e3438dfb99a436",
+  "afterFont": "Arial",
+  "scenarios": [
+    {
+      "name": "one-guild",
+      "rows": [
+        {
+          "name": "D R A W I N G",
+          "alliance": "B2B2B",
+          "playersCount": 38,
+          "kills": 21,
+          "deaths": 7,
+          "killFame": 9876543210123
+        }
+      ]
+    },
+    {
+      "name": "four-guilds-tracked-top4",
+      "rows": [
+        {
+          "name": "D R A W I N G",
+          "alliance": "B2B2B",
+          "playersCount": 38,
+          "kills": 21,
+          "deaths": 7,
+          "killFame": 9876543210123
+        },
+        {
+          "name": "Evangelion",
+          "alliance": "-",
+          "playersCount": 12,
+          "kills": 9,
+          "deaths": 4,
+          "killFame": 1696000
+        },
+        {
+          "name": "KPA",
+          "alliance": "GMFDW",
+          "playersCount": 16,
+          "kills": 7,
+          "deaths": 8,
+          "killFame": 1623000
+        },
+        {
+          "name": "Fourth Guild",
+          "alliance": "NORTH",
+          "playersCount": 9,
+          "kills": 4,
+          "deaths": 2,
+          "killFame": 900000
+        }
+      ]
+    },
+    {
+      "name": "five-guilds-tracked-outside",
+      "rows": [
+        {
+          "name": "D R A W I N G",
+          "alliance": "B2B2B",
+          "playersCount": 38,
+          "kills": 21,
+          "deaths": 7,
+          "killFame": 9876543210123
+        },
+        {
+          "name": "Evangelion",
+          "alliance": "-",
+          "playersCount": 12,
+          "kills": 9,
+          "deaths": 4,
+          "killFame": 1696000
+        },
+        {
+          "name": "KPA",
+          "alliance": "GMFDW",
+          "playersCount": 16,
+          "kills": 7,
+          "deaths": 8,
+          "killFame": 1623000
+        },
+        {
+          "name": "Fourth Guild",
+          "alliance": "NORTH",
+          "playersCount": 9,
+          "kills": 4,
+          "deaths": 2,
+          "killFame": 900000
+        },
+        {
+          "name": "PLAC",
+          "alliance": "WPZ",
+          "playersCount": 2,
+          "kills": 2,
+          "deaths": 1,
+          "killFame": 289800
+        }
+      ]
+    },
+    {
+      "name": "six-guilds-long-names",
+      "rows": [
+        {
+          "name": "D R A W I N G",
+          "alliance": "B2B2B",
+          "playersCount": 38,
+          "kills": 21,
+          "deaths": 7,
+          "killFame": 9876543210123
+        },
+        {
+          "name": "Evangelion",
+          "alliance": "-",
+          "playersCount": 12,
+          "kills": 9,
+          "deaths": 4,
+          "killFame": 1696000
+        },
+        {
+          "name": "KPA",
+          "alliance": "GMFDW",
+          "playersCount": 16,
+          "kills": 7,
+          "deaths": 8,
+          "killFame": 1623000
+        },
+        {
+          "name": "Fourth Guild",
+          "alliance": "NORTH",
+          "playersCount": 9,
+          "kills": 4,
+          "deaths": 2,
+          "killFame": 900000
+        },
+        {
+          "name": "PLAC",
+          "alliance": "WPZ",
+          "playersCount": 2,
+          "kills": 2,
+          "deaths": 1,
+          "killFame": 289800
+        },
+        {
+          "name": "A Very Long Tracked Guild Name That Must Stay Inside Its Column",
+          "alliance": "A VERY LONG ALLIANCE NAME THAT NEEDS ELLIPSIS",
+          "playersCount": 123456,
+          "kills": 321,
+          "deaths": 123,
+          "killFame": 176300
+        }
+      ]
+    }
+  ]
+}

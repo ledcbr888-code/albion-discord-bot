@@ -316,7 +316,9 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
       totalKills: 10,
       totalDeaths: 2,
       battleUrl: 'https://example.test/battle/' + battleId,
-      payload: { files: [Buffer.from('image-part-1'), Buffer.from('image-part-2')], content: 'report body for ' + battleId },
+      payload: { files: [Buffer.from('image-part-1'), Buffer.from('image-part-2')], content: 'report body for ' + battleId,
+        components: require('../auto-battle-discord-ui').buildAutoBattleLinkComponents(
+          '[' + battleId + '](https://albiononline.com/en/killboard/battles/' + battleId + ')') },
     }),
     formatFame: value => Number(value || 0).toLocaleString(),
   });
@@ -327,12 +329,16 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
     assert.equal(sent[0].nonce, deliveryNonce('1002', channelId, 1));
     assert.equal(sent[0].enforceNonce, true);
     assert.doesNotMatch(sent[0].content, /🆔 Battle ID:/);
-    assert.match(sent[0].content, /🔗 Battle Link: \[1002\]\(https:\/\/albion-battleboard-clone-1\.vercel\.app\/b\/1002\)/);
+    assert.match(sent[0].content, /🔗 Battle ID: 1002/);
+    assert.doesNotMatch(sent[0].content, /https?:|\]\(/);
+    assert.equal(sent[0].components[0].components[0].url, 'https://albiononline.com/en/killboard/battles/1002');
+    assert.equal(sent[0].flags, 4);
     assert.match(sent[0].content, /⏱️ Delay \(Battle จบ → ส่งรายงาน\): \d+ นาที/);
     assert.doesNotMatch(sent[0].content, /Fame ตามเงื่อนไขแต่ละ Guild|albionbb\.com\/battles/);
     assert.match(sent[0].content.trim().split('\n').at(-1), /^⏱️ Delay/);
     assert.equal(sent[1].nonce, deliveryNonce('1002', channelId, 2));
     assert.equal(sent[1].content, undefined, 'continuation must have no separator text');
+    assert.equal(sent[1].components, undefined, 'button belongs only to first part');
     assert.equal(sent[1].files.length, 1, 'continuation must retain image');
     assert.doesNotMatch(sent[0].content, /Fame รวมของผู้ที่ติดตาม|Fame ตามเงื่อนไขแต่ละ Guild/);
     assert.equal(config.battleboardState.eventCursor.afterBattleId, '1002');
@@ -343,7 +349,8 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
     assert.equal(sent.length, 4, 'the earlier Battle should send both parts after its detail becomes ready');
     assert.equal(sent[2].nonce, deliveryNonce('1001', channelId, 1));
     assert.doesNotMatch(sent[2].content, /🆔 Battle ID:/);
-    assert.match(sent[2].content, /🔗 Battle Link: \[1001\]\(https:\/\/albion-battleboard-clone-1\.vercel\.app\/b\/1001\)/);
+    assert.match(sent[2].content, /🔗 Battle ID: 1001/);
+    assert.equal(sent[2].components[0].components[0].url, 'https://albiononline.com/en/killboard/battles/1001');
     assert.equal(sent[3].nonce, deliveryNonce('1001', channelId, 2));
     assert.equal(sent[3].content, undefined);
     assert.equal(sent[3].files.length, 1);
