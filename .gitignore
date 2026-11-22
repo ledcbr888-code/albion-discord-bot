@@ -17,3 +17,5 @@ dist/
 build/
 # Private pre-switch tracking snapshot (never commit to public GitHub)
 .bossbot-backups/
+# Bounded local AlbionZvZ evidence; never commit to GitHub
+.bossbot-diagnostics/
