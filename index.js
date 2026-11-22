@@ -43,6 +43,7 @@ async function fetchAutoBattlePreferredDetail(matchId, options) {
     try {
         const preferred = await zvzSource.getDetail(matchId, options.targetGuild, options.targetGuildId, diagnostic);
         if (preferred) {
+            if (options.primaryBudgetKey) primaryCapacityQueue.clear(options.primaryBudgetKey);
             console.log('ℹ️ [Auto-Battle Detail Source]' + label +
                 ' | Source=AlbionZvZ Asia | PrimaryReason=' + diagnostic.reason +
                 ' | Players=' + getDetailPlayerCountForSourceLog(preferred) + ' | Result=PRIMARY_OK');
@@ -51,6 +52,23 @@ async function fetchAutoBattlePreferredDetail(matchId, options) {
     } catch (_) {
         diagnostic.reason = 'PRIMARY_EXCEPTION';
         console.warn('⚠️ [AlbionZvZ] Detail ไม่พร้อม | Battle=' + String(matchId) + ' | ใช้ Official API สำรอง');
+    }
+    // Capacity exhaustion is not a provider failure. Briefly queue this ID
+    // without increasing the existing three-Detail/minute shared HTTP budget.
+    if (diagnostic.reason === 'DETAIL_REQUEST_BUDGET' && options.primaryBudgetKey) {
+        const capacity = primaryCapacityQueue.onExhausted(options.primaryBudgetKey);
+        if (capacity.defer) {
+            if (options.capacityDecision) options.capacityDecision.deferred = true;
+            console.log('⏳ [AlbionZvZ Detail Queue]' + label +
+                ' | Reason=DETAIL_REQUEST_BUDGET | WaitRemainingMs=' + capacity.remainingMs +
+                ' | RetryNextPoll=true | OfficialFallback=deferred');
+            return null;
+        }
+        console.log('ℹ️ [AlbionZvZ Detail Queue]' + label +
+            ' | Reason=CAPACITY_WAIT_EXPIRED | WaitedMs=' + capacity.waitedMs +
+            ' | OfficialFallback=enabled');
+    } else if (options.primaryBudgetKey) {
+        primaryCapacityQueue.clear(options.primaryBudgetKey);
     }
     let fallback;
     try {
@@ -77,6 +95,8 @@ const ctaModule = require('./cta');
 const { createBattleboardIntegration } = require('./battleboard-integration');
 const { renderGuildSummary } = require('./guild-summary-theme');
 const { buildAutoBattleLinkComponents } = require('./auto-battle-discord-ui');
+const { createAlbionZvZCapacityQueue, rotateScannerOrder } = require('./albionzvz-capacity-queue');
+const primaryCapacityQueue = createAlbionZvZCapacityQueue();
 const { selectAutoBattleGuildSummaryRows, summarizeEntireBattleForGuildPages, WEAPON_CARD_TEXT_LAYOUT } = require('./battle-report-layout');
 const { createOfficialEventsShadow } = require('./official-events-shadow');
 const battleboardPrimaryServerIds = new Set();
@@ -3655,7 +3675,12 @@ async function checkAutoBattles() {
     // Event-only diagnostics are budgeted per Discord-server/target-guild tracker,
     // so one busy guild cannot consume every other tracker's probe allowance.
     checkAutoBattles._eventFallbackBudget = new Map();
-    const guilds = getAllGuildConfigs();
+    // Rotate server priority every polling cycle so the same first Discord
+    // server cannot repeatedly consume the shared primary Detail slots.
+    const serverConfigs = getAllGuildConfigs();
+    const round = checkAutoBattles._serverRotation || 0;
+    const guilds = rotateScannerOrder(serverConfigs, round);
+    checkAutoBattles._serverRotation = serverConfigs.length ? (round + 1) % serverConfigs.length : 0;
     for (const { guildId } of guilds) {
         await guildContext.run({ guildId }, async () => {
             await checkAutoBattlesForGuild();
@@ -3702,7 +3727,12 @@ async function checkAutoBattlesForGuild() {
 
     autoBattleCheckRunning = true;
     try {
-        for (const config of autoBattleConfigs) {
+        const serverRotations = checkAutoBattlesForGuild._trackerRotation ||
+            (checkAutoBattlesForGuild._trackerRotation = new Map());
+        const trackers = Array.isArray(autoBattleConfigs) ? autoBattleConfigs : [];
+        const rotation = serverRotations.get(scopedDiscordServerId) || 0;
+        if (trackers.length) serverRotations.set(scopedDiscordServerId, (rotation + 1) % trackers.length);
+        for (const config of rotateScannerOrder(trackers, rotation)) {
             try {
             const trackerScope = getGuildConfig(config.guildId, false);
             const autoTrackedGuilds = Array.isArray(trackerScope?.guilds)
@@ -3774,6 +3804,8 @@ async function checkAutoBattlesForGuild() {
             const newMatchIds = [...candidateMeta.keys()]
                 .filter(id => !processedBattles.has(String(id)))
                 .filter(id => (detailRetryStates.get(String(id))?.nextRetryAt || 0) <= retryCheckAt)
+                // Capacity-only delays do not increment the Official retry counter.
+                .filter(id => primaryCapacityQueue.isReady(pendingQueueScopeKey + ':' + id))
                 // Prioritize confirmed Battle List IDs first; within each source, fresh IDs run before retries.
                 .sort((a, b) => {
                     const eventOnlyA = candidateMeta.get(String(a))?.eventOnly === true ? 1 : 0;
@@ -3791,6 +3823,7 @@ async function checkAutoBattlesForGuild() {
                 (checkAutoBattles._detailLookupBudget = { used: 0, limit: 25, startedAt: Date.now() });
             const prefetchedBattleDetails = new Map();
             const prefetchedBattleFetchMs = new Map();
+            const prefetchedCapacityDeferrals = new Set();
             const prefetchIds = newMatchIds.slice(0, Math.min(25, newMatchIds.length));
             let prefetchCursor = 0;
             const prefetchWorker = async () => {
@@ -3818,7 +3851,14 @@ async function checkAutoBattlesForGuild() {
                     }
                     if (needsRequest) prefetchBudget.used++;
                     const detailStartedAt = Date.now();
-                    const detail = await fetchAutoBattlePreferredDetail(matchId, { autoBattle: true, targetGuild: config.targetGuild, targetGuildId: config.targetGuildId });
+                    const capacityDecision = {};
+                    const detail = await fetchAutoBattlePreferredDetail(matchId, {
+                        autoBattle: true, targetGuild: config.targetGuild,
+                        targetGuildId: config.targetGuildId,
+                        primaryBudgetKey: pendingQueueScopeKey + ':' + matchId,
+                        capacityDecision
+                    });
+                    if (capacityDecision.deferred) prefetchedCapacityDeferrals.add(matchId);
                     prefetchedBattleDetails.set(matchId, detail);
                     prefetchedBattleFetchMs.set(matchId, Date.now() - detailStartedAt);
                 }
@@ -3838,6 +3878,7 @@ async function checkAutoBattlesForGuild() {
                 let battleDetailFetchMs = null;
                 try {
                     const detailKey = String(latestMatchId);
+                    const capacityDecision = { deferred: prefetchedCapacityDeferrals.has(detailKey) };
                     const detailCacheEntry = fetchOfficialBattle._autoBattleDetailCache?.get(detailKey);
                     const hasCachedDetail = Boolean(detailCacheEntry && detailCacheEntry.expiresAt > Date.now());
                     const failureUntil = battleFetchFailureUntil.get('autoBattle:' + detailKey) || 0;
@@ -3854,7 +3895,12 @@ async function checkAutoBattlesForGuild() {
                         ? null
                         : (hasPrefetchedDetail
                             ? prefetchedBattleDetails.get(detailKey)
-                            : await fetchAutoBattlePreferredDetail(latestMatchId, { autoBattle: true, targetGuild: config.targetGuild, targetGuildId: config.targetGuildId }));
+                            : await fetchAutoBattlePreferredDetail(latestMatchId, {
+                                autoBattle: true, targetGuild: config.targetGuild,
+                                targetGuildId: config.targetGuildId,
+                                primaryBudgetKey: pendingQueueScopeKey + ':' + detailKey,
+                                capacityDecision
+                            }));
                     battleDetailFetchMs = isEventOnlyCandidate ? 0 : (hasPrefetchedDetail
                         ? (prefetchedBattleFetchMs.get(detailKey) ?? Date.now() - battleProcessingStartedAt)
                         : Date.now() - battleProcessingStartedAt);
@@ -3882,7 +3928,9 @@ async function checkAutoBattlesForGuild() {
                         // existing per-scope two-probe budget and Official eventOnly fallback.
                         officialBattle = await fetchAutoBattlePreferredDetail(detailKey, {
                             autoBattle: true, targetGuild: config.targetGuild,
-                            targetGuildId: config.targetGuildId, eventOnly: true
+                            targetGuildId: config.targetGuildId, eventOnly: true,
+                            primaryBudgetKey: pendingQueueScopeKey + ':' + detailKey,
+                            capacityDecision
                         });
                         if (officialBattle) {
                             detectionSource += ' + ' + (zvzSource.isPrimaryData(officialBattle)
@@ -3891,6 +3939,11 @@ async function checkAutoBattlesForGuild() {
                         battleDetailFetchMs = Date.now() - eventCandidateStartedAt;
                     }
 
+                if (!officialBattle && capacityDecision.deferred) {
+                    // Keep the ID pending. Never mark processed or apply Official
+                    // 404 backoff while the only issue is the shared primary limit.
+                    continue;
+                }
                 if (!officialBattle) {
                     const failure = autoBattleDetailFailure.get('autoBattle:' + detailKey);
                     const failureSummary = Number(failure?.status) === 404
