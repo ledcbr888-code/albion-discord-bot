@@ -305,7 +305,24 @@ function createAlbionZvZSource({
         const row=knownRows.get(id)||null;
         const hit=details.get(id);
         const parseResult=(body,successReason,missReason)=>{
+            // Only numeric counts; never copy raw player names/equipment/response.
+            if (body?.battle && diagnostic && typeof diagnostic === 'object') {
+                const b=body.battle;
+                diagnostic.providerPlayers=values(b.players).length;
+                diagnostic.providerExpected=integer(field(b,['totalParticipants','TotalParticipants']));
+                diagnostic.listExpected=row?integer(field(row,['totalParticipants','mass'])):null;
+            }
             const data=body?parseDetail(body,id,row,guild,now(),guildId):null;
+            if (!data && body && diagnostic && typeof diagnostic === 'object') {
+                const actual=diagnostic.providerPlayers;
+                const fromList=diagnostic.listExpected;
+                const fromDetail=diagnostic.providerExpected;
+                diagnostic.validationIssue=fromList!==null && fromList!==undefined && actual!==fromList
+                    ? 'LIST_PLAYER_COUNT_MISMATCH'
+                    : fromDetail!==null && fromDetail!==undefined && actual!==fromDetail
+                        ? 'DETAIL_PLAYER_COUNT_MISMATCH'
+                        : 'OTHER_VALIDATION';
+            }
             note(data?successReason:missReason);
             if(data)sourceObjects.add(data);
             return data;

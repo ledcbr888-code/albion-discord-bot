@@ -18,6 +18,8 @@ const {
 
 const axios = require('axios');
 const { createAlbionZvZSource, formatEndDelay, SOURCE: zvzSourceName } = require('./albionzvz-source');
+const { createAlbionZvZDiagnosticLog } = require('./albionzvz-diagnostic-log');
+let autoBattleDiagnosticLog = null;
 const zvzSource = createAlbionZvZSource({ http: axios });
 const { backupTrackingFile } = require('./temporary-source-backup');
 function safeAutoBattleLink(matchId, detail) {
@@ -59,11 +61,21 @@ async function fetchAutoBattlePreferredDetail(matchId, options) {
         const capacity = primaryCapacityQueue.onExhausted(options.primaryBudgetKey);
         if (capacity.defer) {
             if (options.capacityDecision) options.capacityDecision.deferred = true;
+            if (typeof autoBattleDiagnosticLog !== 'undefined') autoBattleDiagnosticLog?.record({
+                event:'BUDGET_WAIT', battleId:matchId, guild:options.targetGuild || options.targetGuildId,
+                reason:diagnostic.reason, result:'DEFERRED', eventOnly:options.eventOnly === true,
+                waitMs:capacity.remainingMs
+            });
             console.log('⏳ [AlbionZvZ Detail Queue]' + label +
                 ' | Reason=DETAIL_REQUEST_BUDGET | WaitRemainingMs=' + capacity.remainingMs +
                 ' | RetryNextPoll=true | OfficialFallback=deferred');
             return null;
         }
+        if (typeof autoBattleDiagnosticLog !== 'undefined') autoBattleDiagnosticLog?.record({
+            event:'CAPACITY_EXPIRED', battleId:matchId, guild:options.targetGuild || options.targetGuildId,
+            reason:'DETAIL_REQUEST_BUDGET', result:'DEFERRED',
+            eventOnly:options.eventOnly === true, waitMs:capacity.waitedMs
+        });
         console.log('ℹ️ [AlbionZvZ Detail Queue]' + label +
             ' | Reason=CAPACITY_WAIT_EXPIRED | WaitedMs=' + capacity.waitedMs +
             ' | OfficialFallback=enabled');
@@ -75,6 +87,16 @@ async function fetchAutoBattlePreferredDetail(matchId, options) {
         fallback = await fetchOfficialBattle(matchId, options);
         return fallback;
     } finally {
+        if (typeof autoBattleDiagnosticLog !== 'undefined') autoBattleDiagnosticLog?.record({
+            event:'FALLBACK', battleId:matchId, guild:options.targetGuild || options.targetGuildId,
+            reason:diagnostic.reason, issue:diagnostic.validationIssue,
+            result:fallback ? 'FALLBACK_OK' : 'FALLBACK_UNAVAILABLE',
+            eventOnly:options.eventOnly === true,
+            providerPlayers:diagnostic.providerPlayers,
+            providerExpected:diagnostic.providerExpected,
+            listExpected:diagnostic.listExpected,
+            officialPlayers:fallback ? getDetailPlayerCountForSourceLog(fallback) : null
+        });
         console.log('ℹ️ [Auto-Battle Detail Source]' + label +
             ' | Source=' + (fallback ? 'Official Albion API Asia' : 'NONE') +
             ' | PrimaryReason=' + diagnostic.reason +
@@ -173,6 +195,12 @@ client.rest.on('response', (_request, response) => {
 
 const DATA_DIR = String(process.env.DATA_DIR || __dirname).trim();
 const DATA_FILE = String(process.env.TRACKING_FILE || path.join(DATA_DIR, 'tracking.json')).trim();
+// Bounded, local-only diagnostic ring beside persistent Tracking.
+// This adds no Supabase/GitHub writes. Failed I/O never blocks delivery.
+autoBattleDiagnosticLog = createAlbionZvZDiagnosticLog({
+    directory: path.join(path.dirname(path.resolve(DATA_FILE)), '.bossbot-diagnostics'),
+    onError: code => console.warn('⚠️ [AlbionZvZ Diagnostics] เขียน Log ไม่ได้ | Code=' + code)
+});
 // GitHub persistence must point to a PRIVATE repository; never store tracking data
 // in this public bot source repository.
 const GITHUB_DATA_TOKEN = String(process.env.GITHUB_DATA_TOKEN || '').trim();
