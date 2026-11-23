@@ -117,6 +117,7 @@ const ctaModule = require('./cta');
 const { createBattleboardIntegration } = require('./battleboard-integration');
 const { renderGuildSummary } = require('./guild-summary-theme');
 const { buildAutoBattleLinkComponents } = require('./auto-battle-discord-ui');
+const { isConfiguredBattleLinkChannel } = require('./battlelink-channel-guard');
 const { createAlbionZvZCapacityQueue, rotateScannerOrder } = require('./albionzvz-capacity-queue');
 const primaryCapacityQueue = createAlbionZvZCapacityQueue();
 const { selectAutoBattleGuildSummaryRows, summarizeEntireBattleForGuildPages, WEAPON_CARD_TEXT_LAYOUT } = require('./battle-report-layout');
@@ -7716,13 +7717,15 @@ client.on('messageCreate', async message => {
     } catch (err) {
         console.error('❌ AVA messageCreate error:', err.message);
     }
-    const match = message.content.match(/https?:\/\/(?:east\.)?albionbb\.com\/battles\/[^\s]+/i);
+    // Explicit opt-in only. Without /battlelink setup, no channel may trigger
+    // automatic BattleLink reports. This guard runs before regex, embeds, rate
+    // limits, HTTP calls or Discord replies; AVA handling above is unchanged.
+    const guildConfig = message.guildId ? getGuildConfig(message.guildId, false) : null;
+    if (!isConfiguredBattleLinkChannel(message.guildId,
+            message.channelId || message.channel?.id, guildConfig)) return;
+    const match = (message.content || '').match(/https?:\/\/(?:east\.)?albionbb\.com\/battles\/[^\s]+/i);
     if (!match) return;
     const battleUrl = match[0].replace(/[)>\],.]+$/, '');
-
-    const guildConfig = getGuildConfig(message.guildId, false);
-    const dedicatedBattleLinkChannel = guildConfig?.battleLinkChannelId;
-    if (dedicatedBattleLinkChannel && message.channel.id !== dedicatedBattleLinkChannel) return;
 
     // Hide the embed preview on this recognized BattleLink source message; keep its URL.
     try { if (typeof message.suppressEmbeds === 'function') await message.suppressEmbeds(true); }
