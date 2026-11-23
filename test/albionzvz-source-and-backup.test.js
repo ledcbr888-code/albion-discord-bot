@@ -449,7 +449,7 @@ test('PR50: detailed source logs exist for successful, skipped, and Event-only p
     assert.match(sourceLogPath,/getDetailPlayerCountForSourceLog\(fallback\)/);
     assert.doesNotMatch(sourceLogPath,/getApiPlayers\(/,
         'diagnostics must not invoke the full player/equipment converter');
-    assert.match(index,/safeAutoBattleLink\(latestMatchId, officialBattle\)/);
+    assert.match(index,/buildAutoBattleLinkComponents\(autoBattleViewerLink\(latestMatchId\)\)/);
 });
 
 

@@ -134,11 +134,11 @@ test('Battleboard sender forwards the same first-part button without changing co
     }
 });
 
-test('link row rejects unsupported URLs, and actual report callers retain validated Detail identity', () => {
+test('link row rejects unsupported URLs, and both report callers use the independent AlbionZvZ viewer URL', () => {
     for (const link of ['https://www.albionzvz.com', '[1](https://evil.example/1)', '[1](https://evil@albiononline.com/1)']) {
         assert.throws(() => buildAutoBattleLinkComponents(link));
     }
-    assert.match(source, /buildAutoBattleLinkComponents\(safeAutoBattleLink\(matchId, apiData\)\)/);
-    assert.match(source, /buildAutoBattleLinkComponents\(safeAutoBattleLink\(latestMatchId, officialBattle\)\)/);
-    assert.doesNotMatch(source.slice(source.indexOf('const alertText =', source.indexOf('async function checkAutoBattlesForGuild')), source.indexOf('const reportFiles =')), /\$\{safeAutoBattleLink/);
+    assert.match(source, /buildAutoBattleLinkComponents\(autoBattleViewerLink\(matchId\)\)/);
+    assert.match(source, /buildAutoBattleLinkComponents\(autoBattleViewerLink\(latestMatchId\)\)/);
+    assert.doesNotMatch(source.slice(source.indexOf('const alertText =', source.indexOf('async function checkAutoBattlesForGuild')), source.indexOf('const reportFiles =')), /\$\{autoBattleViewerLink/);
 });

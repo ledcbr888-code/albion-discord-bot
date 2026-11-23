@@ -17,15 +17,16 @@ const {
 } = require('discord.js');
 
 const axios = require('axios');
-const { createAlbionZvZSource, formatEndDelay, SOURCE: zvzSourceName } = require('./albionzvz-source');
+const { createAlbionZvZSource, formatEndDelay, battleLink, SOURCE: zvzSourceName } = require('./albionzvz-source');
 const { createAlbionZvZDiagnosticLog } = require('./albionzvz-diagnostic-log');
 let autoBattleDiagnosticLog = null;
 const zvzSource = createAlbionZvZSource({ http: axios });
 const { backupTrackingFile } = require('./temporary-source-backup');
-function safeAutoBattleLink(matchId, detail) {
-    // Use the validated Detail actually passed to the report builder, not
-    // membership in the rolling List or the source that discovered the ID.
-    return zvzSource.reportLink(matchId, detail);
+function autoBattleViewerLink(matchId) {
+    // Link destination is a UI preference, NOT the statistical data source.
+    // Keep true AlbionZvZ/Official source attribution in Detail diagnostics.
+    // This constructs only a public Asia Battle URL; no extra API requests.
+    return battleLink(matchId);
 }
 // Source logging is observational: count raw rows without converting player
 // equipment or introducing extra work before report delivery.
@@ -2778,7 +2779,7 @@ async function buildBattleReportPayload(matchId, customTargetGuilds = [], option
         guildSummaryData,
         playerReportData: reportRosterRows,
         payload: { content: responseContent, files: attachments,
-            ...(options.autoBattle ? { components: buildAutoBattleLinkComponents(safeAutoBattleLink(matchId, apiData)), flags: 4 } : {}) }
+            ...(options.autoBattle ? { components: buildAutoBattleLinkComponents(autoBattleViewerLink(matchId)), flags: 4 } : {}) }
     };
 }
 
@@ -4078,7 +4079,7 @@ async function checkAutoBattlesForGuild() {
                         `➕ Kills + Deaths: ${(Number(result.totalKills) + Number(result.totalDeaths)).toLocaleString()}\n` +
                         `🔗 Battle ID: ${latestMatchId}\n` +
                         formatEndDelay(officialBattle, Date.now());
-                    const firstPartComponents = buildAutoBattleLinkComponents(safeAutoBattleLink(latestMatchId, officialBattle));
+                    const firstPartComponents = buildAutoBattleLinkComponents(autoBattleViewerLink(latestMatchId));
                     const reportFiles = Array.isArray(result.payload.files) ? result.payload.files : [];
                     const totalDeliveryParts = Math.max(1, reportFiles.length);
                     const sendStartedAt = Date.now();
