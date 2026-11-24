@@ -138,7 +138,7 @@ const AVA_MAP_TIERS = {
   "Honitos-Uxeulum": "T4",
   "Honos-Oyezam": "T8",
   "Honos-Umayaum": "T6",
-  "Horos-Ohenlum": "T8",
+  "Horos-Ohenlum": "T6",
   "Hures-Ugumtum": "T6",
   "Hurites-Ieatun": "T8",
   "Hurites-Ouaylos": "T4",
