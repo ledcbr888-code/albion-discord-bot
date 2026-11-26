@@ -1148,14 +1148,17 @@ test('Discord delivery Ack stays in independent outbox after 503 and is retried 
  process.env.BATTLEBOARD_DELIVERY_ACK_ENABLED='true';
  let postedAcks=0,sends=0,eventCalls=0,ackReady=false;
  const persistedDeliveryRows=[];
+ const acknowledgedParts=[];
  global.fetch=async (urlValue,init)=>{
    const url=new URL(String(urlValue));let body={};
    if(url.pathname==='/api/bot-tracked-entities'&&url.searchParams.get('mode')==='delivery-ack'){
      postedAcks++;const payload=JSON.parse(init.body);
-     assert.equal(payload.eventId,serverId+':'+battleId+':'+channelId+':1');
-     assert.equal(payload.messageId,'1570899488606781440');
-     assert.equal(payload.partsTotal,1);
+     assert.ok([1,2].includes(payload.partNumber));
+     assert.equal(payload.eventId,serverId+':'+battleId+':'+channelId+':'+payload.partNumber);
+     assert.equal(payload.messageId,payload.partNumber===1?'1570899488606781440':'1570899488606781441');
+     assert.equal(payload.partsTotal,2);
      if(!ackReady)return{ok:false,status:503,text:async()=>JSON.stringify({error:'temporarily unavailable'})};
+     acknowledgedParts.push(payload.partNumber);
      body={ok:true,duplicate:false};
    }else if(url.pathname==='/api/bot-tracked-entities'&&url.searchParams.get('mode')==='events'){
      body={items:eventCalls++===0?[event]:[]};
@@ -1166,7 +1169,7 @@ test('Discord delivery Ack stays in independent outbox after 503 and is retried 
    return{ok:true,status:200,text:async()=>JSON.stringify(body)};
  };
  const integration=createBattleboardIntegration({
-  client:{channels:{fetch:async()=>({send:async()=>{sends++;return{id:'1570899488606781440'}}})}},
+  client:{channels:{fetch:async()=>({send:async()=>{sends++;return{id:sends===1?'1570899488606781440':'1570899488606781441'}}})}},
   getAllGuildConfigs:()=>[{guildId:serverId,config}],getGuildConfig:()=>config,saveData:()=>{},
   onDeliveryRecord:async (_id, record)=>persistedDeliveryRows.push(record),
   buildBattleReportPayload:async()=>({totalFame:500000,totalKills:2,totalDeaths:0,
@@ -1174,19 +1177,23 @@ test('Discord delivery Ack stays in independent outbox after 503 and is retried 
  });
  try{
   await integration.tick();
-  assert.equal(sends,1);
-  assert.equal(postedAcks,1);
-  assert.equal(config.battleboardState.deliveryAckOutbox.length,1);
+  assert.equal(sends,2);
+  assert.ok(postedAcks>=1 && postedAcks<=2);
+  const attemptsBeforeRetry=postedAcks;
+  assert.equal(config.battleboardState.deliveryAckOutbox.length,2);
   assert.equal(config.battleboardState.delivered[0].status,'sent');
   ackReady=true;
-  config.battleboardState.deliveryAckOutbox[0].nextAttemptAt=new Date(Date.now()-1).toISOString();
+  for(const item of config.battleboardState.deliveryAckOutbox) item.nextAttemptAt=new Date(Date.now()-1).toISOString();
   integration.stop();await integration.tick();
-  assert.equal(postedAcks,2);
+  assert.equal(postedAcks,attemptsBeforeRetry+2);
+  assert.deepEqual(acknowledgedParts.sort(),[1,2]);
   assert.equal(config.battleboardState.deliveryAckOutbox.length,0);
-  assert.equal(sends,1,'ack retry must never resend Discord report');
+  assert.equal(sends,2,'ack retry must never resend Discord report');
   // Simulate compact bot_state on restart: hydrate delivery from Supabase rows.
   const durableRow=persistedDeliveryRows.findLast(record=>record.status==='sent');
-  assert.ok(durableRow && durableRow.messageIds?.[0]==='1570899488606781440');
+  assert.ok(durableRow);
+  assert.deepEqual(durableRow.messageIds,['1570899488606781440','1570899488606781441']);
+  assert.equal(durableRow.partsTotal,2);
   config.battleboardState.delivered=[JSON.parse(JSON.stringify(durableRow))];
   config.battleboardState.eventCursor={after:new Date(now-30000).toISOString(),afterBattleId:'0'};
   eventCalls=0;
@@ -1198,7 +1205,7 @@ test('Discord delivery Ack stays in independent outbox after 503 and is retried 
   });
   try {
     await restarted.tick();
-    assert.equal(sends,1,'restored per-channel sent row must suppress duplicate after restart');
+    assert.equal(sends,2,'restored per-channel sent row must suppress duplicate after restart');
   } finally { restarted.stop(); }
  }finally{
   integration.stop();global.fetch=oldFetch;
