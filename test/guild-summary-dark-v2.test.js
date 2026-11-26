@@ -101,7 +101,7 @@ test('fallback sender keeps all weapon pages then Guild Summary; button only on 
     const code = source.slice(start, source.indexOf('const reportSentAtMs', start));
     const files = [{ name: 'weapons-1.png' }, { name: 'weapons-2.png' }, { name: 'guild-summary.png' }];
     const components = buildAutoBattleLinkComponents('[1](https://albiononline.com/en/killboard/battles/1)');
-    for (const reportFiles of [files, []]) {
+    for (const reportFiles of [files, files.slice(0, 1), []]) {
         const sent = [];
         await vm.runInNewContext('(async()=>{' + code + '})()', {
             reportFiles, firstPartComponents: components, alertText: 'Battle ID: 1',
@@ -111,24 +111,28 @@ test('fallback sender keeps all weapon pages then Guild Summary; button only on 
         assert.deepEqual(sent[0].components, components);
         assert.equal(sent[0].flags, 4);
         assert.doesNotMatch(sent[0].content, /https?:|\]\(/);
+        assert.equal(sent[0].files, undefined);
+        assert.equal(sent.length, 1 + reportFiles.length);
         assert.deepEqual(sent.flatMap(p => p.files || []), reportFiles);
         assert.ok(sent.slice(1).every(p => !p.components && !p.content));
     }
 });
 
 test('Battleboard sender forwards the same first-part button without changing continuation order', async () => {
-    const start = integration.indexOf('if (files.length) {', integration.indexOf('async function deliver('));
+    const start = integration.indexOf('if (splitHeader) {', integration.indexOf('async function deliver('));
     const end = integration.indexOf("record.status = 'sent'", start);
     const code = integration.slice(start, end);
     const components = buildAutoBattleLinkComponents('[1](https://albiononline.com/en/killboard/battles/1)');
-    for (const files of [[{ name: 'weapons.png' }, { name: 'guild-summary.png' }], []]) {
+    for (const files of [[{ name: 'weapons.png' }, { name: 'guild-summary.png' }], [{ name: 'weapons.png' }], []]) {
         const sent = [];
         await vm.runInNewContext('(async()=>{' + code + '})()', {
             files, report: { payload: { components, content: 'fallback statistics' } },
-            record: { partsSent: 0 }, alertText: 'Battle ID: 1', sendPart: async (i, payload) => sent.push(payload)
+            splitHeader: true, record: { partsSent: 0 }, alertText: 'Battle ID: 1', sendPart: async (i, payload) => sent.push(payload)
         });
         assert.deepEqual(sent[0].components, components);
         assert.equal(sent[0].flags, 4);
+        assert.equal(sent[0].files, undefined);
+        assert.equal(sent.length, 1 + files.length);
         assert.deepEqual(sent.flatMap(p => p.files || []), files);
         assert.ok(sent.slice(1).every(p => !p.components && !p.content));
     }

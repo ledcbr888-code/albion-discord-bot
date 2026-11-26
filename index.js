@@ -4081,7 +4081,7 @@ async function checkAutoBattlesForGuild() {
                         formatEndDelay(officialBattle, Date.now());
                     const firstPartComponents = buildAutoBattleLinkComponents(autoBattleViewerLink(latestMatchId));
                     const reportFiles = Array.isArray(result.payload.files) ? result.payload.files : [];
-                    const totalDeliveryParts = Math.max(1, reportFiles.length);
+                    const totalDeliveryParts = 1 + reportFiles.length;
                     const sendStartedAt = Date.now();
                     let sentDeliveryParts = 0;
 
@@ -4128,17 +4128,17 @@ async function checkAutoBattlesForGuild() {
                     };
 
                     if (reportFiles.length > 0) {
-                        // Keep the existing delivery order: alert + first image, then remaining images.
+                        // Put the direct viewer button immediately below the alert, before all images.
                         await sendReportPart(
-                            { content: alertText, files: [reportFiles[0]], components: firstPartComponents, flags: 4 },
-                            'ข้อความแจ้งเตือน + รูปที่ 1',
+                            { content: alertText, components: firstPartComponents, flags: 4 },
+                            'ข้อความแจ้งเตือน',
                             1
                         );
-                        for (let i = 1; i < reportFiles.length; i++) {
+                        for (let i = 0; i < reportFiles.length; i++) {
                             await sendReportPart(
                                 { files: [reportFiles[i]] },
                                 'รูปที่ ' + (i + 1),
-                                i + 1
+                                i + 2
                             );
                         }
                     } else {
