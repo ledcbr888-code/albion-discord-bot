@@ -325,7 +325,8 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
 
   try {
     await integration.tick();
-    assert.equal(sent.length, 2, 'the later ready Battle should send both report parts during the first poll');
+    assert.equal(sent.length, 3, 'the later ready Battle sends header then both images during the first poll');
+    assert.equal(sent[0].files, undefined);
     assert.equal(sent[0].nonce, deliveryNonce('1002', channelId, 1));
     assert.equal(sent[0].enforceNonce, true);
     assert.doesNotMatch(sent[0].content, /🆔 Battle ID:/);
@@ -340,20 +341,26 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
     assert.equal(sent[1].content, undefined, 'continuation must have no separator text');
     assert.equal(sent[1].components, undefined, 'button belongs only to first part');
     assert.equal(sent[1].files.length, 1, 'continuation must retain image');
+    assert.equal(sent[2].nonce, deliveryNonce('1002', channelId, 3));
+    assert.deepEqual(sent[2].files, [Buffer.from('image-part-2')]);
+    assert.equal(sent[2].components, undefined);
     assert.doesNotMatch(sent[0].content, /Fame รวมของผู้ที่ติดตาม|Fame ตามเงื่อนไขแต่ละ Guild/);
     assert.equal(config.battleboardState.eventCursor.afterBattleId, '1002');
     assert.deepEqual(config.battleboardState.pendingEvents.map(entry => entry.battleId), ['1001']);
 
     integration.stop();
     await integration.tick();
-    assert.equal(sent.length, 4, 'the earlier Battle should send both parts after its detail becomes ready');
-    assert.equal(sent[2].nonce, deliveryNonce('1001', channelId, 1));
-    assert.doesNotMatch(sent[2].content, /🆔 Battle ID:/);
-    assert.match(sent[2].content, /🔗 Battle ID: 1001/);
-    assert.equal(sent[2].components[0].components[0].url, 'https://albiononline.com/en/killboard/battles/1001');
-    assert.equal(sent[3].nonce, deliveryNonce('1001', channelId, 2));
-    assert.equal(sent[3].content, undefined);
-    assert.equal(sent[3].files.length, 1);
+    assert.equal(sent.length, 6, 'the earlier Battle sends header and both images after its detail becomes ready');
+    assert.equal(sent[3].nonce, deliveryNonce('1001', channelId, 1));
+    assert.doesNotMatch(sent[3].content, /🆔 Battle ID:/);
+    assert.match(sent[3].content, /🔗 Battle ID: 1001/);
+    assert.equal(sent[3].components[0].components[0].url, 'https://albiononline.com/en/killboard/battles/1001');
+    assert.equal(sent[3].files, undefined);
+    assert.equal(sent[4].nonce, deliveryNonce('1001', channelId, 2));
+    assert.equal(sent[4].content, undefined);
+    assert.equal(sent[4].files.length, 1);
+    assert.equal(sent[5].nonce, deliveryNonce('1001', channelId, 3));
+    assert.deepEqual(sent[5].files, [Buffer.from('image-part-2')]);
     assert.equal(config.battleboardState.pendingEvents.length, 0);
     assert.equal(detailCalls.get('1001'), 2);
     assert.equal(detailCalls.get('1002'), 2);
@@ -365,7 +372,7 @@ test('a detail-pending Auto-Battle does not block later events and is retried', 
     assert.ok(capturedLogs.some(line => line.includes('สรุปเวลาแต่ละขั้นตอน') && line.includes('checked_at→บอทรับ=')));
     assert.ok(capturedLogs.some(line => line.includes('ประมวลผล Battle ที่ค้างเสร็จแล้ว') && line.includes('Retry ทั้งหมด=1')));
     assert.equal(capturedLogs.filter(line => line.includes('กำลังส่งรายงานส่วนที่') && line.includes('ไฟล์แนบ')).length, 4);
-    assert.equal(capturedLogs.filter(line => line.includes('ส่งรายงานส่วนที่') && line.includes('เข้า Discord สำเร็จ')).length, 4);
+    assert.equal(capturedLogs.filter(line => line.includes('ส่งรายงานส่วนที่') && line.includes('เข้า Discord สำเร็จ')).length, 6);
     assert.ok(capturedLogs.filter(line => line.includes('ส่งรายงานส่วนที่') && line.includes('เข้า Discord สำเร็จ'))
       .every(line => line.includes('ใช้เวลาส่ง=')), 'each sent file should report its own send duration');
     assert.equal(capturedLogs.filter(line => line.includes('ส่งรายงานครบทุกส่วนเข้า Discord สำเร็จ')).length, 2);

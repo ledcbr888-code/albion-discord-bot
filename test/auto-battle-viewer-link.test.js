@@ -27,7 +27,7 @@ test('all Auto-Battle viewer buttons target AlbionZvZ Asia, including Official f
         assert.equal(link,'['+id+']('+expected+')');
         const component=buildAutoBattleLinkComponents(link)[0].components[0];
         assert.equal(component.url,expected);
-        assert.equal(component.label,'View Battle · AlbionZvZ Asia');
+        assert.equal(component.label,'🔗 เปิด Battle บน AlbionZvZ Asia');
         assert.equal(component.style,5);
     }
 });

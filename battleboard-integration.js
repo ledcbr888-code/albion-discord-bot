@@ -495,8 +495,11 @@ function createBattleboardIntegration(deps = {}) {
     const prior = findDelivery(state, key);
     if (prior && prior.status === 'sent') return;
     const files = Array.isArray(report.payload && report.payload.files) ? report.payload.files : [];
-    const partsTotal = Math.max(1, files.length);
-    const record = prior || { key, battleId: String(battleId), channelId: String(channelId), status: 'sending', partsSent: 0 };
+    // Preserve the part numbering and nonces of any pre-upgrade in-flight report.
+    // New reports persist auditVersion 3 before their first Discord send.
+    const record = prior || { key, battleId: String(battleId), channelId: String(channelId), status: 'sending', partsSent: 0, auditVersion: 3 };
+    const splitHeader = record.auditVersion === 3;
+    const partsTotal = splitHeader ? 1 + files.length : Math.max(1, files.length);
     const reportAttemptStartedAtMs = Date.now();
     const discordSendThisRunStartedAtMs = reportAttemptStartedAtMs;
     if (!record.firstAttemptAt) record.firstAttemptAt = new Date(reportAttemptStartedAtMs).toISOString();
@@ -504,7 +507,7 @@ function createBattleboardIntegration(deps = {}) {
       record.eventCheckedAt = String(event.checked_at || event.checkedAt);
     }
     if (!Array.isArray(record.partResults)) record.partResults = [];
-    record.auditVersion = 2;
+    record.auditVersion = splitHeader ? 3 : 2;
     record.lastAttemptAt = new Date(reportAttemptStartedAtMs).toISOString();
     saveDelivery(state, record);
     await persistDeliveryRow(serverId, record);
@@ -528,10 +531,10 @@ function createBattleboardIntegration(deps = {}) {
       const partIndex = partNumber - 1;
       const partStartedAtMs = Date.now();
       const partStartedAt = new Date(partStartedAtMs).toISOString();
-      const fileDetails = getReportFileLogDetails(files[partIndex], partNumber);
+      const fileDetails = getReportFileLogDetails(payload.files?.[0], partNumber);
       const previousPart = record.partResults[partIndex] || {};
       const attemptNumber = Math.max(0, Number(previousPart.attempts) || 0) + 1;
-      const partLabel = files.length ? 'ไฟล์แนบ ' : 'ข้อความรายงาน ';
+      const partLabel = payload.files?.length ? 'ไฟล์แนบ ' : 'ข้อความรายงาน ';
       record.partResults[partIndex] = {
         ...previousPart,
         partNumber,
@@ -621,7 +624,20 @@ function createBattleboardIntegration(deps = {}) {
       }
     };
 
-    if (files.length) {
+    if (splitHeader) {
+      // Header and its direct link button must be sent before any attachment.
+      if ((Number(record.partsSent) || 0) < 1) {
+        await sendPart(1, {
+          content: files.length ? alertText : alertText + '\n' + String(report.payload && report.payload.content || ''),
+          components: report.payload.components || [], flags: 4,
+        });
+      }
+      for (let index = 0; index < files.length; index++) {
+        const partNumber = index + 2;
+        if ((Number(record.partsSent) || 0) >= partNumber) continue;
+        await sendPart(partNumber, { files: [files[index]] });
+      }
+    } else if (files.length) {
       if ((Number(record.partsSent) || 0) < 1) {
         await sendPart(1, { content: alertText, files: [files[0]],
           components: report.payload.components || [], flags: 4 });

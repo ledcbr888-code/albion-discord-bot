@@ -14,7 +14,7 @@ function buildAutoBattleLinkComponents(reportLink) {
     }
     return [{ type: 1, components: [{
         type: 2, style: 5,
-        label: primary ? 'View Battle · AlbionZvZ Asia' : 'Battle · Official Albion',
+        label: primary ? '🔗 เปิด Battle บน AlbionZvZ Asia' : 'Battle · Official Albion',
         url: match[2]
     }] }];
 }
