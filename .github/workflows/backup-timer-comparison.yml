@@ -1,0 +1,71 @@
+{
+  "name": "Backup timer comparison PR58 vs PR59",
+  "on": {
+    "push": {
+      "branches": [
+        "codex/pr59-backup-timer-audit-20261126"
+      ]
+    }
+  },
+  "permissions": {
+    "contents": "read"
+  },
+  "jobs": {
+    "compare": {
+      "runs-on": "ubuntu-24.04",
+      "container": {
+        "image": "node:${{ matrix.node }}-bookworm"
+      },
+      "timeout-minutes": 15,
+      "strategy": {
+        "fail-fast": false,
+        "matrix": {
+          "node": [
+            "24.19.0",
+            "26.13.0"
+          ]
+        }
+      },
+      "steps": [
+        {
+          "uses": "actions/checkout@v4",
+          "with": {
+            "ref": "6ce0f600205362c77fd769aac106c258d2e21812",
+            "path": "pr58",
+            "persist-credentials": false
+          }
+        },
+        {
+          "uses": "actions/checkout@v4",
+          "with": {
+            "ref": "79a733348d1b752f7d1e173420b5e43b8bbc1929",
+            "path": "pr59",
+            "persist-credentials": false
+          }
+        },
+        {
+          "name": "Install one shared exact dependency tree",
+          "run": "mkdir -p deps audit-results\ncp pr59/package.json pr59/package-lock.json deps/\ncd deps\nnpm ci --ignore-scripts --no-audit --no-fund\nnpm ls --depth=0 --json > ../audit-results/dependencies.json"
+        },
+        {
+          "name": "Run both original full test files five times",
+          "run": "python3 - <<'PY'\nimport hashlib\nimport json\nimport os\nimport pathlib\nimport platform\nimport re\nimport subprocess\nimport time\n\nROOT = pathlib.Path.cwd()\nOUT = ROOT / 'audit-results'\nOUT.mkdir(exist_ok=True)\nREFS = {'pr58': '6ce0f600205362c77fd769aac106c258d2e21812',\n        'pr59': '79a733348d1b752f7d1e173420b5e43b8bbc1929'}\nCASES = ['continuous save activity does not postpone the first scheduled backup',\n         'frequent updates do not postpone a scheduled retry after a failed backup']\n\ndef sha(data):\n    return hashlib.sha256(data).hexdigest()\n\ndef block(source, name):\n    start = source.index(\"test('\" + name + \"'\")\n    end = source.find('\\ntest(', start + 1)\n    return source[start:end if end >= 0 else len(source)]\n\nenv = os.environ.copy()\nenv['NODE_PATH'] = str(ROOT / 'deps/node_modules')\nnode = subprocess.check_output(['which', 'node'], text=True).strip()\nruntime = json.loads(subprocess.check_output([node, '-e', \"console.log(JSON.stringify({node:process.version,versions:process.versions,platform:process.platform,arch:process.arch,release:require('node:os').release()}))\"], text=True))\nhashes, cases = {}, {}\nfor label, expected in REFS.items():\n    checkout = ROOT / label\n    actual = subprocess.check_output(['git', '-C', str(checkout), 'rev-parse', 'HEAD'], text=True).strip()\n    assert actual == expected\n    hashes[label] = {name: sha((checkout / name).read_bytes()) for name in\n                     ['tracking-backup-scheduler.js', 'package.json', 'package-lock.json']}\n    source = (checkout / 'test/battleboard-integration.test.js').read_text()\n    cases[label] = {case: sha(block(source, case).encode()) for case in CASES}\nassert hashes['pr58'] == hashes['pr59']\nassert cases['pr58'] == cases['pr59']\ndependencies = {}\nfor name in json.loads((ROOT / 'pr59/package.json').read_text())['dependencies']:\n    data = (ROOT / 'deps/node_modules' / name / 'package.json').read_bytes()\n    dependencies[name] = {'version': json.loads(data)['version'], 'packageJsonSha256': sha(data)}\nmetadata = {'refs': REFS, 'runtime': runtime, 'osRelease': pathlib.Path('/etc/os-release').read_text(),\n            'nodeExecutable': node, 'nodeExecutableSha256': sha(pathlib.Path(node).read_bytes()),\n            'dependencies': dependencies, 'unchangedSourceHashes': hashes, 'unchangedCaseHashes': cases,\n            'method': 'Five paired rounds, alternating order; full original integration file; no filters, fake timers, test edits, or resolution changes.'}\n(OUT / 'linux-environment.json').write_text(json.dumps(metadata, indent=2))\nprint('AUDIT_ENVIRONMENT ' + json.dumps(metadata), flush=True)\nresults = []\nfor round_number in range(1, 6):\n    order = ['pr58', 'pr59'] if round_number % 2 else ['pr59', 'pr58']\n    for label in order:\n        start = time.time()\n        run = subprocess.run([node, '--test', '--test-concurrency=1', '--test-reporter=tap', 'test/battleboard-integration.test.js'],\n                             cwd=ROOT / label, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=120)\n        text = run.stdout.decode('utf-8', errors='replace')\n        filename = f'linux-round-{round_number}-{label}.tap'\n        (OUT / filename).write_text(text + '\\n# STDERR\\n' + run.stderr.decode('utf-8', errors='replace'))\n        case_results = {}\n        for case in CASES:\n            match = re.search(r'^(not ok|ok) \\d+ - ' + re.escape(case) + r'\\s*$', text, re.M)\n            if not match:\n                case_results[case] = {'pass': False, 'diagnostic': 'MISSING RESULT; see full TAP'}\n                continue\n            tail = text[match.end():]\n            end = re.search(r'^(?:# Subtest:|(?:not ok|ok) \\d+ - |1\\.\\.)', tail, re.M)\n            case_results[case] = {'pass': match.group(1) == 'ok', 'diagnostic': tail[:end.start() if end else len(tail)].strip()}\n        result = {'round': round_number, 'commit': label, 'order': order, 'returncode': run.returncode,\n                  'durationSeconds': round(time.time() - start, 3), 'cases': case_results, 'log': filename,\n                  'summary': re.findall(r'^# (?:tests|pass|fail|cancelled|skipped|todo) .*$', text, re.M)}\n        results.append(result)\n        (OUT / 'linux-results.json').write_text(json.dumps(results, indent=2))\n        print('AUDIT_RESULT ' + json.dumps(result), flush=True)\nfor label in REFS:\n    subprocess.run(['git', '-C', str(ROOT / label), 'diff', '--exit-code'], check=True)\nsummary = {label: {case: {'pass': sum(r['cases'][case]['pass'] for r in results if r['commit'] == label),\n                         'fail': sum(not r['cases'][case]['pass'] for r in results if r['commit'] == label)}\n                   for case in CASES} for label in REFS}\n(OUT / 'linux-summary.json').write_text(json.dumps(summary, indent=2))\nprint('AUDIT_SUMMARY ' + json.dumps(summary), flush=True)\nraise SystemExit(0 if all(r['returncode'] == 0 and all(x['pass'] for x in r['cases'].values()) for r in results) else 1)\n\nPY"
+        },
+        {
+          "name": "Observe real 4ms timers without changing tests",
+          "if": "always()",
+          "run": "cat > /tmp/backup-timer-probe.cjs <<'JS'\n'use strict';\nconst fs = require('node:fs');\nconst path = require('node:path');\nconst { performance } = require('node:perf_hooks');\nconst wait = ms => new Promise(resolve => setTimeout(resolve, ms));\n\n(async () => {\n  const output = process.argv[2];\n  const samples = [];\n  for (let i = 0; i < 100; i++) {\n    const start = performance.now();\n    await wait(4);\n    samples.push(performance.now() - start);\n  }\n  const sorted = [...samples].sort((a, b) => a - b);\n  const result = { node: process.version, platform: process.platform, requestedMs: 4,\n    count: samples.length, minMs: sorted[0], medianMs: sorted[50], maxMs: sorted[99], samplesMs: samples };\n  fs.writeFileSync(output, JSON.stringify(result, null, 2));\n  console.log('TIMER_PROBE ' + JSON.stringify(result));\n})().catch(error => { console.error(error); process.exitCode = 1; });\n\nJS\nnode /tmp/backup-timer-probe.cjs audit-results/timer-probe.json"
+        },
+        {
+          "uses": "actions/upload-artifact@v4",
+          "if": "always()",
+          "with": {
+            "name": "backup-timers-linux-node-${{ matrix.node }}",
+            "path": "audit-results/",
+            "retention-days": 14
+          }
+        }
+      ]
+    }
+  }
+}
